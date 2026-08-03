@@ -91,6 +91,38 @@ class DecorationLatticeTest {
                 checked, reachable, solvedBoth);
     }
 
+    /**
+     * {@code decorationSeedOf} inlines the population-seed formula instead of driving
+     * {@code JavaRandom.setDecorationSeed}, so that it costs no LCG work per call. That
+     * makes {@code solve}'s own re-check a tautology if the inlined copy is wrong, and
+     * this is the only thing standing between the two.
+     */
+    @Test
+    void inlinedFormulaAgreesWithTheRealSetDecorationSeed() {
+        JavaRandom rng = new JavaRandom(4242L);
+        int checked = 0;
+        for (int s = 0; s < 200; s++) {
+            long worldSeed = ((long) rng.nextInt() << 32) ^ rng.nextInt();
+            DecorationLattice lattice = new DecorationLattice(worldSeed);
+            for (int k = 0; k < 25; k++) {
+                // Includes the far-out coordinates the reverse search actually uses,
+                // where 16*cx overflows an int if anything is done carelessly.
+                int cx = rng.nextInt(2 * DecorationLattice.BORDER_CHUNKS + 1)
+                        - DecorationLattice.BORDER_CHUNKS;
+                int cz = rng.nextInt(2 * DecorationLattice.BORDER_CHUNKS + 1)
+                        - DecorationLattice.BORDER_CHUNKS;
+                long real = new JavaRandom().setDecorationSeed(worldSeed, cx * 16, cz * 16)
+                        & ((1L << 48) - 1);
+                assertEquals(real, lattice.decorationSeedOf(cx, cz),
+                        "inlined formula disagrees at seed " + worldSeed
+                                + " chunk " + cx + "," + cz);
+                checked++;
+            }
+        }
+        System.out.printf("DecorationLattice: inlined formula matches setDecorationSeed "
+                + "on %d (seed, chunk) pairs%n", checked);
+    }
+
     @Test
     void rejectsTargetsWhoseLowBitsCannotMatch() {
         long worldSeed = 1L;
