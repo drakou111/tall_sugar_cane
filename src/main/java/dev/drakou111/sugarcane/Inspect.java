@@ -56,6 +56,13 @@ public final class Inspect {
         worker.prepare(seed);
         RegionSearcher.traceChunkX = chunkX;
         RegionSearcher.traceChunkZ = chunkZ;
+        // Centre the box on the target and drop the search-only filters, so a
+        // position anywhere in the world can be looked at - not just one within
+        // `radius` of the origin.
+        RegionSearcher.centreOverrideX = chunkX;
+        RegionSearcher.centreOverrideZ = chunkZ;
+        RegionSearcher.relaxFilters = true;
+        RegionSearcher.allBiomes = true;
         // Regions are aligned to multiples of REGION starting from -radius, and the
         // searcher uses radius 32, so the grid is offset by -32.
         int originX = alignRegion(chunkX, radius);
@@ -65,6 +72,16 @@ public final class Inspect {
         worker.searchRegion(originX, originZ);
 
         ArrayWorld world = worker.world;
+        // y=200 is air in every generated chunk, so SOLID there means this chunk was
+        // never built: either it fell outside the region window, or a filter skipped
+        // it (an unimplemented surface builder, or a biome with no cane feature).
+        if (world.getBlock(tx, 200, tz) == Blocks.SOLID) {
+            System.out.println("\nWARNING: nothing was generated at this position - "
+                    + "the slice below is the out-of-window SOLID, not terrain. "
+                    + "Biome " + dev.drakou111.sugarcane.gen.BiomeIds.noiseGen(
+                            worker.biomeSource(), chunkX * 4 + 2, chunkZ * 4 + 2)
+                    + " at the chunk centre.");
+        }
         System.out.printf("%ncane columns within 6 blocks:%n");
         boolean any = false;
         for (int x = tx - 6; x <= tx + 6; x++) {

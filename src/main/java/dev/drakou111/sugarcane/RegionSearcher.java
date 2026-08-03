@@ -111,6 +111,25 @@ public final class RegionSearcher {
     static int traceChunkX = Integer.MIN_VALUE;
     static int traceChunkZ = Integer.MIN_VALUE;
 
+    /**
+     * Centre the box on this chunk instead of 0,0. Without it a position far from
+     * the origin is outside the box at "keep the find near the origin" below, so no
+     * chunk is searchable, nothing is generated, and every read comes back as the
+     * out-of-window SOLID — which reads as solid terrain rather than as an error.
+     * Both {@link Inspect} and {@link ReverseSearcher} work far from the origin,
+     * since the world border allows chunk coordinates out to ±1,874,999.
+     */
+    static int centreOverrideX = Integer.MIN_VALUE;
+    static int centreOverrideZ = Integer.MIN_VALUE;
+
+    /**
+     * {@link Inspect} only: drop the filters that exist to make a <em>search</em>
+     * cheap rather than correct, so any position can be looked at. A search must
+     * leave this alone — the mineshaft skip in particular is there because those
+     * chunks are simulated wrongly, not because they are unpromising.
+     */
+    static boolean relaxFilters = false;
+
     private RegionSearcher() {
     }
 
@@ -126,7 +145,7 @@ public final class RegionSearcher {
      * motion-blocking block above sea level, so the MOTION_BLOCKING heightmap is
      * exactly 63 and the placement draws are reproducible.
      */
-    private static boolean isSearchableOcean(int biome) {
+    static boolean isSearchableOcean(int biome) {
         return biome == 0 || biome == 24 || biome == 44 || biome == 45
                 || biome == 46 || biome == 47 || biome == 48 || biome == 49;
     }
@@ -451,7 +470,10 @@ public final class RegionSearcher {
             dev.drakou111.sugarcane.gen.LayerCaches.enlarge(this.biomes);
             this.terrain = new Terrain(biomes);
             spawnKnown = false;
-            if (centreOnSpawn) {
+            if (centreOverrideX != Integer.MIN_VALUE) {
+                centreChunkX = centreOverrideX;
+                centreChunkZ = centreOverrideZ;
+            } else if (centreOnSpawn) {
                 spawnPacked = SpawnFinder.spawnChunk(biomes, seed);
                 spawnKnown = true;
                 centreChunkX = SpawnFinder.chunkX(spawnPacked);
@@ -460,6 +482,11 @@ public final class RegionSearcher {
                 centreChunkX = 0;
                 centreChunkZ = 0;
             }
+        }
+
+        /** For {@link Inspect}, which reports the biome when nothing generated. */
+        OverworldBiomeSource biomeSource() {
+            return biomes;
         }
 
         private long spawnChunk() {
@@ -484,6 +511,24 @@ public final class RegionSearcher {
                     terrain.clearCaches();
                 }
             }
+        }
+
+        /**
+         * Generates and searches exactly one chunk, wherever in the world it is.
+         * {@link ReverseSearcher} arrives at isolated chunks rather than boxes, so
+         * there is nothing to amortise a region over: the eight neighbours are
+         * generated because the feature reaches ±4 blocks into them and their dirt
+         * blobs leak back, and the chunk itself is the only one searched.
+         *
+         * <p>Requires a worker built with radius 0, which makes the box exactly this
+         * chunk and the region the minimum 6 — the candidate then sits at local 1,1,
+         * off the region border that is never searched.
+         */
+        void searchOneChunk(int chunkX, int chunkZ) {
+            centreChunkX = chunkX;
+            centreChunkZ = chunkZ;
+            searchRegion(chunkX - 1, chunkZ - 1);
+            terrain.clearCaches();
         }
 
         private int regionIndex(int localChunkX, int localChunkZ) {
@@ -549,7 +594,7 @@ public final class RegionSearcher {
                     // mineshaft start, for 19% of the chunks. Missing air there
                     // flips cane tries and desynchronises the whole chunk's stream,
                     // so those chunks are skipped rather than searched wrongly.
-                    if (mineshaftNear(cx, cz)) {
+                    if (!relaxFilters && mineshaftNear(cx, cz)) {
                         continue;
                     }
                     boolean ok = true;

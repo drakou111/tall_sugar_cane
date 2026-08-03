@@ -1,0 +1,403 @@
+package dev.drakou111.sugarcane.gen;
+
+import dev.drakou111.sugarcane.rng.JavaRandom;
+
+import java.util.concurrent.atomic.AtomicLong;
+
+/**
+ * Measures <b>q</b>: the fraction of decoration seeds whose cane RNG could build a
+ * run of a given height <em>somewhere</em> in the chunk, with no terrain at all.
+ *
+ * <p>Why this number and not {@code Main}'s: q is exactly the speedup available to
+ * a reversal search. Reversal enumerates the seeds that pass this test and only
+ * then generates terrain, so it generates 1/q times fewer chunks than a brute force
+ * that pays for terrain first. {@code StackPrefilter} measures the same quantity for
+ * a mere stack (19%, FINDINGS 6u) which is why 6w concludes reversal is worthless —
+ * that figure is for height 5.
+ *
+ * <p>The test is a necessary condition, deliberately loose, so q is an upper bound
+ * and 1/q a lower bound on the speedup:
+ * <ul>
+ *   <li>every {@code nextInt} is one LCG step and the offsets are fixed (3 per
+ *       invocation, then 6 per try), so the stream can be laid out flat. The only
+ *       terrain-dependent part is that a <em>successful</em> placement draws two
+ *       more for the height, shifting everything after it — enumerated here as an
+ *       independent per-column shift rather than tracked;</li>
+ *   <li>the y-spread is 0, so all 20 tries of one invocation share a y and the
+ *       columns of a chain must come from different invocations;</li>
+ *   <li>a column stands on the previous one, so its y is pinned to
+ *       {@code y + height} exactly, height being the two draws after the try that
+ *       succeeded.</li>
+ * </ul>
+ *
+ * <p>Only upward chains are counted. {@code ColumnPlacer} overwrites upward
+ * unconditionally, so a column placed lower and later can merge with one above it
+ * and make a longer run — but it needs its own soil and its own water, which is a
+ * second terrain coincidence, and the confirmed 8-tall at -24848077,21,18720986 is
+ * a plain 4+4 upward chain.
+ */
+public final class ChainPrefilter {
+
+    private static final int TRIES = 20;
+    private static final int DRAWS_PER_TRY = 6;
+    private static final int DRAWS_PER_INVOCATION = 3 + TRIES * DRAWS_PER_TRY;
+    private static final int SUCCESS_DRAWS = 2;
+
+    /** The heightmap over open ocean: y is drawn from nextInt(2 * 63). */
+    private static final int DOUBLED_HEIGHTMAP = 63 * 2;
+
+    /** Cane stands between the lava layer and just above the water surface. */
+    private static final int Y_FLOOR = 11;
+    private static final int Y_CEIL = 64;
+
+    /**
+     * Default band for the <em>base</em> of a chain, from the measured depth of real
+     * stackable spots: 2,847 of them over 3.18M ocean chunks sit at soil y 8..51 with
+     * a mean of 23.3, and 87.8% of them between 12 and 34 (FINDINGS 6ac).
+     *
+     * <p>Narrowing the band is a straight trade of coverage for selectivity, and it
+     * pays because q scales with the band's width while the finds lost scale with the
+     * spot mass outside it. Cost per find goes as width/mass, which is 2.06x better
+     * here than accepting the whole column, and is flat across bands from 15 to 23
+     * wide — so this is the wide, forgiving end of the plateau rather than the peak.
+     * Upper columns of a chain are not restricted; only where it starts.
+     */
+    public static final int DEFAULT_BASE_MIN_Y = 13;
+    public static final int DEFAULT_BASE_MAX_Y = 35;
+
+    /**
+     * Shifts enumerated per column, in draws. Each earlier successful placement
+     * costs two. Four values covers the confirmed find on seed 1500050556, which
+     * needs base shift 0 with top shift 4.
+     */
+    private static final int[] SHIFTS = {0, 2, 4, 6};
+
+    private final int count;
+    private final int baseMinY;
+    private final int baseMaxY;
+    private final int capacity;
+    private final int[] draws;
+
+    /** Flattened candidate columns for one seed: x, z, y, height, invocation. */
+    private final int[] cx;
+    private final int[] cz;
+    private final int[] cy;
+    private final int[] ch;
+    private final int[] cn;
+    private int candidates;
+
+    /**
+     * Chains found by {@link #collectChains}, packed by {@link #pack}. More than this
+     * many and the caller is told to accept without testing, which keeps the filter
+     * sound at the cost of a little selectivity.
+     */
+    public static final int MAX_CHAINS = 32;
+
+    private final long[] chains = new long[MAX_CHAINS];
+    private int chainCount;
+    private boolean chainOverflow;
+    private final int[] path = new int[8];
+    private int wantedHeight;
+
+    public ChainPrefilter(int count) {
+        this(count, DEFAULT_BASE_MIN_Y, DEFAULT_BASE_MAX_Y);
+    }
+
+    /**
+     * @param baseMinY lowest y a chain may start at, inclusive
+     * @param baseMaxY highest y a chain may start at, inclusive. Pass the full
+     *                 {@code 11..64} to measure q without the depth band.
+     */
+    public ChainPrefilter(int count, int baseMinY, int baseMaxY) {
+        this.count = count;
+        this.baseMinY = baseMinY;
+        this.baseMaxY = baseMaxY;
+        this.capacity = count * DRAWS_PER_INVOCATION + SHIFTS[SHIFTS.length - 1] + 16;
+        this.draws = new int[capacity];
+        int max = count * SHIFTS.length * TRIES;
+        this.cx = new int[max];
+        this.cz = new int[max];
+        this.cy = new int[max];
+        this.ch = new int[max];
+        this.cn = new int[max];
+    }
+
+    /** @return the tallest run this seed's draws could chain together, ignoring terrain */
+    public int tallestPossible(long decorationSeed, int featureIndex) {
+        buildCandidates(decorationSeed, featureIndex);
+        int best = 0;
+        for (int i = 0; i < candidates; i++) {
+            // Only the start of a chain is restricted to the band where real spots are.
+            if (cy[i] < baseMinY || cy[i] > baseMaxY) {
+                continue;
+            }
+            best = Math.max(best, chainFrom(i, 0));
+        }
+        return best;
+    }
+
+    /** Every column any try could place, over all four shift assumptions. */
+    private void buildCandidates(long decorationSeed, int featureIndex) {
+        JavaRandom random = new JavaRandom();
+        random.setFeatureSeed(decorationSeed, featureIndex, SugarCaneFeature.VEGETAL_DECORATION);
+        for (int i = 0; i < capacity; i++) {
+            draws[i] = random.nextInt();
+        }
+
+        candidates = 0;
+        for (int n = 0; n < count; n++) {
+            for (int shift : SHIFTS) {
+                int base = n * DRAWS_PER_INVOCATION + shift;
+                if (base + 2 >= capacity) {
+                    continue;
+                }
+                // Candidates are generated over the whole legal column, not just the
+                // base band: an 8-tall run starting at y=35 has its upper column at
+                // y=39, and dropping those would break the chain rather than narrow it.
+                int y = bounded(draws[base + 2], DOUBLED_HEIGHTMAP);
+                if (y < Y_FLOOR || y > Y_CEIL) {
+                    continue;
+                }
+                int originX = bounded(draws[base], 16);
+                int originZ = bounded(draws[base + 1], 16);
+                for (int i = 0; i < TRIES; i++) {
+                    int off = base + 3 + i * DRAWS_PER_TRY;
+                    if (off + DRAWS_PER_TRY + 1 >= capacity) {
+                        break;
+                    }
+                    // The height is drawn immediately after the try that succeeded,
+                    // so it sits where the next try's draws would have been.
+                    int after = off + DRAWS_PER_TRY;
+                    cx[candidates] = originX + bounded(draws[off], 5) - bounded(draws[off + 1], 5);
+                    cz[candidates] = originZ + bounded(draws[off + 4], 5) - bounded(draws[off + 5], 5);
+                    cy[candidates] = y;
+                    ch[candidates] = 2 + bounded(draws[after + 1], bounded(draws[after], 3) + 1);
+                    cn[candidates] = n;
+                    candidates++;
+                }
+            }
+        }
+    }
+
+    /**
+     * The chains that reach {@code minHeight}, as positions rather than a height, so
+     * a caller can ask the terrain about them. Each is one (x, z) relative to the
+     * chunk origin plus the base y of every column in it — and every one of those
+     * bases has to be air, which is what makes a cheap terrain test possible.
+     *
+     * <p>Records the <em>shortest</em> chain that reaches the height rather than the
+     * tallest, because fewer columns means fewer positions required to be air, which
+     * is the permissive direction. Duplicates are common — the four shift
+     * assumptions usually rediscover the same geometry — and are dropped.
+     *
+     * @return number of chains, or {@link #MAX_CHAINS} with {@link #chainsOverflowed}
+     *         set, in which case the caller must accept without testing
+     */
+    public int collectChains(long decorationSeed, int featureIndex, int minHeight) {
+        buildCandidates(decorationSeed, featureIndex);
+        chainCount = 0;
+        chainOverflow = false;
+        wantedHeight = minHeight;
+        for (int i = 0; i < candidates && !chainOverflow; i++) {
+            if (cy[i] < baseMinY || cy[i] > baseMaxY) {
+                continue;
+            }
+            collect(i, 0, 0);
+        }
+        return chainCount;
+    }
+
+    /** True when there were too many chains to enumerate; accept without testing. */
+    public boolean chainsOverflowed() {
+        return chainOverflow;
+    }
+
+    public long chain(int index) {
+        return chains[index];
+    }
+
+    private void collect(int i, int depth, int total) {
+        path[depth] = i;
+        int newTotal = total + ch[i];
+        if (newTotal >= wantedHeight) {
+            record(depth + 1);
+            return;     // shortest sufficient chain; a longer one only adds requirements
+        }
+        if (depth + 1 >= 4) {
+            return;
+        }
+        int wantedY = cy[i] + ch[i];
+        if (wantedY > Y_CEIL) {
+            return;
+        }
+        for (int j = 0; j < candidates; j++) {
+            if (cn[j] <= cn[i] || cy[j] != wantedY || cx[j] != cx[i] || cz[j] != cz[i]) {
+                continue;
+            }
+            collect(j, depth + 1, newTotal);
+            if (chainOverflow) {
+                return;
+            }
+        }
+    }
+
+    private void record(int columns) {
+        int first = path[0];
+        long packed = pack(cx[first], cz[first], columns);
+        for (int i = 0; i < chainCount; i++) {
+            if (chains[i] == packed) {
+                return;
+            }
+        }
+        if (chainCount == MAX_CHAINS) {
+            chainOverflow = true;
+            return;
+        }
+        chains[chainCount++] = packed;
+    }
+
+    /**
+     * x and z are chunk-relative and span -4..19, since an origin in 0..15 is offset
+     * by up to 4 either way. y is 11..64. Five, five, three and four sevens.
+     */
+    private long pack(int x, int z, int columns) {
+        long packed = (long) (x + 4) | (long) (z + 4) << 5 | (long) columns << 10;
+        for (int i = 0; i < columns; i++) {
+            packed |= (long) cy[path[i]] << (13 + 7 * i);
+        }
+        return packed;
+    }
+
+    public static int chainX(long chain) {
+        return (int) (chain & 31) - 4;
+    }
+
+    public static int chainZ(long chain) {
+        return (int) (chain >>> 5 & 31) - 4;
+    }
+
+    public static int chainColumns(long chain) {
+        return (int) (chain >>> 10 & 7);
+    }
+
+    /** Base y of column {@code i}, every one of which has to be air. */
+    public static int chainBaseY(long chain, int i) {
+        return (int) (chain >>> (13 + 7 * i) & 127);
+    }
+
+    /**
+     * Tallest run starting at candidate {@code i}. Depth-limited: four columns of
+     * the minimum height 2 already reach 8, and nothing here needs more.
+     */
+    private int chainFrom(int i, int depth) {
+        int height = ch[i];
+        if (depth >= 4) {
+            return height;
+        }
+        int wantedY = cy[i] + height;
+        if (wantedY > Y_CEIL) {
+            return height;
+        }
+        int extra = 0;
+        for (int j = 0; j < candidates; j++) {
+            if (cn[j] <= cn[i] || cy[j] != wantedY || cx[j] != cx[i] || cz[j] != cz[i]) {
+                continue;
+            }
+            extra = Math.max(extra, chainFrom(j, depth + 1));
+        }
+        return height + extra;
+    }
+
+    /**
+     * {@code Random.nextInt(bound)} from a raw {@code next(32)}: {@code next(31)} is
+     * the same step shifted one bit further. The rejection retry is ignored, which
+     * can only cause a false accept.
+     */
+    private static int bounded(int raw, int bound) {
+        int bits = raw >>> 1;
+        if ((bound & -bound) == bound) {
+            return (int) ((bound * (long) bits) >> 31);
+        }
+        return bits % bound;
+    }
+
+    /**
+     * The only soundness test available: the confirmed 8-tall at
+     * -24848077,21,18720986 on seed -7585781829663227268. Its chunk is -1553005,
+     * 1170061, decoration seed 72846194777308, biome 46 (cold_ocean) so count 10 and
+     * feature index 5. A filter that rejects it would silently discard real finds —
+     * which is exactly the bug FINDINGS 6u caught in the first prefilter, and the
+     * aggregate acceptance rate gave no hint of it.
+     */
+    private static void checkConfirmedFind() {
+        long decorationSeed = 72846194777308L;
+        int tallest = new ChainPrefilter(SugarCaneFeature.COUNT_DEFAULT)
+                .tallestPossible(decorationSeed, 5);
+        System.out.printf("confirmed 8-tall find (decoration seed %d, index 5): "
+                        + "filter says %d -> %s%n%n",
+                decorationSeed, tallest,
+                tallest >= 8 ? "ACCEPTED" : "REJECTED, the filter is unsound");
+    }
+
+    public static void main(String[] args) throws InterruptedException {
+        checkConfirmedFind();
+        long trials = args.length > 0 ? Long.parseLong(args[0]) : 1_000_000L;
+        int threads = args.length > 1 ? Integer.parseInt(args[1])
+                : Runtime.getRuntime().availableProcessors();
+        int count = args.length > 2 ? Integer.parseInt(args[2])
+                : SugarCaneFeature.COUNT_DEFAULT;
+        // "11 64" reproduces q without the depth band, which is what the 6ac table
+        // quotes; the defaults are the band the reverse search actually uses.
+        final int baseMinY = args.length > 3 ? Integer.parseInt(args[3]) : DEFAULT_BASE_MIN_Y;
+        final int baseMaxY = args.length > 4 ? Integer.parseInt(args[4]) : DEFAULT_BASE_MAX_Y;
+
+        AtomicLong[] hist = new AtomicLong[32];
+        for (int i = 0; i < hist.length; i++) {
+            hist[i] = new AtomicLong();
+        }
+        long start = System.nanoTime();
+        Thread[] pool = new Thread[threads];
+        long per = trials / threads;
+        for (int t = 0; t < threads; t++) {
+            final long from = t * per;
+            pool[t] = new Thread(() -> {
+                ChainPrefilter filter = new ChainPrefilter(count, baseMinY, baseMaxY);
+                long[] local = new long[hist.length];
+                for (long i = 0; i < per; i++) {
+                    long z = (from + i) * 0x9E3779B97F4A7C15L + 0x632BE59BD9B4E019L;
+                    z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L;
+                    z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL;
+                    z = (z ^ (z >>> 31)) & ((1L << 48) - 1);
+                    local[Math.min(filter.tallestPossible(z, 0), local.length - 1)]++;
+                }
+                for (int h = 0; h < local.length; h++) {
+                    if (local[h] != 0) {
+                        hist[h].addAndGet(local[h]);
+                    }
+                }
+            }, "chain-" + t);
+            pool[t].start();
+        }
+        for (Thread thread : pool) {
+            thread.join();
+        }
+
+        long total = 0;
+        for (AtomicLong a : hist) {
+            total += a.get();
+        }
+        double seconds = (System.nanoTime() - start) / 1e9;
+        System.out.printf("count=%d, base band y %d..%d, %d decoration seeds, "
+                        + "%.1f s (%.1f us/seed/thread)%n",
+                count, baseMinY, baseMaxY, total, seconds, seconds * threads * 1e6 / total);
+        System.out.println("tallest run the draws alone could chain, with no terrain:");
+        long tail = 0;
+        for (int h = hist.length - 1; h >= 2; h--) {
+            tail += hist[h].get();
+            if (tail > 0) {
+                System.out.printf("   %2d: %-12d   q(>=%2d) = %.4e%n",
+                        h, hist[h].get(), h, (double) tail / total);
+            }
+        }
+    }
+}

@@ -47,6 +47,15 @@ public final class Cli {
                             + "about 38% of the chunks per second. --update sets how often "
                             + "the progress line prints, in minutes (default 1).",
                     RegionSearcher::main),
+            new Command("reverse",
+                    "<minHeight> [threads] [targets] [firstSeed] [seedCount]",
+                    "Reverse search: choose the cane RNG first, then solve for the chunk "
+                            + "that has it. Builds a set of decoration seeds whose draws "
+                            + "could chain a tall enough column, then uses the decoration "
+                            + "seed lattice to turn each one into real coordinates inside "
+                            + "the world border. Worth it from height 7 up; below that use "
+                            + "`search`. Prints the same HIT lines.",
+                    ReverseSearcher::main),
             new Command("inspect",
                     "<seed> <x> <y> <z> [searchRadius]",
                     "Regenerate one region and dump what the simulator sees at a position, "
