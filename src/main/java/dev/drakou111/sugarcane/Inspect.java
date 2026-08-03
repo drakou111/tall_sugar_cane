@@ -53,16 +53,21 @@ public final class Inspect {
         int radius = args.length > 4 ? Integer.parseInt(args[4]) : 32;
         RegionSearcher.Stats stats = new RegionSearcher.Stats();
         RegionSearcher.Worker worker = new RegionSearcher.Worker(5, false, 0, stats, radius);
-        worker.prepare(seed);
         RegionSearcher.traceChunkX = chunkX;
         RegionSearcher.traceChunkZ = chunkZ;
         // Centre the box on the target and drop the search-only filters, so a
         // position anywhere in the world can be looked at - not just one within
         // `radius` of the origin.
+        //
+        // These have to be set BEFORE prepare(), which is what reads them. Setting
+        // them after left the centre at 0,0, so the box check rejected every chunk
+        // and nothing was generated - which looks identical to an unsupported biome
+        // and is invisible near spawn, where 0,0 is the right centre anyway.
         RegionSearcher.centreOverrideX = chunkX;
         RegionSearcher.centreOverrideZ = chunkZ;
         RegionSearcher.relaxFilters = true;
         RegionSearcher.allBiomes = true;
+        worker.prepare(seed);
         // Regions are aligned to multiples of REGION starting from -radius, and the
         // searcher uses radius 32, so the grid is offset by -32.
         int originX = alignRegion(chunkX, radius);
