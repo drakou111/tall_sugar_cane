@@ -4,6 +4,7 @@ import dev.drakou111.sugarcane.gen.AirCarveProbe;
 import dev.drakou111.sugarcane.gen.BiomeCaneConfig;
 import dev.drakou111.sugarcane.gen.BiomeIds;
 import dev.drakou111.sugarcane.gen.ChainPrefilter;
+import dev.drakou111.sugarcane.gen.DirtBlobFilter;
 import dev.drakou111.sugarcane.gen.SugarCaneFeature;
 import dev.drakou111.sugarcane.rng.DecorationLattice;
 import dev.drakou111.sugarcane.validate.BiomeSourceValidator;
@@ -62,13 +63,39 @@ public final class ReverseSearcher {
     }
 
     /**
+     * Whether any chain's first column could stand on dirt from this chunk's own
+     * ORE_DIRT pass. Accepts without testing when the chains overflowed or the chain
+     * sits outside the chunk, where a neighbour's blobs would own the block and their
+     * decoration seed needs a world seed that is not chosen yet.
+     */
+    private static boolean soilPossible(ChainPrefilter filter, DirtBlobFilter dirt,
+            long decorationSeed, int chains) {
+        if (filter.chainsOverflowed()) {
+            return true;
+        }
+        for (int i = 0; i < chains; i++) {
+            long chain = filter.chain(i);
+            int x = ChainPrefilter.chainX(chain);
+            int z = ChainPrefilter.chainZ(chain);
+            int soilY = ChainPrefilter.chainBaseY(chain, 0) - 1;
+            if (x < 0 || x > 15 || z < 0 || z > 15) {
+                return true;
+            }
+            if (dirt.couldSupply(decorationSeed, x, soilY, z)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Whether any chain of this seed has all its column bases inside an AIR-step
      * carve. Accepts without testing when the chains overflowed, and when a chain's
      * position falls outside the walked chunk — both keep the filter sound.
      */
     private static boolean probeAccepts(ChainPrefilter chainFilter, AirCarveProbe probe,
-            boolean biomeOcean, long seed, long decorationSeed, int minHeight,
-            int[] chunk, RegionSearcher.Worker worker) {
+            DirtBlobFilter dirt, boolean biomeOcean, long seed, long decorationSeed,
+            int minHeight, int[] chunk, RegionSearcher.Worker worker) {
         int chains = chainFilter.collectChains(decorationSeed, OCEAN_INDEX, minHeight);
         if (chainFilter.chainsOverflowed() || chains == 0) {
             return true;
@@ -91,7 +118,15 @@ public final class ReverseSearcher {
             for (int c = 0; c < ChainPrefilter.chainColumns(chain) && all; c++) {
                 all = probe.isCarved(px, ChainPrefilter.chainBaseY(chain, c), pz);
             }
-            if (all) {
+            if (!all) {
+                continue;
+            }
+            // Same chain has to have its soil as well, not just its air. The target set
+            // guarantees *some* chain does; this pins it to this one, which is free.
+            int rx = ChainPrefilter.chainX(chain), rz = ChainPrefilter.chainZ(chain);
+            int soilY = ChainPrefilter.chainBaseY(chain, 0) - 1;
+            if (rx < 0 || rx > 15 || rz < 0 || rz > 15
+                    || dirt.couldSupply(decorationSeed, rx, soilY, rz)) {
                 return true;
             }
         }
@@ -143,6 +178,7 @@ public final class ReverseSearcher {
                         new RegionSearcher.Worker(minHeight, false, 0, stats, 0);
                 ChainPrefilter chainFilter = new ChainPrefilter(OCEAN_COUNT);
                 AirCarveProbe probe = new AirCarveProbe();
+                DirtBlobFilter dirtFilter = new DirtBlobFilter();
                 for (long seed = nextSeed.getAndIncrement(); seed < lastSeed;
                         seed = nextSeed.getAndIncrement()) {
                     DecorationLattice lattice = new DecorationLattice(seed);
@@ -185,8 +221,8 @@ public final class ReverseSearcher {
                         // it. The carver walks are pure RNG, so that question needs no
                         // terrain at all, and it rejects most candidates for the price
                         // of one walk instead of nine chunk generations.
-                        boolean pass = probeAccepts(chainFilter, probe, biomeOcean,
-                                seed, target, minHeight, chunk, worker);
+                        boolean pass = probeAccepts(chainFilter, probe, dirtFilter,
+                                biomeOcean, seed, target, minHeight, chunk, worker);
                         long t3 = System.nanoTime();
                         nsProbe.addAndGet(t3 - t2);
                         if (!pass) {
@@ -280,6 +316,7 @@ public final class ReverseSearcher {
             final long stride = t;
             pool[t] = new Thread(() -> {
                 ChainPrefilter filter = new ChainPrefilter(OCEAN_COUNT);
+                DirtBlobFilter dirt = new DirtBlobFilter();
                 long[] mine = new long[64];
                 int n = 0;
                 for (long i = stride; found.get() < targets; i += threads) {
@@ -289,7 +326,15 @@ public final class ReverseSearcher {
                     z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL;
                     z = (z ^ (z >>> 31)) & ((1L << 48) - 1);
                     tested.incrementAndGet();
-                    if (filter.tallestPossible(z, OCEAN_INDEX) < minHeight) {
+                    int chains = filter.collectChains(z, OCEAN_INDEX, minHeight);
+                    if (chains == 0 && !filter.chainsOverflowed()) {
+                        continue;
+                    }
+                    // The chain's first column needs soil, and 98% of real spots stand
+                    // on ore-blob dirt seeded from this same decoration seed. Asking
+                    // here is free: it costs target-set build time, which amortises,
+                    // and buys 7.2x selectivity at search time.
+                    if (!soilPossible(filter, dirt, z, chains)) {
                         continue;
                     }
                     if (n == mine.length) {

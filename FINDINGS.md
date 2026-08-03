@@ -2077,3 +2077,76 @@ than known.
    one trades coverage. Measure before adopting.
 3. The biome gate is now the largest single cost at 110 us of 202, and it is one
    cache-cold pyramid build per candidate. Nothing obvious is left in it.
+
+## 6af. The soil condition is also RNG: another 5.9x
+
+Same move as the depth band in 6ad, applied to the other terrain requirement. A chain's
+first column needs soil under its base, and 98% of real spots stand on `ORE_DIRT` blob
+dirt (6i). The blobs run from the **same decoration seed as the cane** —
+`setFeatureSeed(ds, 0, 6)` against the cane's `(ds, 5, 8)` — so "could a blob put dirt
+here" is answerable when the target set is built, for free, instead of by generating the
+chunk and looking.
+
+### The draw count is terrain-dependent, but boundedly
+
+`OreBlob.place` bails before drawing its 33 radii when the blob's box sits entirely
+above `OCEAN_FLOOR_WG`, so the stream is not a pure function of the seed. It is close
+to one: every blob spends 6 `next()` calls, plus 66 more if it placed. The state after
+k blobs depends only on **how many** placed, not which, so blob k begins at
+`6k + 66m` for some `m <= k` — 55 combinations, enumerated exactly as `ChainPrefilter`
+enumerates its success shifts. Enumerating m over-approximates, which is the accepting
+direction.
+
+`nextInt(3)` is the one draw here that can take Java's rejection retry and shift
+everything after it. About 9.3e-10 per call, so it never happens — but it is detected
+explicitly and the seed accepted, because a desynchronised read would be a *false
+reject*, which is the direction that silently loses finds.
+
+### Measured
+
+```
+q(>=8) with the depth band          1.5834e-02
+q(>=8) with the band and the soil   2.2211e-03      7.13x tighter
+per candidate                       205 us  (was 202)
+```
+
+The search-time cost is unchanged — the filter runs at target-set build time, which
+rises from 5.9 ms to ~42 ms a member and amortises over every world seed afterwards.
+
+**It costs coverage, and this is the honest part.** A blob reaches 6.7 blocks, so a
+*neighbouring* chunk's blob can supply the dirt — and its decoration seed needs `a` and
+`b`, hence a world seed, which is not chosen yet when the set is built. Measured over
+4.5M placed blocks: **17.9% of dirt lands outside its own chunk**, and by symmetry the
+same share of dirt inside a chunk came from a neighbour. So those finds are lost.
+
+Net: `7.13 x 0.821 = ` **5.9x**, taking the reverse search to roughly **560x** the box
+scan, and an 8-tall from ~3 hours to ~30 minutes.
+
+### Validation
+
+`DirtBlobFilterTest` drives the real `OreBlob` and requires the filter to accept every
+block it actually placed, at three ocean-floor heights so that different `m` paths
+through the stream are exercised:
+
+```
+accepted 487215 real dirt blocks, 0 rejected
+one fixed block accepted for 9.55% of seeds
+17.9% of placed dirt lands outside its own chunk (802608 of 4485367)
+```
+
+and the confirmed 8-tall survives — it stands on dirt at chunk-relative (3,20,10), which
+the filter keeps.
+
+The three figures are mutually consistent, which is the strongest check available:
+chain acceptance 13.94%, fixed-block acceptance 9.55%, and ~5% of chains falling outside
+the chunk and being accepted untested. `0.05 + 0.95*0.0955 = 0.14`. Chain positions sit
+further from the chunk edge than a single placement would, because a chain needs two
+invocations to agree on one (x, z).
+
+### What is left
+
+1. `FrozenOceanSurfaceBuilder`, still the largest known loss and now by a long way.
+2. The neighbour-blob 17.9%. Recoverable only by moving the soil test to search time,
+   where the world seed is known and all nine decoration seeds are computable — but
+   that trades the 7.13x for about 1.4x, so it is the wrong side of the deal.
+3. The biome gate, now 105 us of 205 per candidate and the single largest cost.

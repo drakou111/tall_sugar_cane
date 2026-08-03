@@ -116,8 +116,14 @@ A fourth step removes that: a chain names an (x, z) and a base y per column, eve
 of those has to be air, and below sea level air can only come from an air-step carver.
 The carver walks are pure RNG, so that question needs no terrain, and it rejects
 **97.9% of candidates for 49 us** — generated chunks per candidate fall to 0.15.
-Together that is roughly **95x** the box scan, which turns an 8-tall from a two-month
-run into an overnight one.
+A fifth step does the same for soil: the chain's base needs dirt under it, and deep dirt
+comes from ore blobs seeded off the same decoration seed as the cane — so that is also
+answerable with no terrain, and it tightens the set another 7.1x.
+
+Together that is roughly **560x** the box scan: an 8-tall goes from a two-month run to
+about half an hour. Both terrain filters cost some coverage (12% for the depth band, 18%
+for soil, from blobs that reach in from a neighbouring chunk), which is priced into that
+figure.
 
 Also structural, though it costs nothing at runtime: only 1 target in 16 is reachable
 for a given world seed, because the low four bits of a decoration seed are the world
