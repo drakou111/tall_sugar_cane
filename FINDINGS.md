@@ -2150,3 +2150,90 @@ invocations to agree on one (x, z).
    where the world seed is known and all nine decoration seeds are computable — but
    that trades the 7.13x for about 1.4x, so it is the wrong side of the deal.
 3. The biome gate, now 105 us of 205 per candidate and the single largest cost.
+
+## 6ag. Measuring R and P exactly, and three corrections
+
+The reverse search found one 7-tall in 77 minutes where I had predicted ~13. That gap
+turned out to be mostly my arithmetic, not the search, and chasing it produced better
+numbers than the ones it replaced.
+
+### The exact terrain condition
+
+`countGeometry` now computes `maxRun`: the tallest contiguous run the terrain permits
+from a base, maximised over every column composition. That is the real condition, and
+it is looser than the contiguous "face" the earlier measurements used, for two reasons
+the file had already recorded separately without joining up:
+
+- `ColumnPlacer` writes upward **unconditionally**, so only each column's *base* needs
+  air. The blocks above may be solid and simply get overwritten.
+- `needWater` is checked below each base, so water is needed at `base-1`,
+  `base+h1-1`, ... and nowhere in between. A 3+4 chain needs water beside `base+2`,
+  which a face test insisting on water beside `base+1` never sees.
+
+Two free checks on it, over 844,600 searched chunks: spots permitting >=4 comes to
+149,794, exactly the count of legal spots, since one column can be 4 unaided. And
+>=5 and >=6 are both 840, exactly `stackableRelaxed` — structurally, once any
+continuation exists the last column can be 4, so >=5 implies >=6. Both hold.
+
+### The numbers, direct rather than decomposed
+
+`probe:N` gated on `maxRun >= report` instead of on `stackable`, which is not a
+superset of it:
+
+| | height 7 | height 8 |
+|---|---|---|
+| R, chunks permitting it | 3.528e-04 | 1.752e-04 |
+| P, per decoration seed | 5.369e-07 | 8.446e-08 |
+| per chunk | 1.894e-10 | 1.480e-11 |
+| chunks per find | 5.28e9 | 6.76e10 |
+
+### Correction 1: the scenario is a flat 2x optimistic, at every height
+
+I had said the hand-built isolated spot would be increasingly optimistic with height,
+because real permitting spots cluster at the threshold while a 17-block face accepts
+any composition. **The data refutes that.** Scenario against measured:
+
+```
+h>=5:  1.1e-5 / 5.4e-6  = 2.04x     (6i)
+h>=7:  1.08e-6 / 5.369e-7 = 2.01x
+h>=8:  1.82e-7 / 8.446e-8 = 2.15x
+```
+
+Constant. Which is more useful than my story would have been: the scenario **is** a
+valid predictor of P, as long as it is divided by two.
+
+### Correction 2: the estimate was 1.6x out, not 5x
+
+Mid-investigation I claimed the prediction was ~5x wrong and P7 was near 1.1e-7. Both
+were wrong, and wrong because I extrapolated R7 from a 12-chunk sample. With the real
+numbers the predicted rate is 20.5 min at height 7, against the ~13 min I first quoted
+— 1.6x optimistic. Observing 1 find in 77 minutes against an expected 3.75 is a Poisson
+p of 0.11: on the unlucky side, not evidence of a defect.
+
+### Correction 3: the speedup was understated by 4.6x
+
+Computed from measured quantities only, with no chained ratios:
+
+```
+box scan   : 8,636 chunks/s    x 1.480e-11 per chunk     = 1.28e-7 finds/s  -> 90 days
+reverse    : 68,000 candidates/s x 4.80e-9 per candidate = 3.27e-4 finds/s  -> 51 min
+```
+
+where `P(find | candidate) = p * mass * (1 - leak) / q`, mass 0.878 for the depth band
+and 0.821 for the neighbour-blob leak. That is **~2,500x**, not the 560x recorded in
+6af. The 560 came from chaining a 13.9x that was expressed in searched-chunks/s with a
+6.9x expressed in candidates/s — two different units, so the product meant nothing.
+The individual measurements (q, candidates/s, filter selectivities) were all sound; the
+composition was not.
+
+**The lesson for this file: measure the end quantity, do not multiply ratios.** Both
+errors here came from composing correct factors that were not commensurable, and they
+pointed in opposite directions so the narrative looked plausible throughout.
+
+### Where this leaves it
+
+An 8-tall is ~51 minutes on twelve threads against ~90 days for the box scan. The
+binding constraint is no longer speed: at 68,000 candidates/s we produce candidates far
+faster than we can trust them, and 6ab's ~1-in-3 in-game failure rate is now the thing
+worth attacking. The 7-tall found at -7996270,18,-6279960 on seed 5180 is exactly that
+case — simulator air where the game has water at y=18..21.
