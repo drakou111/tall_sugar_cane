@@ -6,6 +6,7 @@ import dev.drakou111.sugarcane.gen.BiomeIds;
 import dev.drakou111.sugarcane.gen.ChainPrefilter;
 import dev.drakou111.sugarcane.gen.DirtBlobFilter;
 import dev.drakou111.sugarcane.gen.GpuChainFilter;
+import dev.drakou111.sugarcane.gen.LiquidCarveProbe;
 import dev.drakou111.sugarcane.gen.SugarCaneFeature;
 import dev.drakou111.sugarcane.gen.TargetCache;
 import dev.drakou111.sugarcane.rng.DecorationLattice;
@@ -62,6 +63,13 @@ public final class ReverseSearcher {
     private static long updateMs = 60_000L;
     private static final String UPDATE_FLAG = "--update=";
     private static final String SISTERS_FLAG = "--sisters=";
+    private static final String WATER_FLAG = "--water-probe";
+    /**
+     * Whether to require a chain's water to come from a LIQUID-step carver. Off by
+     * default: it is the one position test that trades coverage, because a spot on the
+     * sea floor is supplied by the noise fill and no carver ever touches it.
+     */
+    private static boolean waterProbe = false;
     /**
      * How many upper-16 values to sweep per low-48 seed. Default 64; {@code --sisters=1}
      * restores the original one-seed-at-a-time loop.
@@ -118,6 +126,12 @@ public final class ReverseSearcher {
         return Math.max(1000L, Math.round(m * 60_000.0));
     }
 
+    static final AtomicLong WHY_OVERFLOW = new AtomicLong();
+    static final AtomicLong WHY_NOCHAIN = new AtomicLong();
+    static final AtomicLong WHY_OUTSIDE = new AtomicLong();
+    static final AtomicLong WHY_CARVED = new AtomicLong();
+    static final AtomicLong WHY_NOWATER = new AtomicLong();
+
     private ReverseSearcher() {
     }
 
@@ -164,9 +178,15 @@ public final class ReverseSearcher {
      */
     private static boolean probeAccepts(ChainPrefilter chainFilter, AirCarveProbe probe,
             DirtBlobFilter dirt, boolean biomeOcean, long seed, long decorationSeed,
-            int minHeight, int[] chunk, RegionSearcher.Worker worker, boolean permissive) {
+            int minHeight, int[] chunk, RegionSearcher.Worker worker, boolean permissive,
+            LiquidCarveProbe liquid) {
         int chains = chainFilter.collectChains(decorationSeed, OCEAN_INDEX, minHeight);
-        if (chainFilter.chainsOverflowed() || chains == 0) {
+        if (chainFilter.chainsOverflowed()) {
+            WHY_OVERFLOW.incrementAndGet();
+            return true;
+        }
+        if (chains == 0) {
+            WHY_NOCHAIN.incrementAndGet();
             return true;
         }
         for (int i = 0; i < chains; i++) {
@@ -184,9 +204,27 @@ public final class ReverseSearcher {
                     : BiomeSourceValidator.isOcean(
                             BiomeIds.noiseGen(worker.biomeSource(), pcx * 4, pcz * 4));
             probe.walk(seed, pcx, pcz, ocean);
+            boolean outside = pcx != chunk[0] || pcz != chunk[1];
             boolean all = true;
             for (int c = 0; c < ChainPrefilter.chainColumns(chain) && all; c++) {
                 all = probe.isCarved(px, ChainPrefilter.chainBaseY(chain, c), pz);
+            }
+            if (all) {
+                (outside ? WHY_OUTSIDE : WHY_CARVED).incrementAndGet();
+            }
+            if (all && liquid != null) {
+                // The water half: needWater is checked under every base, so a chain
+                // names water positions as well as air ones. Unlike the air test this
+                // one is lossy -- a spot on the sea floor gets its water from the noise
+                // fill and no carver -- so it is opt-in until measured.
+                liquid.walk(seed, pcx, pcz);
+                for (int c = 0; c < ChainPrefilter.chainColumns(chain) && all; c++) {
+                    all = liquid.waterBeside(px, ChainPrefilter.chainBaseY(chain, c) - 1, pz);
+                }
+                if (!all) {
+                    WHY_NOWATER.incrementAndGet();
+                    continue;
+                }
             }
             if (!all) {
                 continue;
@@ -264,6 +302,8 @@ public final class ReverseSearcher {
                 forceCpu = true;
             } else if (arg.startsWith(REPORT_FLAG)) {
                 reportHeight = Integer.parseInt(arg.substring(REPORT_FLAG.length()));
+            } else if (arg.equals(WATER_FLAG)) {
+                waterProbe = true;
             } else if (arg.startsWith(SISTERS_FLAG)) {
                 sisters = Integer.parseInt(arg.substring(SISTERS_FLAG.length()));
                 if (sisters < 1 || sisters > 65536) {
@@ -427,6 +467,7 @@ public final class ReverseSearcher {
                 // the target height, which is the looser one; the height asked of it below
                 // is the report height.
                 AirCarveProbe probe = new AirCarveProbe();
+                LiquidCarveProbe liquidProbe = waterProbe ? new LiquidCarveProbe() : null;
                 DirtBlobFilter dirtFilter = new DirtBlobFilter();
                 // Reused across sisters: the chunks whose carvers already accepted.
                 int[] keepX = new int[0];
@@ -460,7 +501,8 @@ public final class ReverseSearcher {
                             }
                             solvedHere++;
                             boolean pass = probeAccepts(chainFilter, probe, dirtFilter,
-                                    false, low48, target, reportHeight, chunk, null, true);
+                                    false, low48, target, reportHeight, chunk, null, true,
+                                    liquidProbe);
                             nsProbe.addAndGet(System.nanoTime() - t1);
                             if (pass) {
                                 keepX[kept] = chunk[0];
@@ -536,7 +578,8 @@ public final class ReverseSearcher {
                         // terrain at all, and it rejects most candidates for the price
                         // of one walk instead of nine chunk generations.
                         boolean pass = probeAccepts(chainFilter, probe, dirtFilter,
-                                biomeOcean, seed, target, reportHeight, chunk, worker, false);
+                                biomeOcean, seed, target, reportHeight, chunk, worker, false,
+                                liquidProbe);
                         long t3 = System.nanoTime();
                         nsProbe.addAndGet(t3 - t2);
                         if (!pass) {
@@ -615,6 +658,11 @@ public final class ReverseSearcher {
                         + "%d survived the air probe (%.2f%% of ocean)%n",
                 oceans.get(), 100.0 * oceans.get() / Math.max(1, candidates.get()),
                 probed.get(), 100.0 * probed.get() / Math.max(1, oceans.get()));
+        System.out.printf("probe accepts by reason: overflow %d, no chain %d, "
+                        + "chain in a neighbour chunk %d, in the candidate chunk %d; "
+                        + "rejected for no carver water %d%n",
+                WHY_OVERFLOW.get(), WHY_NOCHAIN.get(), WHY_OUTSIDE.get(), WHY_CARVED.get(),
+                WHY_NOWATER.get());
         System.out.printf("%.0f candidates/s, %.0f searched chunks/s%n",
                 candidates.get() * 1000.0 / Math.max(1, ms),
                 stats.chunksSearched.get() * 1000.0 / Math.max(1, ms));

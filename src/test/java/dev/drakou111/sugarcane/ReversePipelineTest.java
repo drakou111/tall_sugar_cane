@@ -4,6 +4,7 @@ import dev.drakou111.sugarcane.gen.AirCarveProbe;
 import dev.drakou111.sugarcane.gen.BiomeIds;
 import dev.drakou111.sugarcane.gen.ChainPrefilter;
 import dev.drakou111.sugarcane.gen.LayerCaches;
+import dev.drakou111.sugarcane.gen.LiquidCarveProbe;
 import dev.drakou111.sugarcane.gen.SugarCaneFeature;
 import dev.drakou111.sugarcane.rng.DecorationLattice;
 import dev.drakou111.sugarcane.validate.BiomeSourceValidator;
@@ -80,6 +81,46 @@ class ReversePipelineTest {
      * is -24848080,18720976: chunk-relative x=3, z=10. It is a 4+4 chain, so the bases
      * are y=21 and y=25 and both must come back carved.
      */
+    /**
+     * The water half of the position test is the one filter here that can lose real
+     * finds -- a spot on the sea floor gets its water from the noise fill, not a carver
+     * -- so the two confirmed finds are the only guard against it silently discarding
+     * the thing it is meant to keep. Exactly the role 6ac gives the 8-tall for the air
+     * probe, and the failure it caught in FINDINGS 6u.
+     */
+    @Test
+    void theWaterProbeAcceptsBothConfirmedFinds() {
+        assertTrue(waterProbeAccepts(-7585781829663227268L, -1553005, 1170061, 8),
+                "the confirmed 8-tall must survive the water filter");
+        assertTrue(waterProbeAccepts(1500050556L, 5, 4, 5),
+                "the confirmed 5-tall must survive the water filter");
+    }
+
+    private static boolean waterProbeAccepts(long worldSeed, int chunkX, int chunkZ,
+            int height) {
+        long decorationSeed = new DecorationLattice(worldSeed).decorationSeedOf(chunkX, chunkZ);
+        ChainPrefilter filter = new ChainPrefilter(SugarCaneFeature.COUNT_DEFAULT);
+        int chains = filter.collectChains(decorationSeed, OCEAN_INDEX, height);
+        if (filter.chainsOverflowed()) {
+            return true;
+        }
+        LiquidCarveProbe liquid = new LiquidCarveProbe();
+        for (int i = 0; i < chains; i++) {
+            long chain = filter.chain(i);
+            int px = chunkX * 16 + ChainPrefilter.chainX(chain);
+            int pz = chunkZ * 16 + ChainPrefilter.chainZ(chain);
+            liquid.walk(worldSeed, px >> 4, pz >> 4);
+            boolean all = true;
+            for (int c = 0; c < ChainPrefilter.chainColumns(chain) && all; c++) {
+                all = liquid.waterBeside(px, ChainPrefilter.chainBaseY(chain, c) - 1, pz);
+            }
+            if (all) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     @Test
     void theAirProbeAcceptsTheConfirmedEightTall() {
         long worldSeed = -7585781829663227268L;
