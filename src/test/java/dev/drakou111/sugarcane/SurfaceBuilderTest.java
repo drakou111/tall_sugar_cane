@@ -1,5 +1,6 @@
 package dev.drakou111.sugarcane;
 
+import dev.drakou111.sugarcane.gen.FrozenOceanSurface;
 import dev.drakou111.sugarcane.gen.SurfaceBuilder;
 import dev.drakou111.sugarcane.gen.SurfaceConfig;
 import dev.drakou111.sugarcane.rng.JavaRandom;
@@ -197,9 +198,46 @@ class SurfaceBuilderTest {
     @Test
     void unsupportedBiomeThrows() {
         ArrayWorld world = oceanColumn(40);
-        assertFalse(SurfaceConfig.supported(10), "frozen_ocean is not implemented");
         assertFalse(SurfaceConfig.supported(6), "swamp is not implemented");
+        assertFalse(SurfaceConfig.supported(37), "badlands is not implemented");
         assertThrows(IllegalStateException.class,
-                () -> build(world, 10, 1, 1, 41, 0.0, 1L));
+                () -> build(world, 6, 1, 1, 41, 0.0, 1L));
+    }
+
+    /**
+     * Frozen ocean is implemented now, and the failure mode that matters is silent: a
+     * Context with no samplers must not quietly build the default surface, because the
+     * two consume different numbers of draws from the chunk-wide stream.
+     */
+    @Test
+    void frozenOceanIsSupportedAndDemandsItsSamplers() {
+        assertTrue(SurfaceConfig.supported(10), "frozen_ocean is implemented");
+        assertTrue(SurfaceConfig.supported(50), "deep_frozen_ocean is implemented");
+        assertEquals(SurfaceConfig.Kind.FROZEN_OCEAN, SurfaceConfig.kind(10));
+        assertThrows(IllegalStateException.class,
+                () -> SurfaceBuilder.apply(oceanColumn(40), new JavaRandom(), 10,
+                        1, 41, 1, 0.0, null),
+                "no samplers supplied must throw, not fall back to the default builder");
+    }
+
+    /**
+     * The three draws before the column walk are the whole reason this biome needs its
+     * own builder: the default takes one, so a frozen ocean column that took one would
+     * leave every later column of the chunk reading the wrong stream.
+     */
+    @Test
+    void frozenOceanConsumesThreeDrawsBeforeTheWalk() {
+        FrozenOceanSurface ice = new FrozenOceanSurface(1234L);
+        JavaRandom frozen = new JavaRandom();
+        frozen.setBaseChunkSeed(0, 0);
+        SurfaceBuilder.apply(oceanColumn(40), frozen, 10, 1, 1, 41, 0.0, ice);
+
+        JavaRandom reference = new JavaRandom();
+        reference.setBaseChunkSeed(0, 0);
+        reference.nextDouble();
+        reference.nextInt(4);
+        reference.nextInt(10);
+        assertEquals(reference.nextLong(), frozen.nextLong(),
+                "an all-water column should consume exactly the three pre-walk draws");
     }
 }

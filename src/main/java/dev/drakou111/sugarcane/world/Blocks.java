@@ -49,6 +49,20 @@ public final class Blocks {
      * SOLID happily would, inventing soil on warm and lukewarm ocean floors.
      */
     public static final byte SANDSTONE = 16;
+    /**
+     * Packed ice, which {@code FrozenOceanSurfaceBuilder} writes for icebergs. It
+     * cannot fold into SOLID: the builder re-reads the block it just wrote and
+     * branches on whether it is the biome's default block, so folding packed ice
+     * into stone would send the column down the surfacing branch vanilla skips —
+     * and that branch can draw from the shared chunk RNG, desynchronising every
+     * later column.
+     */
+    public static final byte PACKED_ICE = 17;
+    /**
+     * The snow <em>block</em> an iceberg is capped with. Distinct from SOLID only
+     * because vanilla's carvers do not replace it, unlike packed ice.
+     */
+    public static final byte SNOW_BLOCK = 18;
 
     private Blocks() {
     }
@@ -68,7 +82,7 @@ public final class Blocks {
             return !isWaterFluid(above);
         }
         return b == SOLID || b == SANDSTONE || b == DIRT || b == COARSE_DIRT
-                || b == PODZOL || b == GRASS_BLOCK;
+                || b == PODZOL || b == GRASS_BLOCK || b == PACKED_ICE;
     }
 
     public static boolean isAir(byte b) {

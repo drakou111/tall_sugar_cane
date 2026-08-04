@@ -147,7 +147,12 @@ public final class RegionSearcher {
      */
     static boolean isSearchableOcean(int biome) {
         return biome == 0 || biome == 24 || biome == 44 || biome == 45
-                || biome == 46 || biome == 47 || biome == 48 || biome == 49;
+                || biome == 46 || biome == 47 || biome == 48 || biome == 49
+                // frozen_ocean and deep_frozen_ocean, searchable since
+                // FrozenOceanSurfaceBuilder was implemented. They register the same
+                // LIQUID carvers as every other ocean, and 5c measured frozen_ocean at
+                // the highest stackable-spot rate of any biome.
+                || biome == 10 || biome == 50;
     }
 
     public static void main(String[] args) throws InterruptedException {
@@ -242,6 +247,8 @@ public final class RegionSearcher {
             case 47 -> "deep_warm (sand)";
             case 48 -> "deep_lukewarm (sand)";
             case 49 -> "deep_cold (gravel)";
+            case 10 -> "frozen_ocean (gravel)";
+            case 50 -> "deep_frozen (gravel)";
             default -> "biome " + biome;
         };
     }
@@ -460,6 +467,7 @@ public final class RegionSearcher {
 
         private OverworldBiomeSource biomes;
         private Terrain terrain;
+        private dev.drakou111.sugarcane.gen.FrozenOceanSurface frozenOcean;
         private long seed;
         private int regionChunkX;
         private int regionChunkZ;
@@ -513,6 +521,10 @@ public final class RegionSearcher {
             this.biomes = new OverworldBiomeSource(MCVersion.v1_16_1, seed);
             dev.drakou111.sugarcane.gen.LayerCaches.enlarge(this.biomes);
             this.terrain = new Terrain(biomes);
+            // Cheap next to the biome source and the noise samplers: five simplex
+            // tables. Built unconditionally because whether a region touches a frozen
+            // ocean is not known until its columns are surfaced.
+            this.frozenOcean = new dev.drakou111.sugarcane.gen.FrozenOceanSurface(seed);
             spawnKnown = false;
             if (centreOverrideX != Integer.MIN_VALUE) {
                 centreChunkX = centreOverrideX;
@@ -765,6 +777,11 @@ public final class RegionSearcher {
                 @Override
                 public int biome(int x, int z) {
                     return biomeAt(x, z);
+                }
+
+                @Override
+                public dev.drakou111.sugarcane.gen.FrozenOceanSurface frozenOcean() {
+                    return frozenOcean;
                 }
             });
         }

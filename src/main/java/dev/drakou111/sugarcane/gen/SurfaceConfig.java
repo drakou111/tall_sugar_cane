@@ -36,7 +36,13 @@ public final class SurfaceConfig {
         /** {@code SHATTERED_SAVANNA}: stone above 1.75, coarse dirt above -0.5, else grass. */
         SHATTERED_SAVANNA,
         /**
-         * {@code FROZEN_OCEAN} (iceberg noise and geometry-dependent draws),
+         * {@code FROZEN_OCEAN}: icebergs. Unlike the others it does <em>not</em> funnel
+         * into the default builder — it draws three values before the column walk where
+         * the default draws one, and more inside it, so it needs its own implementation
+         * rather than a configuration choice.
+         */
+        FROZEN_OCEAN,
+        /**
          * {@code BADLANDS} / {@code WOODED_BADLANDS} / {@code ERODED_BADLANDS}
          * (clay bands), {@code NOPE}, and everything outside the overworld.
          *
@@ -91,7 +97,7 @@ public final class SurfaceConfig {
         put(5, Kind.DEFAULT, GRASS, 0.25f);           // taiga
         put(6, Kind.UNSUPPORTED, GRASS, 0.8f);        // swamp - water at y=62 from an unimplemented noise
         put(7, Kind.DEFAULT, GRASS, 0.5f);            // river
-        put(10, Kind.UNSUPPORTED, GRASS, 0.0f);       // frozen_ocean - icebergs
+        put(10, Kind.FROZEN_OCEAN, GRASS, 0.0f);      // frozen_ocean - icebergs
         put(11, Kind.DEFAULT, GRASS, 0.0f);           // frozen_river
         put(12, Kind.DEFAULT, GRASS, 0.0f);           // snowy_tundra
         put(13, Kind.DEFAULT, GRASS, 0.0f);           // snowy_mountains
@@ -127,7 +133,7 @@ public final class SurfaceConfig {
         put(47, Kind.DEFAULT, FULL_SAND, 0.5f);       // deep_warm_ocean
         put(48, Kind.DEFAULT, OCEAN_SAND, 0.5f);      // deep_lukewarm_ocean
         put(49, Kind.DEFAULT, GRASS, 0.5f);           // deep_cold_ocean
-        put(50, Kind.UNSUPPORTED, GRASS, 0.5f);       // deep_frozen_ocean - icebergs
+        put(50, Kind.FROZEN_OCEAN, GRASS, 0.5f);      // deep_frozen_ocean - icebergs
         put(129, Kind.DEFAULT, GRASS, 0.8f);          // sunflower_plains
         put(130, Kind.DEFAULT, DESERT, 2.0f);         // desert_lakes
         put(131, Kind.GRAVELLY_MOUNTAIN, GRASS, 0.2f);// gravelly_mountains
