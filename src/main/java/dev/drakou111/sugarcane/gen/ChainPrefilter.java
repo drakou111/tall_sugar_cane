@@ -90,6 +90,27 @@ public final class ChainPrefilter {
     private int candidates;
 
     /**
+     * Candidates are emitted in groups: one per (invocation, shift), all twenty tries
+     * of which share a y, because the y-spread is 0. A chain's next column has to sit
+     * at exactly {@code y + height}, so the search only ever wants groups at one y --
+     * and indexing them by it turns the inner scan from every candidate into the
+     * handful that could possibly match.
+     *
+     * <p>Worth roughly 50x on that loop: 40 groups spread over the 54 legal y values
+     * means about 0.74 groups per y, so ~15 candidates examined instead of ~800. The
+     * buckets are appended to rather than pushed onto, which keeps groups in ascending
+     * order and makes the iteration order identical to the flat scan it replaces --
+     * so the chains come out in the same order, not merely the same set.
+     */
+    private final int[] groupStart;
+    private final int[] groupEnd;
+    private final int[] groupN;
+    private final int[] groupNext;
+    private final int[] yHead;
+    private final int[] yTail;
+    private int groupCount;
+
+    /**
      * Chains found by {@link #collectChains}, packed by {@link #pack}. More than this
      * many and the caller is told to accept without testing, which keeps the filter
      * sound at the cost of a little selectivity.
@@ -124,6 +145,13 @@ public final class ChainPrefilter {
         this.ch = new int[max];
         this.cn = new int[max];
         this.cs = new int[max];
+        int groups = count * SHIFTS.length;
+        this.groupStart = new int[groups];
+        this.groupEnd = new int[groups];
+        this.groupN = new int[groups];
+        this.groupNext = new int[groups];
+        this.yHead = new int[Y_CEIL - Y_FLOOR + 1];
+        this.yTail = new int[Y_CEIL - Y_FLOOR + 1];
     }
 
     /** @return the tallest run this seed's draws could chain together, ignoring terrain */
@@ -149,6 +177,8 @@ public final class ChainPrefilter {
         }
 
         candidates = 0;
+        groupCount = 0;
+        java.util.Arrays.fill(yHead, -1);
         for (int n = 0; n < count; n++) {
             for (int shiftIndex = 0; shiftIndex < SHIFTS.length; shiftIndex++) {
                 int shift = SHIFTS[shiftIndex];
@@ -165,6 +195,17 @@ public final class ChainPrefilter {
                 }
                 int originX = bounded(draws[base], 16);
                 int originZ = bounded(draws[base + 1], 16);
+                int group = groupCount++;
+                groupStart[group] = candidates;
+                groupN[group] = n;
+                groupNext[group] = -1;
+                int slot = y - Y_FLOOR;
+                if (yHead[slot] == -1) {
+                    yHead[slot] = group;
+                } else {
+                    groupNext[yTail[slot]] = group;
+                }
+                yTail[slot] = group;
                 for (int i = 0; i < TRIES; i++) {
                     int off = base + 3 + i * DRAWS_PER_TRY;
                     if (off + DRAWS_PER_TRY + 1 >= capacity) {
@@ -181,8 +222,14 @@ public final class ChainPrefilter {
                     cs[candidates] = shiftIndex;
                     candidates++;
                 }
+                groupEnd[group] = candidates;
             }
         }
+    }
+
+    /** True when {@code wantedY} can be a chain continuation at all. */
+    private boolean indexable(int wantedY) {
+        return wantedY >= Y_FLOOR && wantedY <= Y_CEIL;
     }
 
     /**
@@ -236,13 +283,21 @@ public final class ChainPrefilter {
         if (wantedY > Y_CEIL) {
             return;
         }
-        for (int j = 0; j < candidates; j++) {
-            if (cn[j] <= cn[i] || cy[j] != wantedY || cx[j] != cx[i] || cz[j] != cz[i]) {
+        if (!indexable(wantedY)) {
+            return;
+        }
+        for (int g = yHead[wantedY - Y_FLOOR]; g != -1; g = groupNext[g]) {
+            if (groupN[g] <= cn[i]) {
                 continue;
             }
-            collect(j, depth + 1, newTotal);
-            if (chainOverflow) {
-                return;
+            for (int j = groupStart[g]; j < groupEnd[g]; j++) {
+                if (cx[j] != cx[i] || cz[j] != cz[i]) {
+                    continue;
+                }
+                collect(j, depth + 1, newTotal);
+                if (chainOverflow) {
+                    return;
+                }
             }
         }
     }
@@ -328,12 +383,20 @@ public final class ChainPrefilter {
         if (wantedY > Y_CEIL) {
             return height;
         }
+        if (!indexable(wantedY)) {
+            return height;
+        }
         int extra = 0;
-        for (int j = 0; j < candidates; j++) {
-            if (cn[j] <= cn[i] || cy[j] != wantedY || cx[j] != cx[i] || cz[j] != cz[i]) {
+        for (int g = yHead[wantedY - Y_FLOOR]; g != -1; g = groupNext[g]) {
+            if (groupN[g] <= cn[i]) {
                 continue;
             }
-            extra = Math.max(extra, chainFrom(j, depth + 1));
+            for (int j = groupStart[g]; j < groupEnd[g]; j++) {
+                if (cx[j] != cx[i] || cz[j] != cz[i]) {
+                    continue;
+                }
+                extra = Math.max(extra, chainFrom(j, depth + 1));
+            }
         }
         return height + extra;
     }
