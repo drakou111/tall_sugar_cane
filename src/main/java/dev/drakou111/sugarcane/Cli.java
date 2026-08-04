@@ -41,75 +41,104 @@ public final class Cli {
             new Command("search",
                     "<firstSeed> <seedCount> <chunkRadius> <threads> <minHeight> "
                             + "[diag|probe:N|spots] [--spawn] [--update=<minutes>]",
-                    "Search for sugar cane taller than 4. This is the main program. "
-                            + "--spawn centres each seed's box on that world's spawn chunk "
-                            + "rather than 0,0, so a find is one you can walk to; it costs "
-                            + "about 38% of the chunks per second. --update sets how often "
-                            + "the progress line prints, in minutes (default 1).",
+                    "Scan every chunk in a box around each seed's origin. The plain search, "
+                            + "and the right one up to height 6; from 7 up use `reverse`, which "
+                            + "is ~2,500x faster at height 8. chunkRadius bounds how far from "
+                            + "the centre a find may be and is nearly free (6 runs as fast as "
+                            + "32). minHeight is the shortest run worth printing. Modes: `diag` "
+                            + "counts the terrain geometry, `probe:N` also replays the cane "
+                            + "feature over N synthetic decoration seeds per promising chunk to "
+                            + "measure the per-chunk find rate, `spots` prints the rare terrain "
+                            + "itself. --spawn centres the box on that world's spawn chunk "
+                            + "rather than 0,0, so a find is one you can walk to, at ~38% of "
+                            + "the chunks per second. --update sets the progress interval in "
+                            + "minutes, default 1.",
                     RegionSearcher::main),
             new Command("reverse",
-                    "<minHeight> [threads] [targets] [firstSeed] [seedCount] [--targets=<file>]",
-                    "Reverse search: choose the cane RNG first, then solve for the chunk "
-                            + "that has it. Builds a set of decoration seeds whose draws "
-                            + "could chain a tall enough column, then uses the decoration "
-                            + "seed lattice to turn each one into real coordinates inside "
-                            + "the world border. Worth it from height 7 up; below that use "
-                            + "`search`. Prints the same HIT lines. --targets=<file> "
-                            + "caches the target set, which does not depend on the "
-                            + "world seed, so its build cost is paid once ever and a "
-                            + "later run can extend it rather than rebuild it.",
+                    "<minHeight> [threads] [targets] [firstSeed] [seedCount] "
+                            + "[--targets=<file>]",
+                    "Pick the cane RNG first, then solve for a chunk that has it. Collects "
+                            + "decoration seeds whose draws could chain a tall enough column "
+                            + "with no terrain involved, then inverts setDecorationSeed by "
+                            + "lattice reduction to turn each one into real coordinates inside "
+                            + "the world border - so finds land anywhere, not near spawn. "
+                            + "Prints the same HIT lines as `search`. targets sizes the "
+                            + "collected set: bigger costs more up front and amortises better, "
+                            + "20k for a quick run, 200k for a long one. --targets=<file> saves "
+                            + "that set and reloads it, which is worth doing because it does "
+                            + "not depend on the world seed at all; a later run wanting more "
+                            + "extends the file instead of rebuilding it. Advance firstSeed "
+                            + "between runs, or you repeat the same work exactly.",
                     ReverseSearcher::main),
             new Command("inspect",
                     "<seed> <x> <y> <z> [searchRadius]",
-                    "Regenerate one region and dump what the simulator sees at a position, "
-                            + "including the placement trace that shows which invocations stacked.",
+                    "Regenerate the region around one position and dump what the simulator "
+                            + "sees there: a vertical slice, every nearby cane column, the "
+                            + "water the placement depended on, and the placement trace naming "
+                            + "which invocations stacked. Use it on a HIT before travelling, "
+                            + "and afterwards to see which block the simulator got wrong if "
+                            + "the real game disagrees. Works anywhere in the world, including "
+                            + "millions of blocks out.",
                     Inspect::main),
             new Command("spawn",
                     "<seed> [count]",
-                    "Where a fresh world puts the player. With a count, times it over "
-                            + "that many seeds.",
+                    "Where a fresh world drops the player, which is not the origin. With a "
+                            + "count, times the calculation over that many seeds.",
                     SpawnBench::main),
             new Command("columns",
                     "<seed> <x0> <x1> <z> <y0> <y1>",
-                    "Print the raw noise terrain for a slice, before surface, carvers or features.",
+                    "Diagnostic: the raw noise terrain for a slice, before the surface "
+                            + "builder, carvers or any feature has touched it.",
                     ProbeColumns::main),
             new Command("seed-bits",
                     "[low48]",
-                    "Show that the low 48 bits of the seed fix carvers and decoration while "
-                            + "the upper 16 move only the biomes.",
+                    "Diagnostic: shows that carvers, terrain and decoration depend only on "
+                            + "the seed's low 48 bits, while the upper 16 move the biome map "
+                            + "and nothing else.",
                     SeedBitsProbe::main),
             new Command("rng-only",
                     "[trials]",
-                    "Measure P: replay the cane feature over many decoration seeds on fixed terrain.",
+                    "Diagnostic: replays the cane feature over many decoration seeds on "
+                            + "hand-built terrain, to price the RNG separately from the "
+                            + "terrain. Reads ~2x optimistic against generated chunks at every "
+                            + "height, so halve it (FINDINGS 6ag).",
                     Main::main),
             new Command("prefilter-bench",
                     "[seeds] [radius]",
-                    "Benchmark the seed-only prefilters and check they keep the confirmed find.",
+                    "Diagnostic: benchmarks the seed-only prefilters and checks they still "
+                            + "keep the confirmed find.",
                     PrefilterBench::main),
             new Command("carver-walk",
                     "[chunks] [firstSeed]",
-                    "How often the carver walks alone put air against water, with no terrain.",
+                    "Diagnostic: how often the carver walks alone put air against water, "
+                            + "with no terrain generated. The walks are pure RNG, which is "
+                            + "what makes the reverse search's position filter possible.",
                     CarverWalkFilter::main),
             new Command("validate-proto",
                     "<proto.bin> [margin]",
-                    "Compare the simulated feature-time world against real pre-flood chunks. "
-                            + "Needs an export from tools/export_proto.py.",
+                    "Validation: compares the simulated feature-time world block by block "
+                            + "against real pre-flood chunks. The broadest accuracy check "
+                            + "there is. Needs an export from tools/export_proto.py.",
                     args -> dev.drakou111.sugarcane.validate.ProtoValidator.main(args)),
             new Command("validate-cane",
                     "<chunks.bin>",
-                    "Replay the cane feature over real chunks and count exact reproductions.",
+                    "Validation: replays the cane feature over real chunks and counts how "
+                            + "many reproduce exactly.",
                     args -> dev.drakou111.sugarcane.validate.RealWorldValidator.main(args)),
             new Command("validate-carver",
                     "<air.bin>",
-                    "Score the cave and canyon carvers against real chunks.",
+                    "Validation: scores the cave and canyon carvers against real chunks. Use "
+                            + "features-status chunks, not full ones - see FINDINGS 7.",
                     args -> dev.drakou111.sugarcane.validate.CarverValidator.main(args)),
             new Command("validate-biomes",
                     "<biomes.bin>",
-                    "Check the biome source against the stored biome array of real chunks.",
+                    "Validation: checks the biome source against the stored biome array of "
+                            + "real chunks.",
                     args -> dev.drakou111.sugarcane.validate.BiomeSourceValidator.main(args)),
             new Command("validate-terrain",
                     "<heightmaps.bin>",
-                    "Check the noise terrain against the stored heightmaps of real chunks.",
+                    "Validation: checks the noise terrain against the stored heightmaps of "
+                            + "real chunks.",
                     args -> dev.drakou111.sugarcane.validate.TerrainValidator.main(args)),
     };
 
@@ -232,28 +261,62 @@ public final class Cli {
         return reporterUsername != null ? reporterUsername : "Anonymous";
     }
 
+    /** Word-wraps a description so a long one does not depend on terminal width. */
+    private static void wrap(String text, String indent, int width) {
+        StringBuilder line = new StringBuilder(indent);
+        for (String word : text.split(" ")) {
+            if (line.length() > indent.length() && line.length() + 1 + word.length() > width) {
+                System.out.println(line);
+                line.setLength(0);
+                line.append(indent);
+            } else if (line.length() > indent.length()) {
+                line.append(' ');
+            }
+            line.append(word);
+        }
+        if (line.length() > indent.length()) {
+            System.out.println(line);
+        }
+    }
+
     private static void usage() {
         System.out.println("Sugar cane taller than 4: a Minecraft 1.16.1 worldgen search.");
         System.out.println();
-        System.out.println("  java -jar sugarcane.jar <command> [args]");
+        System.out.println("Growth stops at 3 and worldgen stops at 4, so 5 or more needs two");
+        System.out.println("placements landing on the same block in one chunk. This finds them.");
+        System.out.println();
+        System.out.println("  java -jar sugarcane.jar [--no-report|--yes-report] <command> [args]");
         System.out.println();
         for (Command command : COMMANDS) {
             System.out.printf("  %-16s %s%n", command.name(), command.args());
-            System.out.printf("  %-16s   %s%n", "", command.description());
+            wrap(command.description(), "                     ", 78);
             System.out.println();
         }
         System.out.println("Start here:");
+        System.out.println();
         System.out.println("  java -jar sugarcane.jar search 10 1000000 6 24 5");
-        System.out.println("     searches seeds 10..1000010 within 96 blocks (6 chunks) of spawn on 24 threads,");
-        System.out.println("     printing a HIT line for any column 5 or taller.");
+        System.out.println("     scans seeds 10.. within 96 blocks of the origin on 24 threads,");
+        System.out.println("     printing a HIT for any column 5 or taller.");
+        System.out.println();
+        System.out.println("  java -jar sugarcane.jar reverse 8 24 200000 1 --targets=targets8.bin");
+        System.out.println("     the fast path for 7 and above. Spends a few minutes collecting");
+        System.out.println("     targets, saves them for next time, then searches. Bump firstSeed");
+        System.out.println("     on the next run so it covers new ground.");
         System.out.println();
         System.out.println("  java -jar sugarcane.jar inspect 1500050556 91 16 65 6");
         System.out.println("     shows the confirmed 5-tall find and how it was built.");
+        System.out.println();
+        System.out.println("A HIT is a candidate, not a result: the searcher is a reimplementation");
+        System.out.println("and about one hit in three does not survive the real game. Check it with");
+        System.out.println("`inspect`, then tools/verify.py, before travelling.");
         System.out.println();
         System.out.println("Flags accepted anywhere, on any command:");
         System.out.println("  --no-report      do not report finds; never reads stdin");
         System.out.println("  --yes-report     report finds; never reads stdin");
         System.out.println("     Without either, the spreadsheet question is asked on stdin, which");
         System.out.println("     stalls a backgrounded run and kills one with no stdin at all.");
+        System.out.println();
+        System.out.println("FINDINGS.md is the real documentation: mechanics read off the decompiled");
+        System.out.println("1.16.1 server, every measurement, and everything that went wrong.");
     }
 }
