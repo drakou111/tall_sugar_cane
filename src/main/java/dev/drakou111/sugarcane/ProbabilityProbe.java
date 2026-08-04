@@ -61,6 +61,12 @@ public final class ProbabilityProbe {
     private static final AtomicLong hitsMissedByFilter = new AtomicLong();
     private static final AtomicLong hitsSeen = new AtomicLong();
     private static final AtomicLong hitsSoilRejected = new AtomicLong();
+    /** Real finds the ranked filter would still keep. Measured jointly, because the two
+     *  signals are correlated and multiplying 1.55 by 1.16 would be a guess. */
+    private static final AtomicLong hitsRankedKept = new AtomicLong();
+    private final ChainPrefilter rankedFilter =
+            new ChainPrefilter(SugarCaneFeature.COUNT_DESERT, ChainPrefilter.DEFAULT_BASE_MIN_Y,
+                    ChainPrefilter.DEFAULT_BASE_MAX_Y, 0, 2);
 
     private static AtomicLong[] newCounters(int n) {
         AtomicLong[] a = new AtomicLong[n];
@@ -137,6 +143,11 @@ public final class ProbabilityProbe {
         if (chainFilter.chainsOverflowed()) {
             return;
         }
+        // Would the ranked filter -- shift 0, minimum columns -- still have this seed?
+        if (rankedFilter.collectChains(ds, index, minHeight) > 0
+                || rankedFilter.chainsOverflowed()) {
+            hitsRankedKept.incrementAndGet();
+        }
         long best = cheapest(chains);
         hitBaseShift[ChainPrefilter.chainBaseShift(best)].incrementAndGet();
         hitColumns[Math.min(ChainPrefilter.chainColumns(best), hitColumns.length - 1)]
@@ -204,6 +215,9 @@ public final class ProbabilityProbe {
                 hitsMissedByFilter.get(), 100.0 * hitsMissedByFilter.get() / hits);
         System.out.printf("finds the soil filter would reject:     %d (%.1f%%)%n",
                 hitsSoilRejected.get(), 100.0 * hitsSoilRejected.get() / hits);
+        System.out.printf("finds the RANKED filter would keep:     %d (%.1f%%)"
+                        + "   <- shift 0 and minimum columns, jointly%n",
+                hitsRankedKept.get(), 100.0 * hitsRankedKept.get() / hits);
         report("earlier placements assumed", hitBaseShift, popBaseShift);
         report("columns in the chain", hitColumns, popColumns);
         reportBanded("base y", hitBaseY, popBaseY);

@@ -45,12 +45,25 @@ public final class GpuChainFilter {
         this.binary = binary;
     }
 
+    /**
+     * Why the last {@link #detect} found nothing. A silent fallback runs about 4.5x
+     * slower with no indication, which is exactly the kind of thing nobody notices -- a
+     * binary built for the wrong architecture fails identically to having no card at all.
+     */
+    private static volatile String lastFailure = "no binary found in cuda/ or the working directory";
+
+    public static String lastFailure() {
+        return lastFailure;
+    }
+
     /** @return a usable filter, or null if this machine has none */
     public static GpuChainFilter detect() {
+        boolean sawBinary = false;
         for (Path p : CANDIDATE_PATHS) {
             if (!Files.isRegularFile(p)) {
                 continue;
             }
+            sawBinary = true;
             GpuChainFilter candidate = new GpuChainFilter(p.toAbsolutePath());
             try {
                 // A real batch, because a binary that exists is not the same as a device
@@ -58,13 +71,19 @@ public final class GpuChainFilter {
                 // here means the whole path is alive.
                 long[] probe = candidate.run(2, SugarCaneFeature.COUNT_DEFAULT, 5,
                         ChainPrefilter.DEFAULT_BASE_MIN_Y, ChainPrefilter.DEFAULT_BASE_MAX_Y,
-                        0L, 4096L);
+                        3, 4, 0L, 4096L);
                 if (probe.length > 0) {
                     return candidate;
                 }
+                lastFailure = p + " ran but accepted nothing, which should be impossible at "
+                        + "height 2 -- suspect an argument mismatch between this build and "
+                        + "the binary, or rebuild it with cuda/build.bat";
             } catch (Exception e) {
-                // Fall through: no device, no driver, wrong toolkit, unreadable binary.
+                lastFailure = p + ": " + e.getMessage();
             }
+        }
+        if (!sawBinary) {
+            lastFailure = "no binary found in cuda/ or the working directory";
         }
         return null;
     }
@@ -78,10 +97,10 @@ public final class GpuChainFilter {
      * samples)}. These still need the soil filter applied before they are targets.
      */
     public long[] run(int minHeight, int count, int featureIndex, int baseMinY,
-            int baseMaxY, long sampleFrom, long samples) throws IOException,
-            InterruptedException {
-        return run(minHeight, count, featureIndex, baseMinY, baseMaxY, sampleFrom,
-                samples, null);
+            int baseMaxY, int maxBaseShift, int maxColumns, long sampleFrom, long samples)
+            throws IOException, InterruptedException {
+        return run(minHeight, count, featureIndex, baseMinY, baseMaxY, maxBaseShift,
+                maxColumns, sampleFrom, samples, null);
     }
 
     /**
@@ -89,7 +108,7 @@ public final class GpuChainFilter {
      *                   far) as the kernel reports them, so a long epoch is not silent
      */
     public long[] run(int minHeight, int count, int featureIndex, int baseMinY,
-            int baseMaxY, long sampleFrom, long samples,
+            int baseMaxY, int maxBaseShift, int maxColumns, long sampleFrom, long samples,
             java.util.function.LongConsumer onProgress) throws IOException,
             InterruptedException {
         Path out = Files.createTempFile("targets-gpu-", ".bin");
@@ -97,39 +116,53 @@ public final class GpuChainFilter {
             ProcessBuilder pb = new ProcessBuilder(binary.toString(),
                     Integer.toString(minHeight), Integer.toString(count),
                     Integer.toString(featureIndex), Integer.toString(baseMinY),
-                    Integer.toString(baseMaxY), Long.toString(sampleFrom),
+                    Integer.toString(baseMaxY), Integer.toString(maxBaseShift),
+                    Integer.toString(maxColumns), Long.toString(sampleFrom),
                     Long.toString(samples), out.toString());
             pb.redirectErrorStream(false);
             pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
-            if (onProgress == null) {
-                pb.redirectError(ProcessBuilder.Redirect.DISCARD);
-            }
             Process proc = pb.start();
-            Thread relay = null;
-            if (onProgress != null) {
-                relay = new Thread(() -> {
-                    try (java.io.BufferedReader r = new java.io.BufferedReader(
-                            new java.io.InputStreamReader(proc.getErrorStream()))) {
-                        String line;
-                        while ((line = r.readLine()) != null) {
-                            if (line.startsWith("progress ")) {
+            // Always drain stderr, even with no progress consumer. Discarding it threw away
+            // the kernel's own diagnosis of why it failed, which is the one case where the
+            // detection probe has something worth saying.
+            StringBuilder complaints = new StringBuilder();
+            Thread relay = new Thread(() -> {
+                try (java.io.BufferedReader r = new java.io.BufferedReader(
+                        new java.io.InputStreamReader(proc.getErrorStream()))) {
+                    String line;
+                    while ((line = r.readLine()) != null) {
+                        if (line.startsWith("progress ")) {
+                            if (onProgress != null) {
                                 String[] f = line.split(" ");
                                 onProgress.accept(Long.parseLong(f[1]));
                             }
+                        } else if (!line.startsWith("tested=")
+                                && complaints.length() < 400) {
+                            synchronized (complaints) {
+                                if (complaints.length() > 0) {
+                                    complaints.append("; ");
+                                }
+                                complaints.append(line.trim());
+                            }
                         }
-                    } catch (Exception ignored) {
-                        // The process is finishing; progress reporting is not worth a
-                        // failure of its own.
                     }
-                }, "gpu-progress");
-                relay.setDaemon(true);
-                relay.start();
-            }
+                } catch (Exception ignored) {
+                    // The process is finishing; progress reporting is not worth a
+                    // failure of its own.
+                }
+            }, "gpu-progress");
+            relay.setDaemon(true);
+            relay.start();
             if (!proc.waitFor(6, TimeUnit.HOURS)) {
                 proc.destroyForcibly();
                 throw new IOException("the GPU filter did not finish within six hours");
             }
             int code = proc.exitValue();
+            relay.join(2000);
+            String said;
+            synchronized (complaints) {
+                said = complaints.toString();
+            }
             if (code == 4) {
                 // The kernel's own signal that its output buffer overflowed, so the
                 // answer would be silently incomplete.
@@ -137,10 +170,8 @@ public final class GpuChainFilter {
                         + "use a smaller epoch");
             }
             if (code != 0) {
-                throw new IOException("the GPU filter exited " + code);
-            }
-            if (relay != null) {
-                relay.join(2000);
+                throw new IOException("exited " + code
+                        + (said.isEmpty() ? "" : ": " + said));
             }
             byte[] raw = Files.readAllBytes(out);
             ByteBuffer bb = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN);

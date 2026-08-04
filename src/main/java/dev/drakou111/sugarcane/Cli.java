@@ -56,7 +56,8 @@ public final class Cli {
                     RegionSearcher::main),
             new Command("reverse",
                     "<minHeight> [threads] [targets] [firstSeed] [seedCount] "
-                            + "[--targets=<file>] [--cpu]",
+                            + "[--targets=<file>] [--cpu] [--report=<h>] "
+                            + "[--update=<minutes>] [--max-shift=<n>] [--max-columns=<n>]",
                     "Pick the cane RNG first, then solve for a chunk that has it. Collects "
                             + "decoration seeds whose draws could chain a tall enough column "
                             + "with no terrain involved, then inverts setDecorationSeed by "
@@ -68,10 +69,17 @@ public final class Cli {
                             + "that set and reloads it, which is worth doing because it does "
                             + "not depend on the world seed at all; a later run wanting more "
                             + "extends the file instead of rebuilding it. Advance firstSeed "
-                            + "between runs, or you repeat the same work exactly.",
+                            + "between runs, or you repeat the same work exactly. "
+                            + "--report=<h> reports runs of h or more while still building "
+                            + "targets for minHeight: a 9-chain of 4+3+2 whose last column "
+                            + "finds no terrain still leaves a 7, and that is worth keeping. "
+                            + "--max-shift and --max-columns override the target ranking, "
+                            + "which is what makes an older set reproducible. "
+                            + "--update=<minutes> sets the progress interval, default 1.",
                     ReverseSearcher::main),
             new Command("targets",
-                    "<minHeight> <count> <file> [threads] [--cpu]",
+                    "<minHeight> <count> <file> [threads] [--cpu] [--update=<minutes>] "
+                            + "[--max-shift=<n>] [--max-columns=<n>]",
                     "Build or extend a reverse-search target set and stop, without "
                             + "searching. The set is the expensive half and the reusable "
                             + "one: it depends on the height, the depth band and the soil "
@@ -84,15 +92,11 @@ public final class Cli {
                             + "chain filter automatically when cuda/find_targets.exe is "
                             + "present and a device answers a test batch, which is ~4.7x "
                             + "faster; --cpu forces the CPU path. Either device produces a "
-                            + "byte-identical file.",
+                            + "byte-identical file. If the GPU is skipped it says why, "
+                            + "because the fallback is 4.5x slower and used to be silent: "
+                            + "build the kernel with cuda/build.bat, which covers Turing "
+                            + "through Ada rather than one architecture.",
                     ReverseSearcher::targetsMain),
-            new Command("sin-table",
-                    "<file>",
-                    "Write Mth.SIN as big-endian float bits, for the CUDA scanner to load "
-                            + "rather than recompute. Recomputing it with C's sin() "
-                            + "disagrees with Java at entry 32768, so the table is handed "
-                            + "over rather than trusted to two libms agreeing.",
-                    args -> dev.drakou111.sugarcane.rng.Mth.main(args)),
             new Command("inspect",
                     "<seed> <x> <y> <z> [searchRadius]",
                     "Regenerate the region around one position and dump what the simulator "
@@ -103,66 +107,6 @@ public final class Cli {
                             + "the real game disagrees. Works anywhere in the world, including "
                             + "millions of blocks out.",
                     Inspect::main),
-            new Command("spawn",
-                    "<seed> [count]",
-                    "Where a fresh world drops the player, which is not the origin. With a "
-                            + "count, times the calculation over that many seeds.",
-                    SpawnBench::main),
-            new Command("columns",
-                    "<seed> <x0> <x1> <z> <y0> <y1>",
-                    "Diagnostic: the raw noise terrain for a slice, before the surface "
-                            + "builder, carvers or any feature has touched it.",
-                    ProbeColumns::main),
-            new Command("seed-bits",
-                    "[low48]",
-                    "Diagnostic: shows that carvers, terrain and decoration depend only on "
-                            + "the seed's low 48 bits, while the upper 16 move the biome map "
-                            + "and nothing else.",
-                    SeedBitsProbe::main),
-            new Command("rng-only",
-                    "[trials]",
-                    "Diagnostic: replays the cane feature over many decoration seeds on "
-                            + "hand-built terrain, to price the RNG separately from the "
-                            + "terrain. Reads ~2x optimistic against generated chunks at every "
-                            + "height, so halve it (FINDINGS 6ag).",
-                    Main::main),
-            new Command("prefilter-bench",
-                    "[seeds] [radius]",
-                    "Diagnostic: benchmarks the seed-only prefilters and checks they still "
-                            + "keep the confirmed find.",
-                    PrefilterBench::main),
-            new Command("carver-walk",
-                    "[chunks] [firstSeed]",
-                    "Diagnostic: how often the carver walks alone put air against water, "
-                            + "with no terrain generated. The walks are pure RNG, which is "
-                            + "what makes the reverse search's position filter possible.",
-                    CarverWalkFilter::main),
-            new Command("validate-proto",
-                    "<proto.bin> [margin]",
-                    "Validation: compares the simulated feature-time world block by block "
-                            + "against real pre-flood chunks. The broadest accuracy check "
-                            + "there is. Needs an export from tools/export_proto.py.",
-                    args -> dev.drakou111.sugarcane.validate.ProtoValidator.main(args)),
-            new Command("validate-cane",
-                    "<chunks.bin>",
-                    "Validation: replays the cane feature over real chunks and counts how "
-                            + "many reproduce exactly.",
-                    args -> dev.drakou111.sugarcane.validate.RealWorldValidator.main(args)),
-            new Command("validate-carver",
-                    "<air.bin>",
-                    "Validation: scores the cave and canyon carvers against real chunks. Use "
-                            + "features-status chunks, not full ones - see FINDINGS 7.",
-                    args -> dev.drakou111.sugarcane.validate.CarverValidator.main(args)),
-            new Command("validate-biomes",
-                    "<biomes.bin>",
-                    "Validation: checks the biome source against the stored biome array of "
-                            + "real chunks.",
-                    args -> dev.drakou111.sugarcane.validate.BiomeSourceValidator.main(args)),
-            new Command("validate-terrain",
-                    "<heightmaps.bin>",
-                    "Validation: checks the noise terrain against the stored heightmaps of "
-                            + "real chunks.",
-                    args -> dev.drakou111.sugarcane.validate.TerrainValidator.main(args)),
     };
 
     /** What to do about the spreadsheet question, before anything reads stdin. */
@@ -338,6 +282,11 @@ public final class Cli {
         System.out.println("  --yes-report     report finds; never reads stdin");
         System.out.println("     Without either, the spreadsheet question is asked on stdin, which");
         System.out.println("     stalls a backgrounded run and kills one with no stdin at all.");
+        System.out.println();
+        System.out.println("The diagnostics and validators are no longer listed here, but the");
+        System.out.println("classes remain and the shaded jar can still run them directly, e.g.");
+        System.out.println("  java -cp target/sugarcane.jar dev.drakou111.sugarcane.validate.ProtoValidator <args>");
+        System.out.println("  java -cp target/sugarcane.jar dev.drakou111.sugarcane.rng.Mth <file>");
         System.out.println();
         System.out.println("FINDINGS.md is the real documentation: mechanics read off the decompiled");
         System.out.println("1.16.1 server, every measurement, and everything that went wrong.");

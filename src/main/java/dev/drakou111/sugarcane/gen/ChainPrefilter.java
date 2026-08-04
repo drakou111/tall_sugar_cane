@@ -75,6 +75,18 @@ public final class ChainPrefilter {
     private final int count;
     private final int baseMinY;
     private final int baseMaxY;
+    /**
+     * Ranking, measured off real finds rather than guessed (FINDINGS 6ah).
+     *
+     * <p>{@code maxBaseShift} caps how many earlier placements the chain's first column
+     * may assume. Shift 0 holds 94.1% of finds but only 60.7% of the accepted set,
+     * because a prior success in the same chunk is rare and three of them rarer still.
+     *
+     * <p>{@code maxColumns} caps the chain length. Two-column chains hold 89.8% of finds
+     * against 77.7% of the set, and four-column chains produced none at all in 256.
+     */
+    private final int maxBaseShift;
+    private final int maxColumns;
     private final int capacity;
     private final int[] draws;
 
@@ -124,7 +136,18 @@ public final class ChainPrefilter {
     private int wantedHeight;
 
     public ChainPrefilter(int count) {
-        this(count, DEFAULT_BASE_MIN_Y, DEFAULT_BASE_MAX_Y);
+        this(count, DEFAULT_BASE_MIN_Y, DEFAULT_BASE_MAX_Y, 3, 4);
+    }
+
+    /** The ranked filter: shift 0 only, and no more columns than the height needs. */
+    public static ChainPrefilter ranked(int count, int minHeight) {
+        return new ChainPrefilter(count, DEFAULT_BASE_MIN_Y, DEFAULT_BASE_MAX_Y, 0,
+                minimumColumns(minHeight));
+    }
+
+    /** A column is at most 4 tall, so this is the fewest that can reach the height. */
+    public static int minimumColumns(int minHeight) {
+        return Math.max(1, (minHeight + 3) / 4);
     }
 
     /**
@@ -133,9 +156,16 @@ public final class ChainPrefilter {
      *                 {@code 11..64} to measure q without the depth band.
      */
     public ChainPrefilter(int count, int baseMinY, int baseMaxY) {
+        this(count, baseMinY, baseMaxY, 3, 4);
+    }
+
+    public ChainPrefilter(int count, int baseMinY, int baseMaxY, int maxBaseShift,
+            int maxColumns) {
         this.count = count;
         this.baseMinY = baseMinY;
         this.baseMaxY = baseMaxY;
+        this.maxBaseShift = maxBaseShift;
+        this.maxColumns = maxColumns;
         this.capacity = count * DRAWS_PER_INVOCATION + SHIFTS[SHIFTS.length - 1] + 16;
         this.draws = new int[capacity];
         int max = count * SHIFTS.length * TRIES;
@@ -159,8 +189,9 @@ public final class ChainPrefilter {
         buildCandidates(decorationSeed, featureIndex);
         int best = 0;
         for (int i = 0; i < candidates; i++) {
-            // Only the start of a chain is restricted to the band where real spots are.
-            if (cy[i] < baseMinY || cy[i] > baseMaxY) {
+            // Only the start of a chain is restricted: to the band where real spots are,
+            // and to chains that assume few enough earlier placements to be plausible.
+            if (cy[i] < baseMinY || cy[i] > baseMaxY || cs[i] > maxBaseShift) {
                 continue;
             }
             best = Math.max(best, chainFrom(i, 0));
@@ -252,7 +283,7 @@ public final class ChainPrefilter {
         chainOverflow = false;
         wantedHeight = minHeight;
         for (int i = 0; i < candidates && !chainOverflow; i++) {
-            if (cy[i] < baseMinY || cy[i] > baseMaxY) {
+            if (cy[i] < baseMinY || cy[i] > baseMaxY || cs[i] > maxBaseShift) {
                 continue;
             }
             collect(i, 0, 0);
@@ -276,7 +307,7 @@ public final class ChainPrefilter {
             record(depth + 1);
             return;     // shortest sufficient chain; a longer one only adds requirements
         }
-        if (depth + 1 >= 4) {
+        if (depth + 1 >= maxColumns) {
             return;
         }
         int wantedY = cy[i] + ch[i];
@@ -376,7 +407,7 @@ public final class ChainPrefilter {
      */
     private int chainFrom(int i, int depth) {
         int height = ch[i];
-        if (depth >= 4) {
+        if (depth + 1 >= maxColumns) {
             return height;
         }
         int wantedY = cy[i] + height;

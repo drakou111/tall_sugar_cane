@@ -35,11 +35,12 @@ import java.nio.file.Path;
 public final class TargetCache {
 
     private static final int MAGIC = 0x54475431;   // "TGT1"
-    private static final int VERSION = 1;
+    private static final int VERSION = 2;
 
     /** Everything that changes what membership means. Loading checks all of it. */
     public record Header(int minHeight, int count, int featureIndex,
                          int baseMinY, int baseMaxY, boolean soilFilter,
+                         int maxBaseShift, int maxColumns,
                          long tested, long sampledThrough) {
     }
 
@@ -64,6 +65,8 @@ public final class TargetCache {
             out.writeInt(header.baseMinY());
             out.writeInt(header.baseMaxY());
             out.writeBoolean(header.soilFilter());
+            out.writeInt(header.maxBaseShift());
+            out.writeInt(header.maxColumns());
             out.writeLong(header.tested());
             out.writeLong(header.sampledThrough());
             out.writeInt(targets.length);
@@ -97,12 +100,14 @@ public final class TargetCache {
             }
             Header found = new Header(in.readInt(), in.readInt(), in.readInt(),
                     in.readInt(), in.readInt(), in.readBoolean(),
-                    in.readLong(), in.readLong());
+                    in.readInt(), in.readInt(), in.readLong(), in.readLong());
             requireSame(path, "height", wanted.minHeight(), found.minHeight());
             requireSame(path, "invocation count", wanted.count(), found.count());
             requireSame(path, "feature index", wanted.featureIndex(), found.featureIndex());
             requireSame(path, "band minimum y", wanted.baseMinY(), found.baseMinY());
             requireSame(path, "band maximum y", wanted.baseMaxY(), found.baseMaxY());
+            requireSame(path, "maximum base shift", wanted.maxBaseShift(), found.maxBaseShift());
+            requireSame(path, "maximum columns", wanted.maxColumns(), found.maxColumns());
             if (wanted.soilFilter() != found.soilFilter()) {
                 throw new IOException(path + " was built with the soil filter "
                         + (found.soilFilter() ? "on" : "off") + ", this run wants it "

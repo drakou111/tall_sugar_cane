@@ -59,7 +59,27 @@ public final class ReverseSearcher {
     private static final int OCEAN_COUNT = SugarCaneFeature.COUNT_DEFAULT;
     private static final int OCEAN_INDEX = 5;
 
-    private static final long DEFAULT_UPDATE_MS = 60_000L;
+    private static long updateMs = 60_000L;
+    private static final String UPDATE_FLAG = "--update=";
+
+    /**
+     * Minutes between progress lines, as {@code search} spells it. Fractions are allowed,
+     * and anything under a second is a typo rather than a request to spin.
+     */
+    private static long updateMillis(String minutes) {
+        double m;
+        try {
+            m = Double.parseDouble(minutes);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(UPDATE_FLAG
+                    + " needs a number of minutes, got \"" + minutes + "\"");
+        }
+        if (!(m > 0)) {
+            throw new IllegalArgumentException(UPDATE_FLAG
+                    + " needs a positive number of minutes, got " + minutes);
+        }
+        return Math.max(1000L, Math.round(m * 60_000.0));
+    }
 
     private ReverseSearcher() {
     }
@@ -139,7 +159,34 @@ public final class ReverseSearcher {
     private static final String CACHE_FLAG = "--targets=";
     /** Force the CPU chain filter even where a GPU is present. */
     private static final String CPU_FLAG = "--cpu";
+    /**
+     * Report threshold, separate from the height the target set was built for.
+     *
+     * <p>A set built for height 9 holds seeds whose chain is, say, 4+3+2. If the terrain
+     * suits the first two columns and not the third, what actually grows is 7 -- which is
+     * still worth having and was previously thrown away, because the report threshold was
+     * the same number as the target height.
+     *
+     * <p>It changes the position filter too, not just the printout: the air probe demands
+     * that <em>every</em> column base of a chain be carved, so testing the 9-chain would
+     * reject a candidate whose 7 was there for the taking. So the search side asks for
+     * chains reaching the report height, and the build side keeps asking for the target
+     * height.
+     */
+    private static final String REPORT_FLAG = "--report=";
+    /**
+     * Overrides for the ranked filter, so a set built under one configuration can be
+     * rebuilt later. Needed the first time to recover a find lost to a stale jar: the run
+     * that produced it used the pre-ranking defaults, and without a way to ask for those
+     * again its target set was unreproducible.
+     */
+    private static final String MAX_SHIFT_FLAG = "--max-shift=";
+    private static final String MAX_COLUMNS_FLAG = "--max-columns=";
     private static boolean forceCpu = false;
+    private static int reportHeight = 0;
+    private static java.nio.file.Path cacheOverride = null;
+    private static int maxBaseShiftOverride = -1;
+    private static int maxColumnsOverride = -1;
 
     /**
      * Builds or extends a target set and stops, without searching anything.
@@ -151,23 +198,58 @@ public final class ReverseSearcher {
      * At height 8 a member costs about 5.9 ms and the cost per member rises as the
      * heights go up, because q falls faster than the per-test cost does.
      */
+    /**
+     * Pulls the flags out and returns what is left, in order.
+     *
+     * <p>Shared by {@code reverse} and {@code targets} because they had a loop each, and the
+     * copy in {@code targets} only knew about {@code --cpu} -- so {@code --update=} there
+     * was parsed as the thread count and died on a number format error.
+     *
+     * <p>{@code --report=} has no effect on a build; it selects what a search prints.
+     */
+    private static String[] stripFlags(String[] args) {
+        java.util.List<String> positional = new java.util.ArrayList<>(args.length);
+        for (String arg : args) {
+            if (arg.startsWith(CACHE_FLAG)) {
+                cacheOverride = java.nio.file.Path.of(arg.substring(CACHE_FLAG.length()));
+            } else if (arg.equals(CPU_FLAG)) {
+                forceCpu = true;
+            } else if (arg.startsWith(REPORT_FLAG)) {
+                reportHeight = Integer.parseInt(arg.substring(REPORT_FLAG.length()));
+            } else if (arg.startsWith(MAX_SHIFT_FLAG)) {
+                maxBaseShiftOverride = Integer.parseInt(arg.substring(MAX_SHIFT_FLAG.length()));
+            } else if (arg.startsWith(MAX_COLUMNS_FLAG)) {
+                maxColumnsOverride = Integer.parseInt(arg.substring(MAX_COLUMNS_FLAG.length()));
+            } else if (arg.startsWith(UPDATE_FLAG)) {
+                try {
+                    updateMs = updateMillis(arg.substring(UPDATE_FLAG.length()));
+                } catch (IllegalArgumentException e) {
+                    // A stack trace for a mistyped flag tells the user nothing they can use.
+                    System.err.println(e.getMessage());
+                    System.exit(2);
+                }
+            } else if (arg.startsWith("--")) {
+                // Silently keeping an unknown flag would make it a positional argument and
+                // fail somewhere far away, as a misspelled --update did.
+                System.err.println("unknown flag: " + arg);
+                System.exit(2);
+            } else {
+                positional.add(arg);
+            }
+        }
+        return positional.toArray(new String[0]);
+    }
+
     public static void targetsMain(String[] args) throws Exception {
         if (args.length < 3) {
             System.err.println("usage: targets <minHeight> <count> <file> [threads]");
             System.exit(2);
             return;
         }
-        java.util.List<String> keep = new java.util.ArrayList<>(args.length);
-        for (String arg : args) {
-            if (arg.equals(CPU_FLAG)) {
-                forceCpu = true;
-            } else {
-                keep.add(arg);
-            }
-        }
-        args = keep.toArray(new String[0]);
+        args = stripFlags(args);
         if (args.length < 3) {
-            System.err.println("usage: targets <minHeight> <count> <file> [threads] [--cpu]");
+            System.err.println("usage: targets <minHeight> <count> <file> [threads] [--cpu] "
+                    + "[--update=<minutes>] [--max-shift=<n>] [--max-columns=<n>]");
             System.exit(2);
             return;
         }
@@ -195,20 +277,19 @@ public final class ReverseSearcher {
         int threads;
         int targets;
         // Flags first, so the positional arguments below are not thrown off by them.
-        java.nio.file.Path cache = null;
-        java.util.List<String> positional = new java.util.ArrayList<>(args.length);
-        for (String arg : args) {
-            if (arg.startsWith(CACHE_FLAG)) {
-                cache = java.nio.file.Path.of(arg.substring(CACHE_FLAG.length()));
-            } else if (arg.equals(CPU_FLAG)) {
-                forceCpu = true;
-            } else {
-                positional.add(arg);
-            }
-        }
-        args = positional.toArray(new String[0]);
+        args = stripFlags(args);
+        java.nio.file.Path cache = cacheOverride;
         int minHeightArg = args.length > 0 ? Integer.parseInt(args[0]) : 8;
         minHeight = minHeightArg;
+        if (reportHeight <= 0) {
+            reportHeight = minHeight;
+        }
+        if (reportHeight > minHeight) {
+            System.err.printf("--report=%d is above the target height %d, so nothing could "
+                    + "ever reach it%n", reportHeight, minHeight);
+            System.exit(2);
+            return;
+        }
         threads = args.length > 1 ? Integer.parseInt(args[1])
                 : Runtime.getRuntime().availableProcessors();
         targets = args.length > 2 ? Integer.parseInt(args[2]) : 20_000;
@@ -220,8 +301,33 @@ public final class ReverseSearcher {
                     + "everything and the box scan in `search` is the better tool.");
         }
 
-        System.out.printf("reverse search for height >= %d, %d threads, target set %d, "
-                        + "seeds from %d%n", minHeight, threads, targets, firstSeed);
+        System.out.printf("reverse search: targets for height >= %d, reporting height >= %d, "
+                        + "%d threads, target set %d, seeds from %d%n",
+                minHeight, reportHeight, threads, targets, firstSeed);
+        System.out.printf("  filter: base shift <= %d, columns <= %d, depth band y %d..%d%n",
+                maxBaseShift(), maxColumns(minHeight),
+                ChainPrefilter.DEFAULT_BASE_MIN_Y, ChainPrefilter.DEFAULT_BASE_MAX_Y);
+        if (reportHeight < minHeight) {
+            System.out.printf("  a %d-chain whose last column finds no terrain still leaves "
+                    + "a shorter run, and those now count%n", minHeight);
+        }
+
+        // Resolve everything the reporting path needs before the search starts.
+        //
+        // Class loading is lazy, and SpawnFinder is only touched when a hit is being
+        // printed. Repackaging the jar under a live search therefore leaves the process
+        // able to search for hours and unable to report the one thing it finds -- which is
+        // exactly what happened after 206 minutes and cost a 7-tall. Touching the classes
+        // up front turns that into an error at startup instead of at the worst moment.
+        try {
+            Class.forName("dev.drakou111.sugarcane.gen.SpawnFinder");
+            Class.forName("dev.drakou111.sugarcane.SeedReporter");
+            Class.forName("dev.drakou111.sugarcane.world.ArrayWorld");
+        } catch (ClassNotFoundException e) {
+            System.err.println("the reporting path is not loadable, refusing to start: " + e);
+            System.exit(2);
+            return;
+        }
 
         long[][] buckets;
         try {
@@ -259,8 +365,12 @@ public final class ReverseSearcher {
                 // radius 0: the box is the single candidate chunk, which is what
                 // searchOneChunk needs.
                 RegionSearcher.Worker worker =
-                        new RegionSearcher.Worker(minHeight, false, 0, stats, 0);
-                ChainPrefilter chainFilter = new ChainPrefilter(OCEAN_COUNT);
+                        new RegionSearcher.Worker(reportHeight, false, 0, stats, 0);
+                // The search side must apply the same ranking as the build, or it tests
+                // chains the target set was never selected for.
+                ChainPrefilter chainFilter = rankedFilter(minHeight);   // column cap from
+                // the target height, which is the looser one; the height asked of it below
+                // is the report height.
                 AirCarveProbe probe = new AirCarveProbe();
                 DirtBlobFilter dirtFilter = new DirtBlobFilter();
                 for (long seed = nextSeed.getAndIncrement(); seed < lastSeed;
@@ -306,7 +416,7 @@ public final class ReverseSearcher {
                         // terrain at all, and it rejects most candidates for the price
                         // of one walk instead of nine chunk generations.
                         boolean pass = probeAccepts(chainFilter, probe, dirtFilter,
-                                biomeOcean, seed, target, minHeight, chunk, worker);
+                                biomeOcean, seed, target, reportHeight, chunk, worker);
                         long t3 = System.nanoTime();
                         nsProbe.addAndGet(t3 - t2);
                         if (!pass) {
@@ -327,7 +437,7 @@ public final class ReverseSearcher {
         Thread progress = new Thread(() -> {
             while (!Thread.currentThread().isInterrupted()) {
                 try {
-                    Thread.sleep(DEFAULT_UPDATE_MS);
+                    Thread.sleep(updateMs);
                 } catch (InterruptedException e) {
                     return;
                 }
@@ -395,7 +505,44 @@ public final class ReverseSearcher {
      */
     private static final long EPOCH_SAMPLES = 50_000_000L;
 
-    /** How often the target build reports itself. */
+    /**
+     * The ranked target filter: a chain may assume no earlier placement, and use no more
+     * columns than the height needs.
+     *
+     * <p>Measured off 256 real finds rather than argued for. Shift 0 alone holds 94.1% of
+     * finds against 60.7% of the accepted set, and minimum-column chains 89.8% against
+     * 77.7%; jointly they keep 93.4% of finds while cutting the set 4.04x at height 7 and
+     * 4.41x at height 8. Net 3.77x. Multiplying the two signals separately would have
+     * predicted 1.80x, less than half the truth -- they are correlated, because the set
+     * is full of chains that are both high-shift and long.
+     */
+    private static final int MAX_BASE_SHIFT = 0;
+
+    private static int maxBaseShift() {
+        return maxBaseShiftOverride >= 0 ? maxBaseShiftOverride : MAX_BASE_SHIFT;
+    }
+
+    private static int maxColumns(int minHeight) {
+        return maxColumnsOverride >= 0 ? maxColumnsOverride
+                : ChainPrefilter.minimumColumns(minHeight);
+    }
+
+    private static TargetCache.Header header(int minHeight, long tested, long sampledThrough) {
+        return new TargetCache.Header(minHeight, OCEAN_COUNT, OCEAN_INDEX,
+                ChainPrefilter.DEFAULT_BASE_MIN_Y, ChainPrefilter.DEFAULT_BASE_MAX_Y, true,
+                maxBaseShift(), maxColumns(minHeight), tested, sampledThrough);
+    }
+
+    private static ChainPrefilter rankedFilter(int minHeight) {
+        return new ChainPrefilter(OCEAN_COUNT, ChainPrefilter.DEFAULT_BASE_MIN_Y,
+                ChainPrefilter.DEFAULT_BASE_MAX_Y, maxBaseShift(), maxColumns(minHeight));
+    }
+
+    /**
+     * How often the target build reports itself. Follows {@code --update} but capped at a
+     * minute: a long search can reasonably be quiet, whereas a build that says nothing for
+     * fifteen minutes is the problem the ticker exists to solve.
+     */
     private static final long PROGRESS_MS = 5_000L;
 
     /** 12,345,678 as 12.3M, so a progress line stays the same width as it grows. */
@@ -438,9 +585,7 @@ public final class ReverseSearcher {
     private static long[][] buildTargets(int minHeight, int targets, int threads,
             java.nio.file.Path cache) throws Exception {
         long start = System.currentTimeMillis();
-        TargetCache.Header wanted = new TargetCache.Header(minHeight, OCEAN_COUNT,
-                OCEAN_INDEX, ChainPrefilter.DEFAULT_BASE_MIN_Y,
-                ChainPrefilter.DEFAULT_BASE_MAX_Y, true, 0L, 0L);
+        TargetCache.Header wanted = header(minHeight, 0L, 0L);
 
         long[] all = new long[0];
         long sampleAt = 0L;
@@ -473,7 +618,8 @@ public final class ReverseSearcher {
             System.out.printf("target set: using the GPU chain filter at %s "
                     + "(soil filter stays on the CPU)%n", gpu.binary());
         } else {
-            System.out.println("target set: no usable GPU filter found, using the CPU");
+            System.out.println("target set: no usable GPU filter, using the CPU");
+            System.out.println("            reason: " + GpuChainFilter.lastFailure());
         }
 
         // A line every few seconds, because the gap between checkpoints is 35 s on the
@@ -498,7 +644,7 @@ public final class ReverseSearcher {
         Thread ticker = new Thread(() -> {
             while (!Thread.currentThread().isInterrupted()) {
                 try {
-                    Thread.sleep(PROGRESS_MS);
+                    Thread.sleep(Math.min(updateMs, PROGRESS_MS * 12L));
                 } catch (InterruptedException e) {
                     return;
                 }
@@ -544,6 +690,7 @@ public final class ReverseSearcher {
                 epochDone.set(0);
                 long[] chainPassed = gpu.run(minHeight, OCEAN_COUNT, OCEAN_INDEX,
                         ChainPrefilter.DEFAULT_BASE_MIN_Y, ChainPrefilter.DEFAULT_BASE_MAX_Y,
+                        maxBaseShift(), maxColumns(minHeight),
                         epochFrom, EPOCH_SAMPLES, epochDone::set);
                 epochDone.set(EPOCH_SAMPLES);
                 phase.set("cpu soil filter");
@@ -558,7 +705,7 @@ public final class ReverseSearcher {
                 Thread[] sifters = new Thread[threads];
                 for (int t = 0; t < threads; t++) {
                     sifters[t] = new Thread(() -> {
-                        ChainPrefilter filter = new ChainPrefilter(OCEAN_COUNT);
+                        ChainPrefilter filter = rankedFilter(minHeight);
                         DirtBlobFilter dirt = new DirtBlobFilter();
                         long[] mine = new long[64];
                         int n = 0;
@@ -595,7 +742,7 @@ public final class ReverseSearcher {
             Thread[] pool = new Thread[threads];
             for (int t = 0; t < threads; t++) {
                 pool[t] = new Thread(() -> {
-                    ChainPrefilter filter = new ChainPrefilter(OCEAN_COUNT);
+                    ChainPrefilter filter = rankedFilter(minHeight);
                     DirtBlobFilter dirt = new DirtBlobFilter();
                     long[] mine = new long[64];
                     int n = 0;
@@ -670,10 +817,7 @@ public final class ReverseSearcher {
             epoch++;
 
             if (cache != null) {
-                TargetCache.save(cache, new TargetCache.Header(minHeight, OCEAN_COUNT,
-                        OCEAN_INDEX, ChainPrefilter.DEFAULT_BASE_MIN_Y,
-                        ChainPrefilter.DEFAULT_BASE_MAX_Y, true, totalTested, sampleAt),
-                        all, null);
+                TargetCache.save(cache, header(minHeight, totalTested, sampleAt), all, null);
             }
             double secs = (System.currentTimeMillis() - start) / 1000.0;
             System.out.printf("  checkpoint %d: %d/%d targets, %d tested, %.0f s, "
@@ -690,10 +834,7 @@ public final class ReverseSearcher {
             all = java.util.Arrays.copyOf(all, targets);
         }
         if (cache != null) {
-            TargetCache.save(cache, new TargetCache.Header(minHeight, OCEAN_COUNT,
-                    OCEAN_INDEX, ChainPrefilter.DEFAULT_BASE_MIN_Y,
-                    ChainPrefilter.DEFAULT_BASE_MAX_Y, true, totalTested, sampleAt),
-                    all, null);
+            TargetCache.save(cache, header(minHeight, totalTested, sampleAt), all, null);
             System.out.printf("target set: saved %d to %s%n", all.length, cache);
         }
         return bucket(all, targets, totalTested, System.currentTimeMillis() - start);

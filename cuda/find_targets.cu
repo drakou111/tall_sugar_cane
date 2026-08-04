@@ -35,10 +35,21 @@
 // recursive function, which put it on the stack and overflowed it -- compute-sanitizer
 // named that in one line where reading the code had not.
 //
-// Build:
-//   nvcc -O3 -fmad=false -arch=sm_89 -o find_targets.exe find_targets.cu
-// -arch matters for measurement as well as speed: without it the driver JITs the PTX on
-// first use, which cost about five seconds and made a short benchmark meaningless.
+// Build (see build.bat):
+//   nvcc -O3 -fmad=false ^
+//     -gencode arch=compute_75,code=sm_75 ^
+//     -gencode arch=compute_86,code=sm_86 ^
+//     -gencode arch=compute_89,code=sm_89 ^
+//     -gencode arch=compute_89,code=compute_89 ^
+//     -o find_targets.exe find_targets.cu
+//
+// Several -gencode rather than one -arch, because a single-architecture binary will not
+// load on any other card and the Java side then reports "no usable GPU" -- identical to
+// having no card at all. A build for sm_89 alone silently cost a 3060 owner the GPU path.
+// The last line embeds PTX so a card newer than any listed here JITs instead of failing.
+//
+// Naming an architecture still matters for measurement: with none of them the driver JITs
+// on first use, which cost about five seconds and made a short benchmark meaningless.
 
 #include <cstdio>
 #include <cstdlib>
@@ -71,6 +82,9 @@ struct Chains {
     unsigned char y[MAX_CANDIDATES];
     unsigned char h[MAX_CANDIDATES];
     unsigned char n[MAX_CANDIDATES];
+    /** Which SHIFTS index the candidate was read at: how many earlier placements it
+     *  assumes. Only a chain's first column is capped on this. */
+    unsigned char s[MAX_CANDIDATES];
     /** Tallest run of at most two, and at most three, columns starting here. */
     unsigned char best2[MAX_CANDIDATES];
     unsigned char best3[MAX_CANDIDATES];
@@ -126,7 +140,8 @@ __device__ __forceinline__ void advanceWindow(unsigned long long &rng, unsigned 
  * and therefore what the target build actually uses.
  */
 __device__ bool accepts(Chains &c, unsigned long long decorationSeed, int featureIndex,
-                        int count, int minHeight, int baseMinY, int baseMaxY) {
+                        int count, int minHeight, int baseMinY, int baseMaxY,
+                        int maxBaseShift, int maxColumns) {
     unsigned long long s = decorationSeed + (unsigned long long) featureIndex + 10000ULL * 8ULL;
     unsigned long long rng = (s ^ MULTIPLIER) & MASK48;
 
@@ -174,6 +189,7 @@ __device__ bool accepts(Chains &c, unsigned long long decorationSeed, int featur
                         bounded(c.window[after], 3) + 1));
                 c.h[k] = height;
                 c.n[k] = (unsigned char) invocation;
+                c.s[k] = (unsigned char) shiftIndex;
                 c.best2[k] = height;
                 c.best3[k] = height;
             }
@@ -213,10 +229,15 @@ __device__ bool accepts(Chains &c, unsigned long long decorationSeed, int featur
         c.best2[i] = (unsigned char) h2;
         c.best3[i] = (unsigned char) h3;
 
-        if (c.y[i] < baseMinY || c.y[i] > baseMaxY) {
+        if (c.y[i] < baseMinY || c.y[i] > baseMaxY || c.s[i] > maxBaseShift) {
             continue;
         }
-        if (h1 >= minHeight || h2 >= minHeight || h3 >= minHeight || h4 >= minHeight) {
+        // Only as many columns as the height needs: a longer chain needs water at another
+        // junction and is measurably less likely to be real.
+        if (h1 >= minHeight
+                || (maxColumns >= 2 && h2 >= minHeight)
+                || (maxColumns >= 3 && h3 >= minHeight)
+                || (maxColumns >= 4 && h4 >= minHeight)) {
             return true;
         }
     }
@@ -234,7 +255,7 @@ __device__ __forceinline__ unsigned long long spread(unsigned long long i) {
 
 __global__ void filterKernel(unsigned long long sampleFrom, long long total,
                              int minHeight, int count, int featureIndex,
-                             int baseMinY, int baseMaxY,
+                             int baseMinY, int baseMaxY, int maxBaseShift, int maxColumns,
                              unsigned long long *out, unsigned int *outCount,
                              unsigned int outCapacity) {
     Chains c;
@@ -242,7 +263,8 @@ __global__ void filterKernel(unsigned long long sampleFrom, long long total,
     for (long long idx = (long long) blockIdx.x * blockDim.x + threadIdx.x;
             idx < total; idx += stride) {
         unsigned long long ds = spread(sampleFrom + (unsigned long long) idx);
-        bool accept = accepts(c, ds, featureIndex, count, minHeight, baseMinY, baseMaxY);
+        bool accept = accepts(c, ds, featureIndex, count, minHeight, baseMinY, baseMaxY,
+                              maxBaseShift, maxColumns);
 
         // One atomicAdd per warp rather than per accepting thread: the whole warp agrees
         // a base with a ballot, then each accepting lane takes its rank within the mask.
@@ -281,9 +303,11 @@ int main(int argc, char **argv) {
     int featureIndex = atoi(argv[3]);
     int baseMinY = atoi(argv[4]);
     int baseMaxY = atoi(argv[5]);
-    unsigned long long sampleFrom = strtoull(argv[6], NULL, 10);
-    long long samples = atoll(argv[7]);
-    const char *outFile = argc > 8 ? argv[8] : NULL;
+    int maxBaseShift = atoi(argv[6]);
+    int maxColumns = atoi(argv[7]);
+    unsigned long long sampleFrom = strtoull(argv[8], NULL, 10);
+    long long samples = atoll(argv[9]);
+    const char *outFile = argc > 10 ? argv[10] : NULL;
 
     if (count > MAX_COUNT) {
         fprintf(stderr, "count %d exceeds the compiled maximum %d\n", count, MAX_COUNT);
@@ -326,8 +350,24 @@ int main(int argc, char **argv) {
         cudaMemcpy(dCount, &zero, sizeof(unsigned int), cudaMemcpyHostToDevice);
         filterKernel<<<blocks, threads>>>(sampleFrom + (unsigned long long) done,
                 thisBatch, minHeight, count, featureIndex, baseMinY, baseMaxY,
-                dOut, dCount, outCapacity);
-        cudaError_t err = cudaDeviceSynchronize();
+                maxBaseShift, maxColumns, dOut, dCount, outCapacity);
+        // The launch is checked separately from the synchronise, because a launch that never
+        // happens leaves nothing to synchronise on: cudaDeviceSynchronize then returns
+        // success and the run reports zero accepted seeds, exit code 0, as if the seeds had
+        // simply all failed the filter. That is how a binary built for the wrong compute
+        // capability presents itself -- silently, and only on someone else's card.
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            fprintf(stderr, "kernel launch failed: %s\n", cudaGetErrorString(err));
+            if (err == cudaErrorNoKernelImageForDevice) {
+                fprintf(stderr, "this binary has no code for %s (compute %d.%d); rebuild it "
+                        "with -gencode arch=compute_%d%d,code=sm_%d%d\n",
+                        prop.name, prop.major, prop.minor,
+                        prop.major, prop.minor, prop.major, prop.minor);
+            }
+            return 3;
+        }
+        err = cudaDeviceSynchronize();
         if (err != cudaSuccess) {
             fprintf(stderr, "kernel failed: %s\n", cudaGetErrorString(err));
             return 3;

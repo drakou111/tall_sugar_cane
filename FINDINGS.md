@@ -2320,3 +2320,61 @@ banked that signal and there is little left in it.
 and this file has now been wrong three times from composing factors that looked
 composable. The combined filter has to be built and its q and retention measured
 together, on finds, before any number goes here.
+
+## 6ai. A GPU build for one architecture is a silent 4.5x slowdown
+
+A 3060 owner ran the searcher and it said `no usable GPU`. The card was fine, the driver
+was fine, the toolkit was fine. The binary was built with `-arch=sm_89`, which is Ada
+only, so it had no code for an Ampere card.
+
+Three separate faults had to line up to make that unreadable, and each is worth naming.
+
+**The kernel did not notice its own launch failing.** The code checked
+`cudaDeviceSynchronize()`, which is the usual advice, and that check is useless here: when
+a launch is rejected there is nothing queued, so the synchronise returns `cudaSuccess`.
+The launch error sits in `cudaGetLastError()` instead. So the process exited 0 having
+tested every seed and accepted none — indistinguishable from a filter that legitimately
+rejected everything.
+
+Reproduced deliberately, by building for `sm_50` and running on the 4080:
+
+```
+progress 4096 4096 0
+tested=4096 accepted=0 dropped=0        <- exit 0
+```
+
+With the launch checked:
+
+```
+kernel launch failed: no kernel image is available for execution on the device
+this binary has no code for NVIDIA GeForce RTX 4080 (compute 8.9); rebuild it
+with -gencode arch=compute_89,code=sm_89
+```
+
+**The stderr carrying that message was discarded.** `GpuChainFilter` only attached a
+reader when it had a progress consumer, and the detection probe has none — so the one call
+whose failure needed explaining was the one call that threw the explanation away.
+
+**And the fallback was silent.** `detect()` returned null, the CPU path took over, and
+nothing said why. The CPU path is about 4.5x slower, which is slow enough to matter and
+fast enough not to look broken.
+
+### The fix
+
+Several `-gencode` rather than one `-arch` (`cuda/build.bat`): Turing, Ampere and Ada
+compiled in, plus `compute_89` PTX so a newer card JITs instead of failing.
+
+Multi-architecture costs nothing at runtime. Measured on 200M seeds, single-arch `sm_89`
+26.71s against multi-arch 25.55s, with identical accept counts — the unused cubins are
+dead weight in the fatbin, not in the instruction stream. Only the file grows.
+
+`detect()` now records why it failed and the caller prints it, so the friend's case
+diagnoses itself and prescribes its own fix.
+
+### The general shape
+
+An error path that only executes on hardware the author does not own gets no testing from
+ordinary use, and this one degraded into a plausible-looking success. Building a
+deliberately broken binary took one command and turned a report of "no usable GPU" into
+the exact line of the fix. Worth doing whenever a failure is reported from a machine that
+is not to hand.
