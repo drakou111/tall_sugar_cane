@@ -70,6 +70,18 @@ public final class Cli {
                             + "extends the file instead of rebuilding it. Advance firstSeed "
                             + "between runs, or you repeat the same work exactly.",
                     ReverseSearcher::main),
+            new Command("targets",
+                    "<minHeight> <count> <file> [threads]",
+                    "Build or extend a reverse-search target set and stop, without "
+                            + "searching. The set is the expensive half and the reusable "
+                            + "one: it depends on the height, the depth band and the soil "
+                            + "filter, never on the world seed, so build it once and hand it "
+                            + "to every `reverse` run afterwards with --targets=<file>. "
+                            + "Re-running with a larger count extends the file rather than "
+                            + "starting over. Cost per member climbs steeply with height, "
+                            + "because the acceptance rate falls faster than the per-test cost "
+                            + "does - about 0.4 ms at height 5, 5.9 ms at height 8.",
+                    ReverseSearcher::targetsMain),
             new Command("inspect",
                     "<seed> <x> <y> <z> [searchRadius]",
                     "Regenerate the region around one position and dump what the simulator "

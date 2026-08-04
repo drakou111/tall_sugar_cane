@@ -137,6 +137,41 @@ public final class ReverseSearcher {
     /** Where to keep the target set, so its build cost is paid once ever. */
     private static final String CACHE_FLAG = "--targets=";
 
+    /**
+     * Builds or extends a target set and stops, without searching anything.
+     *
+     * <p>Worth its own command because the set is the expensive, reusable half and the
+     * search is the cheap, disposable half. The set depends only on the height, the
+     * depth band and the soil filter -- never on the world seed -- so it can be built
+     * once on whatever machine has the cores, then handed to every search afterwards.
+     * At height 8 a member costs about 5.9 ms and the cost per member rises as the
+     * heights go up, because q falls faster than the per-test cost does.
+     */
+    public static void targetsMain(String[] args) throws Exception {
+        if (args.length < 3) {
+            System.err.println("usage: targets <minHeight> <count> <file> [threads]");
+            System.exit(2);
+            return;
+        }
+        int minHeight = Integer.parseInt(args[0]);
+        int count = Integer.parseInt(args[1]);
+        java.nio.file.Path file = java.nio.file.Path.of(args[2]);
+        int threads = args.length > 3 ? Integer.parseInt(args[3])
+                : Runtime.getRuntime().availableProcessors();
+
+        System.out.printf("building a target set for height >= %d, %d wanted, %d threads%n",
+                minHeight, count, threads);
+        try {
+            buildTargets(minHeight, count, threads, file);
+        } catch (java.io.IOException e) {
+            System.err.println("target set: " + e.getMessage());
+            System.exit(2);
+            return;
+        }
+        System.out.printf("done. reuse it with: reverse %d <threads> %d <firstSeed> "
+                        + "--targets=%s%n", minHeight, count, file);
+    }
+
     public static void main(String[] args) throws Exception {
         int minHeight;
         int threads;
