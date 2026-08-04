@@ -56,7 +56,7 @@ public final class Cli {
                     RegionSearcher::main),
             new Command("reverse",
                     "<minHeight> [threads] [targets] [firstSeed] [seedCount] "
-                            + "[--targets=<file>]",
+                            + "[--targets=<file>] [--cpu]",
                     "Pick the cane RNG first, then solve for a chunk that has it. Collects "
                             + "decoration seeds whose draws could chain a tall enough column "
                             + "with no terrain involved, then inverts setDecorationSeed by "
@@ -71,7 +71,7 @@ public final class Cli {
                             + "between runs, or you repeat the same work exactly.",
                     ReverseSearcher::main),
             new Command("targets",
-                    "<minHeight> <count> <file> [threads]",
+                    "<minHeight> <count> <file> [threads] [--cpu]",
                     "Build or extend a reverse-search target set and stop, without "
                             + "searching. The set is the expensive half and the reusable "
                             + "one: it depends on the height, the depth band and the soil "
@@ -80,7 +80,11 @@ public final class Cli {
                             + "Re-running with a larger count extends the file rather than "
                             + "starting over. Cost per member climbs steeply with height, "
                             + "because the acceptance rate falls faster than the per-test cost "
-                            + "does - about 0.4 ms at height 5, 5.9 ms at height 8.",
+                            + "does - about 0.4 ms at height 5, 5.9 ms at height 8. Uses a CUDA "
+                            + "chain filter automatically when cuda/find_targets.exe is "
+                            + "present and a device answers a test batch, which is ~4.7x "
+                            + "faster; --cpu forces the CPU path. Either device produces a "
+                            + "byte-identical file.",
                     ReverseSearcher::targetsMain),
             new Command("sin-table",
                     "<file>",

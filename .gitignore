@@ -80,3 +80,7 @@ cuda/*.lib
 cuda/*.bin
 *.exe
 *.exp
+cuda/*.pdb
+cuda/*.obj
+vc140.pdb
+contrib/

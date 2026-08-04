@@ -5,6 +5,7 @@ import dev.drakou111.sugarcane.gen.BiomeCaneConfig;
 import dev.drakou111.sugarcane.gen.BiomeIds;
 import dev.drakou111.sugarcane.gen.ChainPrefilter;
 import dev.drakou111.sugarcane.gen.DirtBlobFilter;
+import dev.drakou111.sugarcane.gen.GpuChainFilter;
 import dev.drakou111.sugarcane.gen.SugarCaneFeature;
 import dev.drakou111.sugarcane.gen.TargetCache;
 import dev.drakou111.sugarcane.rng.DecorationLattice;
@@ -136,6 +137,9 @@ public final class ReverseSearcher {
 
     /** Where to keep the target set, so its build cost is paid once ever. */
     private static final String CACHE_FLAG = "--targets=";
+    /** Force the CPU chain filter even where a GPU is present. */
+    private static final String CPU_FLAG = "--cpu";
+    private static boolean forceCpu = false;
 
     /**
      * Builds or extends a target set and stops, without searching anything.
@@ -150,6 +154,20 @@ public final class ReverseSearcher {
     public static void targetsMain(String[] args) throws Exception {
         if (args.length < 3) {
             System.err.println("usage: targets <minHeight> <count> <file> [threads]");
+            System.exit(2);
+            return;
+        }
+        java.util.List<String> keep = new java.util.ArrayList<>(args.length);
+        for (String arg : args) {
+            if (arg.equals(CPU_FLAG)) {
+                forceCpu = true;
+            } else {
+                keep.add(arg);
+            }
+        }
+        args = keep.toArray(new String[0]);
+        if (args.length < 3) {
+            System.err.println("usage: targets <minHeight> <count> <file> [threads] [--cpu]");
             System.exit(2);
             return;
         }
@@ -182,6 +200,8 @@ public final class ReverseSearcher {
         for (String arg : args) {
             if (arg.startsWith(CACHE_FLAG)) {
                 cache = java.nio.file.Path.of(arg.substring(CACHE_FLAG.length()));
+            } else if (arg.equals(CPU_FLAG)) {
+                forceCpu = true;
             } else {
                 positional.add(arg);
             }
@@ -415,6 +435,20 @@ public final class ReverseSearcher {
             }
         }
 
+        // Detected once, by actually running a small batch: a binary that exists is not
+        // the same as a device that works, and every way of not having one -- no CUDA, no
+        // driver, wrong toolkit, missing file -- should fall back quietly rather than
+        // fail the run.
+        GpuChainFilter gpu = forceCpu ? null : GpuChainFilter.detect();
+        if (forceCpu) {
+            System.out.println("target set: --cpu given, using the CPU chain filter");
+        } else if (gpu != null) {
+            System.out.printf("target set: using the GPU chain filter at %s "
+                    + "(soil filter stays on the CPU)%n", gpu.binary());
+        } else {
+            System.out.println("target set: no usable GPU filter found, using the CPU");
+        }
+
         int epoch = 0;
         while (all.length < targets) {
             final long epochFrom = sampleAt;
@@ -424,6 +458,50 @@ public final class ReverseSearcher {
             final List<long[]> collected = new ArrayList<>();
             final long chunk = 4096L;
 
+            if (gpu != null) {
+                // The GPU takes the chain filter over the whole epoch; the CPU applies
+                // the soil filter to the ~1.6% it hands back, in parallel.
+                long[] chainPassed = gpu.run(minHeight, OCEAN_COUNT, OCEAN_INDEX,
+                        ChainPrefilter.DEFAULT_BASE_MIN_Y, ChainPrefilter.DEFAULT_BASE_MAX_Y,
+                        epochFrom, EPOCH_SAMPLES);
+                final long[] toSift = chainPassed;
+                final java.util.concurrent.atomic.AtomicInteger cursor =
+                        new java.util.concurrent.atomic.AtomicInteger();
+                Thread[] sifters = new Thread[threads];
+                for (int t = 0; t < threads; t++) {
+                    sifters[t] = new Thread(() -> {
+                        ChainPrefilter filter = new ChainPrefilter(OCEAN_COUNT);
+                        DirtBlobFilter dirt = new DirtBlobFilter();
+                        long[] mine = new long[64];
+                        int n = 0;
+                        while (true) {
+                            int k = cursor.getAndIncrement();
+                            if (k >= toSift.length) {
+                                break;
+                            }
+                            long z = toSift[k];
+                            int chains = filter.collectChains(z, OCEAN_INDEX, minHeight);
+                            if (chains == 0 && !filter.chainsOverflowed()) {
+                                continue;   // cannot happen; the GPU already agreed
+                            }
+                            if (!soilPossible(filter, dirt, z, chains)) {
+                                continue;
+                            }
+                            if (n == mine.length) {
+                                mine = Arrays.copyOf(mine, n * 2);
+                            }
+                            mine[n++] = z;
+                        }
+                        synchronized (collected) {
+                            collected.add(Arrays.copyOf(mine, n));
+                        }
+                    }, "soil-" + t);
+                    sifters[t].start();
+                }
+                for (Thread thread : sifters) {
+                    thread.join();
+                }
+            } else {
             Thread[] pool = new Thread[threads];
             for (int t = 0; t < threads; t++) {
                 pool[t] = new Thread(() -> {
@@ -468,6 +546,7 @@ public final class ReverseSearcher {
             for (Thread thread : pool) {
                 thread.join();
             }
+            }
 
             int grown = all.length;
             for (long[] part : collected) {
@@ -480,6 +559,11 @@ public final class ReverseSearcher {
                 System.arraycopy(part, 0, merged, at, part.length);
                 at += part.length;
             }
+            // Sorted, so the file is identical whichever device built it. Without this
+            // the GPU's atomicAdd order and the CPU's chunk order survive into the
+            // array, and truncating an over-full final epoch then keeps a different
+            // subset on each -- the filters agree, but the caches would not.
+            java.util.Arrays.sort(merged);
             all = merged;
             totalTested += EPOCH_SAMPLES;
             sampleAt = epochTo;
