@@ -2396,3 +2396,58 @@ ordinary use, and this one degraded into a plausible-looking success. Building a
 deliberately broken binary took one command and turned a report of "no usable GPU" into
 the exact line of the fix. Worth doing whenever a failure is reported from a machine that
 is not to hand.
+
+## 6aj. The simulator is worse far from the origin, and that is where every reverse find is
+
+The reverse search only ever produces far-out coordinates — that is the point of inverting
+`setDecorationSeed`. So its accuracy at 8 million blocks matters more than its accuracy near
+spawn, and the two are not the same.
+
+Against 59 ground-truth `features`-status chunks around x=-8.0M, z=-6.3M on seed 5180
+(`ProtoValidator`, exported from a real 1.16.1 server):
+
+```
+exact category match: 97.9217%   (59,472 cells)
+simulated AIR that is really WATER : 11 / 9484 air  (0.1160%)
+simulated WATER that is really AIR :  3 / 14351 water (0.0209%)
+```
+
+The first line is the class implicated in false hits (6ab). Near spawn it measured
+**0.0205%** over 281 chunks. Out here it is **0.1160% — 5.7x worse.**
+
+### Lava was the wrong suspect
+
+The simulator assumes lava exists only below y=11 (`Carver` returns early there), and the
+real world has lava up to y=30 — inside the y 13..35 depth band the reverse search draws
+chain bases from. Simulated water where the game has lava would satisfy the cane's water
+condition when the game does not, inventing a spot outright.
+
+It does not happen. `LAVA` is now its own export category rather than being lumped into
+`OTHER` with coral and leaves, and in the scored window there are 189 lava cells, **none in
+the band**, and zero disagreements of either kind. Hypothesis dead; the instrumentation
+stays, because "we checked and it is not this" is worth keeping.
+
+Worth noting how close that came to never being asked. Lava was invisible while it sat in
+`OTHER` alongside 9,085 cells of coral, leaves and mineshaft cobweb. Categories that mean
+"something else" hide exactly the questions nobody has thought to ask yet.
+
+### The open suspect: float precision
+
+`float` has 24 bits of mantissa, so its ulp reaches 1.0 at x = 8.4M and 2.0 at 16.8M. The
+world border the reverse search reaches is ±29.9M. Any worldgen arithmetic done in `float`
+therefore cannot resolve individual blocks out there — and section 7 already records
+`OreFeature.place` computing its endpoints in float and being wrong by up to a quarter of a
+block at a few million, with the warning to assume every other transcription has the same
+class of bug until checked far from the origin.
+
+That warning was never acted on. The next step is to find every `float` in the carvers,
+surface builder and terrain, and check each against the decompiled source at 8M — not to
+replace them with `double`, because the game's own floats are the ground truth. A simulator
+using `double` where the game uses `float` diverges exactly where our finds live.
+
+### The ground truth for this
+
+`tools/export_proto.py <world> <out.bin>` reads the seed from `level.dat` itself now. It
+used to write a hardcoded `1` for the caller to patch, and a caller who forgot got a report
+of `0/0 cells, 0.0000% accuracy` — a wrong-seed world has no ocean chunks where the real one
+does, and nothing in the output said so.
