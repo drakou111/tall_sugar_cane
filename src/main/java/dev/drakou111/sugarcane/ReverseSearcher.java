@@ -63,7 +63,13 @@ public final class ReverseSearcher {
     private static final String UPDATE_FLAG = "--update=";
     private static final String SISTERS_FLAG = "--sisters=";
     /**
-     * How many upper-16 values to sweep per low-48 seed. 1 keeps the original loop.
+     * How many upper-16 values to sweep per low-48 seed. Default 64; {@code --sisters=1}
+     * restores the original one-seed-at-a-time loop.
+     *
+     * <p>Note what the default changes for a caller: {@code firstSeed} and
+     * {@code seedCount} now count <em>low-48</em> seeds, and each one is searched at 64
+     * different upper-16 values. The seeds examined are therefore
+     * {@code low48 | (u << 48)} for u in 0..63, not a run of consecutive longs.
      *
      * <p>Sisters share their low 48 bits, and the lattice, the decoration seed at the
      * solved chunk and the carver walk all depend on nothing else — verified directly —
@@ -91,7 +97,7 @@ public final class ReverseSearcher {
      * against a 1.1e-3 base rate), so finds arrive in bursts. That does not change the
      * expected number of finds, only their variance.
      */
-    private static int sisters = 1;
+    private static int sisters = 64;
 
     /**
      * Minutes between progress lines, as {@code search} spells it. Fractions are allowed,

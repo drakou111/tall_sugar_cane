@@ -82,8 +82,11 @@ public final class Cli {
                             + "lattice, the decoration seed and the carver walk all depend "
                             + "on the low 48 alone, so the target sweep and the air probe "
                             + "run once and amortise over all n, and the biome gate then "
-                            + "runs only on what the probe kept. Measured 4.2x at n=64. "
-                            + "firstSeed and seedCount count low-48 seeds when this is on.",
+                            + "runs only on what the probe kept. Measured 4.2x at n=64, "
+                            + "which is the default and is where the curve flattens; "
+                            + "--sisters=1 restores the old loop. Note firstSeed and "
+                            + "seedCount count low-48 seeds, and each is searched at n "
+                            + "different upper-16 values rather than consecutively.",
                     ReverseSearcher::main),
             new Command("targets",
                     "<minHeight> <count> <file> [threads] [--cpu] [--update=<minutes>] "
