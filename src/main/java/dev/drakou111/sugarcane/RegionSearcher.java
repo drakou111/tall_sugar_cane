@@ -606,6 +606,41 @@ public final class RegionSearcher {
             }
         }
 
+        /**
+         * Whether every base of a chain sits in a block the <em>noise</em> made solid.
+         *
+         * <p>The air probe says a carver could have reached the base; this says there was
+         * something there for it to carve. Below sea level the noise fills every non-solid
+         * block with water, and a carver turns stone into air but never turns water into
+         * air — so a base above the noise floor is water, and water is not air. Rejecting
+         * on that cannot lose a find.
+         *
+         * <p>It costs one noise column against the ~4.7 ms nine-chunk build it stands in
+         * front of, and it is the only part of the terrain a single column can answer
+         * exactly: the surface builder and the carvers both read their neighbours, which
+         * is why the wider "generate only the window" version of this idea is unsound.
+         */
+        boolean noiseCouldHoldChain(int px, int pz, int[] baseYs, int count) {
+            ensureTerrain();
+            terrain.column(px, pz, noiseColumn);
+            for (int i = 0; i < count; i++) {
+                int y = baseYs[i];
+                if (y < 0 || y >= ArrayWorld.HEIGHT) {
+                    return false;
+                }
+                // Reject on water specifically, not on "not solid". Above the surface
+                // the noise leaves air, and air is already what a base needs — keying
+                // this off blocksMotion would reject those, which would depend on the
+                // depth band staying below sea level to stay correct.
+                if (Blocks.isWaterFluid(noiseColumn[y])) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private final byte[] noiseColumn = new byte[ArrayWorld.HEIGHT];
+
         void searchOneChunk(int chunkX, int chunkZ) {
             ensureTerrain();
             centreChunkX = chunkX;

@@ -131,6 +131,7 @@ public final class ReverseSearcher {
     static final AtomicLong WHY_OUTSIDE = new AtomicLong();
     static final AtomicLong WHY_CARVED = new AtomicLong();
     static final AtomicLong WHY_NOWATER = new AtomicLong();
+    static final AtomicLong WHY_NOISE = new AtomicLong();
 
     private ReverseSearcher() {
     }
@@ -179,14 +180,20 @@ public final class ReverseSearcher {
     private static boolean probeAccepts(ChainPrefilter chainFilter, AirCarveProbe probe,
             DirtBlobFilter dirt, boolean biomeOcean, long seed, long decorationSeed,
             int minHeight, int[] chunk, RegionSearcher.Worker worker, boolean permissive,
-            LiquidCarveProbe liquid) {
+            LiquidCarveProbe liquid, int[] accepted) {
         int chains = chainFilter.collectChains(decorationSeed, OCEAN_INDEX, minHeight);
         if (chainFilter.chainsOverflowed()) {
             WHY_OVERFLOW.incrementAndGet();
+            if (accepted != null) {
+                accepted[2] = 0;    // nothing to test downstream
+            }
             return true;
         }
         if (chains == 0) {
             WHY_NOCHAIN.incrementAndGet();
+            if (accepted != null) {
+                accepted[2] = 0;
+            }
             return true;
         }
         for (int i = 0; i < chains; i++) {
@@ -235,6 +242,15 @@ public final class ReverseSearcher {
             int soilY = ChainPrefilter.chainBaseY(chain, 0) - 1;
             if (rx < 0 || rx > 15 || rz < 0 || rz > 15
                     || dirt.couldSupply(decorationSeed, rx, soilY, rz)) {
+                if (accepted != null) {
+                    int cols = ChainPrefilter.chainColumns(chain);
+                    accepted[0] = px;
+                    accepted[1] = pz;
+                    accepted[2] = cols;
+                    for (int c = 0; c < cols; c++) {
+                        accepted[3 + c] = ChainPrefilter.chainBaseY(chain, c);
+                    }
+                }
                 return true;
             }
         }
@@ -473,6 +489,8 @@ public final class ReverseSearcher {
                 int[] keepX = new int[0];
                 int[] keepZ = new int[0];
                 long[] keepTarget = new long[0];
+                int[][] keepChain = new int[0][];
+                int[] accepted = new int[16];
                 for (long seed = nextSeed.getAndIncrement(); seed < lastSeed;
                         seed = nextSeed.getAndIncrement()) {
                     if (sisters > 1) {
@@ -488,6 +506,7 @@ public final class ReverseSearcher {
                             keepX = new int[bucket.length];
                             keepZ = new int[bucket.length];
                             keepTarget = new long[bucket.length];
+                            keepChain = new int[bucket.length][];
                         }
                         int kept = 0;
                         long solvedHere = 0;
@@ -502,12 +521,13 @@ public final class ReverseSearcher {
                             solvedHere++;
                             boolean pass = probeAccepts(chainFilter, probe, dirtFilter,
                                     false, low48, target, reportHeight, chunk, null, true,
-                                    liquidProbe);
+                                    liquidProbe, accepted);
                             nsProbe.addAndGet(System.nanoTime() - t1);
                             if (pass) {
                                 keepX[kept] = chunk[0];
                                 keepZ[kept] = chunk[1];
                                 keepTarget[kept] = target;
+                                keepChain[kept] = accepted.clone();
                                 kept++;
                             }
                         }
@@ -529,6 +549,13 @@ public final class ReverseSearcher {
                                     continue;
                                 }
                                 oceans.incrementAndGet();
+                                int[] ch = keepChain[i];
+                                if (ch[2] > 0 && !worker.noiseCouldHoldChain(
+                                        ch[0], ch[1], java.util.Arrays.copyOfRange(ch, 3, 3 + ch[2]),
+                                        ch[2])) {
+                                    WHY_NOISE.incrementAndGet();
+                                    continue;
+                                }
                                 probed.incrementAndGet();
                                 worker.searchOneChunk(keepX[i], keepZ[i]);
                                 nsChunk.addAndGet(System.nanoTime() - tg2);
@@ -579,7 +606,7 @@ public final class ReverseSearcher {
                         // of one walk instead of nine chunk generations.
                         boolean pass = probeAccepts(chainFilter, probe, dirtFilter,
                                 biomeOcean, seed, target, reportHeight, chunk, worker, false,
-                                liquidProbe);
+                                liquidProbe, null);
                         long t3 = System.nanoTime();
                         nsProbe.addAndGet(t3 - t2);
                         if (!pass) {
@@ -660,9 +687,9 @@ public final class ReverseSearcher {
                 probed.get(), 100.0 * probed.get() / Math.max(1, oceans.get()));
         System.out.printf("probe accepts by reason: overflow %d, no chain %d, "
                         + "chain in a neighbour chunk %d, in the candidate chunk %d; "
-                        + "rejected for no carver water %d%n",
+                        + "rejected for no carver water %d, for noise-not-solid %d%n",
                 WHY_OVERFLOW.get(), WHY_NOCHAIN.get(), WHY_OUTSIDE.get(), WHY_CARVED.get(),
-                WHY_NOWATER.get());
+                WHY_NOWATER.get(), WHY_NOISE.get());
         System.out.printf("%.0f candidates/s, %.0f searched chunks/s%n",
                 candidates.get() * 1000.0 / Math.max(1, ms),
                 stats.chunksSearched.get() * 1000.0 / Math.max(1, ms));
