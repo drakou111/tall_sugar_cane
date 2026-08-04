@@ -2541,9 +2541,9 @@ seed bits buy, and that is the open part:
 - every searchable ocean has **scale 0.10** and depth either -1.0 or -1.8.
 
 So a sister seed re-rolls the sea floor by the ocean/deep-ocean difference on a *fixed*
-carver walk. That is not a nudge and not a full re-roll, and the trial count is 3.96e27 or
-4.80e31 accordingly. **Unresolved.** The measurement that settles it: stride the seed by
-2^48 and count how often the best `maxRun` at a fixed chunk actually changes.
+carver walk. **Settled in 6al, and the answer is ~24-25**: the 3.96e27 alternative was an
+error, because it conflated independence with expectation and correlation cannot change an
+expectation. Read 6al rather than the bracket above.
 
 ### Per-candidate cost, and two things that do not work
 
@@ -2622,3 +2622,99 @@ out -- past where 6aj measured the simulator 5.7x worse, with float precision st
 suspect and float ulp already 2 blocks by 16.8M. The terrain rolls independently in each, so
 at 6ab's ~1-in-3 failure rate P(all three false) is ~4%; the chain logic does not, so one
 in-game check settles the shape for all three at once.
+
+## 6al. Sister seeds: the ceiling settled, and 4.2x from the upper 16 bits
+
+6ak left the existence ceiling as a 22-to-25 bracket, turning on how independent seeds
+sharing their low 48 bits are. That is now measured, and it also turned out to price an
+optimisation.
+
+### What a sister actually shares
+
+Verified directly rather than argued. Six seeds sharing low-48 `...890115`:
+
+```
+upper   world seed          decorationSeed      lattice(cx,cz)     carved
+0       1234567890115       109089712118451     1509158,-240279    00000
+1       282709544600771     109089712118451     1509158,-240279    00000
+...
+5       1408609451443395    109089712118451     1509158,-240279    00000
+```
+
+The lattice solution, the decoration seed at it, and the air probe are **identical**.
+`setDecorationSeed` XORs the full 64-bit seed but feeds the result through `setSeed`,
+which masks to 48; `setLargeFeatureSeed` does the same. Only the biome map varies.
+
+### How independent they are
+
+Two arms, same statistic: SISTER varies the upper 16 at a fixed low-48 seed and chunk,
+CONTROL varies the low-48 seed at the same chunk and is independent by construction.
+
+```
+                        within/total   all-identical   P(another stackable | one is)
+SISTER                      0.793          86.3%              0.5597   (11 families)
+CONTROL                     0.807          85.4%              0.0000   (28 families)
+base rate of stackable                                        1.1e-03
+```
+
+The two statistics disagree, and both are true. Legal spots — essentially "is there a
+floor with soil beside water" — re-roll almost freely, because depth/scale moves the sea
+floor by the ocean/deep-ocean difference. The **rare** geometry does not: it is cut by the
+carver walk, which is fixed across sisters, so given one sister has a stackable spot, 56%
+of the others do too against a base rate of 0.1%.
+
+### The ceiling: ~24-25, and 6ak's 22 was wrong
+
+The correlation is real but it does not do what 6ak used it for. Expected count is
+`sum over (world, chunk) of P(N-tall)` and **correlation cannot change an expectation**.
+6ak replaced 4.80e31 trials with 3.96e27 on independence grounds; that conflated
+independence with expectation and was simply an error. The original figure stands:
+
+```
+E[count] = 4.80e31 x rate(N)        ->  E = 2.3 at N = 25, 0.22 at N = 26
+```
+
+Clustering does lower P(at least one) relative to E[count], so the honest ceiling is
+**~24-25** — not 22, and not the 22-25 bracket.
+
+### The same fact is worth 4.2x
+
+If the lattice, the decoration seed and the carver walk are all low-48, they can be
+computed **once** and reused across every sister. Then the biome gate — 54% of the
+per-candidate cost, and the term that degrades worst under load — runs only on what the
+probe kept, instead of on everything. `--sisters=<n>` does this.
+
+The probe has to be biome-blind to be shareable, which is sound in the accepting
+direction: `CAVE_LAND = 0.1429` against `CAVE_OCEAN = 0.0667` on the same `nextFloat()`,
+so the land walk fires on a strict superset of ocean start chunks and carves a superset.
+No find can be lost to it; it costs ~17% more generated chunks.
+
+Measured, 8 threads, matched candidate counts:
+
+```
+              candidates/s   gate   probe   chunk   total    searched chunks/s
+n = 1               52,639   93 us   26 us   31 us   151 us        288
+n = 64             220,995    3 us    2 us   29 us    34 us      1,415     4.2x
+n = 256            211,640    4 us    0 us   31 us    35 us      1,287
+n = 1024           204,552    3 us    0 us   29 us    33 us      1,134
+```
+
+**Flat past 64**, so there is no reason to sweep all 65,536: chunk generation is 29 us of
+33 and amortises over nothing. Beyond that, sisters are 0.56-correlated on the rare
+geometry, so exhausting one family concentrates effort on near-identical worlds — the same
+expectation with more variance than spreading over more low-48 families.
+
+### The 44x I first claimed was arithmetic, not measurement
+
+I projected 44x from "per sister, 1.4 ms setup + 19 survivors x 110 us over ~750
+candidates". That omitted chunk generation entirely, which is per candidate, does not
+amortise, and is now 85% of what is left. The correct accounting was available before
+building anything: 151 us drops to gate 3 + probe 2 + chunk 29 = 34, which is 4.4x, and
+4.2x is what the run gives.
+
+Two benchmarking traps found on the way, both of which produced confident wrong numbers.
+Four low-48 seeds across eight threads leaves half the threads idle while the reported
+`thread-us` figure assumes all are busy, inflating per-candidate cost 2x — the give-away is
+"accounted" and "actual" diverging, and they agree once the seeds outnumber the threads.
+And `LayerCaches.enlarge` costs 301 us against 38 us for the biome source it enlarges,
+which is worth knowing but was not the bottleneck it looked like.

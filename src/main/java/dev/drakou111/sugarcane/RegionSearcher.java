@@ -580,7 +580,34 @@ public final class RegionSearcher {
          * chunk and the region the minimum 6 — the candidate then sits at local 1,1,
          * off the region border that is never searched.
          */
+        /**
+         * Biome source only, leaving the noise samplers and the iceberg tables unbuilt.
+         *
+         * <p>For the sister sweep the biome map is the <em>only</em> thing that changes
+         * between one upper-16 value and the next, and most sisters reject every
+         * candidate on the biome gate alone — so building a Terrain for them is pure
+         * waste. {@link #searchOneChunk} builds it on the first candidate that survives.
+         */
+        void prepareBiomesOnly(long seed) {
+            this.seed = seed;
+            this.biomes = new OverworldBiomeSource(MCVersion.v1_16_1, seed);
+            dev.drakou111.sugarcane.gen.LayerCaches.enlarge(this.biomes);
+            this.terrain = null;
+            this.frozenOcean = null;
+            spawnKnown = false;
+            centreChunkX = 0;
+            centreChunkZ = 0;
+        }
+
+        private void ensureTerrain() {
+            if (terrain == null) {
+                terrain = new Terrain(biomes);
+                frozenOcean = new dev.drakou111.sugarcane.gen.FrozenOceanSurface(seed);
+            }
+        }
+
         void searchOneChunk(int chunkX, int chunkZ) {
+            ensureTerrain();
             centreChunkX = chunkX;
             centreChunkZ = chunkZ;
             searchRegion(chunkX - 1, chunkZ - 1);

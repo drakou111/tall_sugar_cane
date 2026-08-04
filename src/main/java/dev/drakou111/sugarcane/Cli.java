@@ -57,7 +57,8 @@ public final class Cli {
             new Command("reverse",
                     "<minHeight> [threads] [targets] [firstSeed] [seedCount] "
                             + "[--targets=<file>] [--cpu] [--report=<h>] "
-                            + "[--update=<minutes>] [--max-shift=<n>] [--max-columns=<n>]",
+                            + "[--update=<minutes>] [--max-shift=<n>] [--max-columns=<n>] "
+                            + "[--sisters=<n>]",
                     "Pick the cane RNG first, then solve for a chunk that has it. Collects "
                             + "decoration seeds whose draws could chain a tall enough column "
                             + "with no terrain involved, then inverts setDecorationSeed by "
@@ -75,7 +76,14 @@ public final class Cli {
                             + "finds no terrain still leaves a 7, and that is worth keeping. "
                             + "--max-shift and --max-columns override the target ranking, "
                             + "which is what makes an older set reproducible. "
-                            + "--update=<minutes> sets the progress interval, default 1.",
+                            + "--update=<minutes> sets the progress interval, default 1. "
+                            + "--sisters=<n> sweeps n values of the seed's upper 16 bits "
+                            + "per low-48 seed. Those bits change only the biome map: the "
+                            + "lattice, the decoration seed and the carver walk all depend "
+                            + "on the low 48 alone, so the target sweep and the air probe "
+                            + "run once and amortise over all n, and the biome gate then "
+                            + "runs only on what the probe kept. Measured 4.2x at n=64. "
+                            + "firstSeed and seedCount count low-48 seeds when this is on.",
                     ReverseSearcher::main),
             new Command("targets",
                     "<minHeight> <count> <file> [threads] [--cpu] [--update=<minutes>] "
