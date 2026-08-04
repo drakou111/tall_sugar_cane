@@ -442,10 +442,17 @@ public final class ReverseSearcher {
                     return;
                 }
                 long ms = System.currentTimeMillis() - start;
-                System.out.printf("[%4.1f min] seeds %d, candidates %d (%.0f/s), "
+                // The seed frontier, not a seed any thread is on: `nextSeed` is the next
+                // one to be handed out, so up to `threads` seeds below it are still in
+                // flight. It is printed because it is the resume point — the run is
+                // usually killed rather than finished, and without it the only way to
+                // continue without repeating work is to guess from the elapsed rate.
+                // Resuming from it can drop the few unfinished seeds behind it; pass
+                // `firstSeed` a little lower to overlap instead.
+                System.out.printf("[%4.1f min] seed %d (%d done), candidates %d (%.0f/s), "
                                 + "ocean %d, past probe %d, chunks searched %d, cane %d, "
                                 + "tallest %d, hits %d%n",
-                        ms / 60000.0, seedsDone.get(), candidates.get(),
+                        ms / 60000.0, nextSeed.get(), seedsDone.get(), candidates.get(),
                         candidates.get() * 1000.0 / Math.max(1, ms), oceans.get(),
                         probed.get(),
                         stats.chunksSearched.get(), stats.caneColumns.get(),
