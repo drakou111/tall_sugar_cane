@@ -19,14 +19,48 @@ import sys
 import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from mcnbt import read_nbt, Reader  # noqa: E402
 
 WORLD = sys.argv[1]
 OUT = sys.argv[2]
 MAX = int(sys.argv[3]) if len(sys.argv) > 3 else 100000
 HEIGHT = 71
 
+
+def world_seed(world):
+    """The seed out of level.dat.
+
+    It used to be written as a hardcoded 1 for the caller to patch, and a caller that
+    forgot produced a file the validator happily read with the wrong seed: it
+    regenerated a different world, found no ocean chunks, and reported 0/0 cells and
+    0.0000% accuracy. Reading it here removes the step that can be skipped.
+    """
+    raw = gzip.open(os.path.join(world, 'level.dat'), 'rb').read()
+    # 1.16 keeps it at Data.WorldGenSettings.seed; older worlds at Data.RandomSeed.
+    tag = read_nbt(Reader(raw))
+
+    def walk(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in ('RandomSeed', 'seed') and isinstance(value, int):
+                    return value
+                found = walk(value)
+                if found is not None:
+                    return found
+        elif isinstance(node, list):
+            for value in node:
+                found = walk(value)
+                if found is not None:
+                    return found
+        return None
+
+    seed = walk(tag)
+    if seed is None:
+        raise SystemExit('no seed in %s/level.dat' % world)
+    return seed
+
 # Categories must match the Java side.
-OTHER, AIR, WATER, STONE, DIRT, SAND, GRAVEL, CLAY, GRASS, CANE, ICE = range(11)
+OTHER, AIR, WATER, STONE, DIRT, SAND, GRAVEL, CLAY, GRASS, CANE, ICE, LAVA = range(12)
 
 AIR_NAMES = {'air', 'cave_air', 'void_air'}
 WATER_NAMES = {'water', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass',
@@ -44,6 +78,11 @@ STONE_NAMES = {'stone', 'granite', 'diorite', 'andesite', 'sandstone',
 
 
 def category(name):
+    # Lava is its own category rather than OTHER. The simulator assumes lava exists only
+    # below y=11 (Carver), and the real world has it up to y=30 -- inside the cane depth
+    # band -- so lumping it with coral and leaves hid a class of invented find.
+    if name == 'lava':
+        return LAVA
     if name in AIR_NAMES:
         return AIR
     if name in WATER_NAMES:
@@ -67,12 +106,11 @@ def category(name):
     return OTHER
 
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from mcnbt import read_nbt, Reader  # noqa: E402
-
 out = open(OUT, 'wb')
 out.write(b'PROT')
-out.write(struct.pack('<q', 1))          # seed, filled in by the caller's world
+SEED = world_seed(WORLD)
+print('world seed %d' % SEED)
+out.write(struct.pack('<q', SEED))
 count_pos = out.tell()
 out.write(struct.pack('<i', 0))
 

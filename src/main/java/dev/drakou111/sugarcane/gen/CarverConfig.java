@@ -27,6 +27,9 @@ public final class CarverConfig {
 
     public static final int CARVE_RADIUS = 8;
 
+    /** Sea level, which is where the carvers switch between air and water. */
+    public static final int SEA_LEVEL = 63;
+
     /** Probabilities from {@code BiomeDefaultFeatures}. */
     public static final float CAVE_LAND = 0.14285715f;
     public static final float CAVE_OCEAN = 0.06666667f;

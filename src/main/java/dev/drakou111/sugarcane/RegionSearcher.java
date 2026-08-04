@@ -111,6 +111,25 @@ public final class RegionSearcher {
     static int traceChunkX = Integer.MIN_VALUE;
     static int traceChunkZ = Integer.MIN_VALUE;
 
+    /**
+     * Centre the box on this chunk instead of 0,0. Without it a position far from
+     * the origin is outside the box at "keep the find near the origin" below, so no
+     * chunk is searchable, nothing is generated, and every read comes back as the
+     * out-of-window SOLID — which reads as solid terrain rather than as an error.
+     * Both {@link Inspect} and {@link ReverseSearcher} work far from the origin,
+     * since the world border allows chunk coordinates out to ±1,874,999.
+     */
+    static int centreOverrideX = Integer.MIN_VALUE;
+    static int centreOverrideZ = Integer.MIN_VALUE;
+
+    /**
+     * {@link Inspect} only: drop the filters that exist to make a <em>search</em>
+     * cheap rather than correct, so any position can be looked at. A search must
+     * leave this alone — the mineshaft skip in particular is there because those
+     * chunks are simulated wrongly, not because they are unpromising.
+     */
+    static boolean relaxFilters = false;
+
     private RegionSearcher() {
     }
 
@@ -126,7 +145,7 @@ public final class RegionSearcher {
      * motion-blocking block above sea level, so the MOTION_BLOCKING heightmap is
      * exactly 63 and the placement draws are reproducible.
      */
-    private static boolean isSearchableOcean(int biome) {
+    static boolean isSearchableOcean(int biome) {
         return biome == 0 || biome == 24 || biome == 44 || biome == 45
                 || biome == 46 || biome == 47 || biome == 48 || biome == 49;
     }
@@ -190,6 +209,13 @@ public final class RegionSearcher {
             thread.join();
         }
         stats.print(System.currentTimeMillis() - start);
+        if (probeTrials > 0) {
+            // The baseline to divide the finds' properties by: the same properties over
+            // accepted seeds generally. Sampled here rather than during the search so
+            // it costs nothing on the hot path.
+            new ProbabilityProbe().samplePopulation(5, report, 400_000L);
+            ProbabilityProbe.printRanking();
+        }
     }
 
     /**
@@ -271,9 +297,27 @@ public final class RegionSearcher {
         final AtomicLong spotsOnFloorTop = new AtomicLong();
         final AtomicLong spotsInside = new AtomicLong();
         final AtomicLong spotDepthSum = new AtomicLong();
+        /**
+         * Spots by the tallest run the terrain permits there, which is the exact
+         * condition rather than the contiguous-face proxy. Index 0 collects runs of 20+.
+         */
+        private final AtomicLong[] runs = new AtomicLong[24];
+        /** Chunks whose best permitted run reaches the reported height: the true R. */
+        final AtomicLong chunksPermitting = new AtomicLong();
+
+        void runHistogram(int run) {
+            runs[Math.min(run, runs.length - 1)].incrementAndGet();
+        }
+
         final AtomicLong probedChunks = new AtomicLong();
         final AtomicLong probeTrials = new AtomicLong();
         final AtomicLong probeHits = new AtomicLong();
+
+        Stats() {
+            for (int i = 0; i < runs.length; i++) {
+                runs[i] = new AtomicLong();
+            }
+        }
 
         void tallest(int height) {
             tallest.accumulateAndGet(height, Math::max);
@@ -309,6 +353,25 @@ public final class RegionSearcher {
                                 + "missing disks), %d inside the terrain; mean soil y %.1f%n",
                         spotsOnFloorTop.get(), spotsInside.get(),
                         (double) spotDepthSum.get() / spots);
+            }
+            long runTotal = 0;
+            for (AtomicLong a : runs) {
+                runTotal += a.get();
+            }
+            if (runTotal > 0) {
+                System.out.printf("%nspots by the tallest run the terrain permits "
+                        + "(exact, not the face proxy):%n");
+                long tail = 0;
+                for (int h = runs.length - 1; h >= 2; h--) {
+                    tail += runs[h].get();
+                    if (tail > 0) {
+                        System.out.printf("  >= %2d: %-10d %.3e per searched chunk%n",
+                                h, tail, (double) tail / Math.max(1, chunksSearched.get()));
+                    }
+                }
+                System.out.printf("chunks permitting the reported height: %d (R = %.3e)%n",
+                        chunksPermitting.get(),
+                        (double) chunksPermitting.get() / Math.max(1, chunksSearched.get()));
             }
             if (probeTrials.get() > 0) {
                 double r = (double) probedChunks.get() / Math.max(1, chunksSearched.get());
@@ -451,7 +514,10 @@ public final class RegionSearcher {
             dev.drakou111.sugarcane.gen.LayerCaches.enlarge(this.biomes);
             this.terrain = new Terrain(biomes);
             spawnKnown = false;
-            if (centreOnSpawn) {
+            if (centreOverrideX != Integer.MIN_VALUE) {
+                centreChunkX = centreOverrideX;
+                centreChunkZ = centreOverrideZ;
+            } else if (centreOnSpawn) {
                 spawnPacked = SpawnFinder.spawnChunk(biomes, seed);
                 spawnKnown = true;
                 centreChunkX = SpawnFinder.chunkX(spawnPacked);
@@ -460,6 +526,11 @@ public final class RegionSearcher {
                 centreChunkX = 0;
                 centreChunkZ = 0;
             }
+        }
+
+        /** For {@link Inspect}, which reports the biome when nothing generated. */
+        OverworldBiomeSource biomeSource() {
+            return biomes;
         }
 
         private long spawnChunk() {
@@ -484,6 +555,24 @@ public final class RegionSearcher {
                     terrain.clearCaches();
                 }
             }
+        }
+
+        /**
+         * Generates and searches exactly one chunk, wherever in the world it is.
+         * {@link ReverseSearcher} arrives at isolated chunks rather than boxes, so
+         * there is nothing to amortise a region over: the eight neighbours are
+         * generated because the feature reaches ±4 blocks into them and their dirt
+         * blobs leak back, and the chunk itself is the only one searched.
+         *
+         * <p>Requires a worker built with radius 0, which makes the box exactly this
+         * chunk and the region the minimum 6 — the candidate then sits at local 1,1,
+         * off the region border that is never searched.
+         */
+        void searchOneChunk(int chunkX, int chunkZ) {
+            centreChunkX = chunkX;
+            centreChunkZ = chunkZ;
+            searchRegion(chunkX - 1, chunkZ - 1);
+            terrain.clearCaches();
         }
 
         private int regionIndex(int localChunkX, int localChunkZ) {
@@ -549,7 +638,7 @@ public final class RegionSearcher {
                     // mineshaft start, for 19% of the chunks. Missing air there
                     // flips cane tries and desynchronises the whole chunk's stream,
                     // so those chunks are skipped rather than searched wrongly.
-                    if (mineshaftNear(cx, cz)) {
+                    if (!relaxFilters && mineshaftNear(cx, cz)) {
                         continue;
                     }
                     boolean ok = true;
@@ -811,10 +900,14 @@ public final class RegionSearcher {
             runDirtBlobs(decorationSeed, chunkX, chunkZ);
             runDisks(decorationSeed, chunkX, chunkZ);
             if (diagnose) {
-                int stackable = countGeometry(chunkX, chunkZ);
+                int bestRun = countGeometry(chunkX, chunkZ);
                 stats.countBiome(biomes.getBiomeForNoiseGen(
-                        chunkX * 4 + 2, 0, chunkZ * 4 + 2).getId(), 1, stackable);
-                if (stackable > 0 && probeTrials > 0) {
+                        chunkX * 4 + 2, 0, chunkZ * 4 + 2).getId(), 1,
+                        bestRun >= report ? 1 : 0);
+                if (bestRun >= report) {
+                    stats.chunksPermitting.incrementAndGet();
+                }
+                if (bestRun >= report && probeTrials > 0) {
                     int probeBiome = biomes.getBiomeForNoiseGen(
                             chunkX * 4 + 2, 0, chunkZ * 4 + 2).getId();
                     int probeHits = probe.measure(world, chunkX, chunkZ,
@@ -897,8 +990,44 @@ public final class RegionSearcher {
          * section 6, and multiplying it by the measured P says how long a search
          * has to run.
          */
+        /**
+         * The tallest contiguous run this terrain permits from a base at
+         * {@code (x, baseY, z)}, maximised over every column composition.
+         *
+         * <p>This is the exact terrain condition, as opposed to the contiguous
+         * air-and-water "face" that {@code printSpots} reports. Two things make it
+         * looser than the face:
+         * <ul>
+         *   <li>{@code ColumnPlacer} writes upward <em>unconditionally</em>, so only
+         *       each column's <b>base</b> needs to be air — the blocks above it may be
+         *       solid and get overwritten;</li>
+         *   <li>{@code needWater} is checked at the block below each base, so water is
+         *       needed at {@code base-1}, {@code base+h1-1}, ... and not in between.</li>
+         * </ul>
+         * So a 3+4 chain needs water beside {@code base+2}, which a face-based test
+         * that insists on water beside {@code base+1} never sees. Using the face as a
+         * proxy for this is what made the height-7 rate estimate ~5x optimistic.
+         */
+        private int maxRun(int x, int baseY, int z, int depth) {
+            int best = 0;
+            for (int h = 2; h <= 4; h++) {
+                int next = baseY + h;
+                int total = h;
+                if (depth < 6 && next < ArrayWorld.HEIGHT - 1
+                        && world.isAir(x, next, z)
+                        && SugarCaneFeature.hasWaterBeside(world, x, next - 1, z)) {
+                    total += maxRun(x, next, z, depth + 1);
+                }
+                if (total > best) {
+                    best = total;
+                }
+            }
+            return best;
+        }
+
         private int countGeometry(int chunkX, int chunkZ) {
             int legal = 0, stackable = 0, relaxed = 0;
+            int chunkBestRun = 0;
             for (int x = chunkX * CHUNK; x < chunkX * CHUNK + CHUNK; x++) {
                 for (int z = chunkZ * CHUNK; z < chunkZ * CHUNK + CHUNK; z++) {
                     for (int y = 1; y < SEA + 8; y++) {
@@ -906,6 +1035,13 @@ public final class RegionSearcher {
                             continue;
                         }
                         legal++;
+                        // The exact condition, not a proxy: the tallest run this
+                        // terrain permits from here over every column composition.
+                        int run = maxRun(x, y, z, 0);
+                        stats.runHistogram(run);
+                        if (run > chunkBestRun) {
+                            chunkBestRun = run;
+                        }
                         // The shortest first column is 2 tall, so the water face
                         // has to reach at least soil+2 for anything to stack.
                         // What the game needs: air where the second column starts,
@@ -948,7 +1084,9 @@ public final class RegionSearcher {
             stats.legalSpots.addAndGet(legal);
             stats.stackableSpots.addAndGet(stackable);
             stats.stackableRelaxed.addAndGet(relaxed);
-            return stackable;
+            // The chunk's best permitted run, so the probe can be gated on the exact
+            // condition instead of on `stackable`, which is not a superset of it.
+            return chunkBestRun;
         }
 
         /**

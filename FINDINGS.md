@@ -1695,3 +1695,704 @@ travelling, and treat a HIT line as a candidate.
 - Never measure carver fidelity against `full` chunks. Use `features`-status
   chunks; `CarverValidator` cannot exceed about 90% for reasons that have nothing
   to do with correctness, while `ProtoValidator` reads 99.95%.
+
+## 6ac. Eight tall exists, someone else found it, and it inverts 6w
+
+Reported find, and the first independent one: seed **-7585781829663227268** at
+**-24848077, 21, 18720986**, 1.16. Verified by forceloading the chunk in a real
+1.16.1 server and reading the region file:
+
+```
+y= 20  dirt        N=stone     S=dirt      W=dirt    E=water[0]
+y= 21  sugar_cane                                    E=water[0]
+ ...   sugar_cane  x 8
+y= 28  sugar_cane  N=water[0]  S=water[1]  W=gravel  E=water[0]
+y= 29  stone
+```
+
+Eight tall on ore-blob dirt at y=20, with a water **source** column to the east
+continuous from y=20 to y=36. Nothing exotic: it is the flooded-underwater-carver
+water face of section 5, at the mean spot depth this document already predicts
+(soil y=20 against a measured mean of 23.2).
+
+### Two reasons this search could never have produced it
+
+**The area is invisible to us.** The 3x3 neighbourhood contains biomes 10 and 50,
+frozen_ocean and deep_frozen_ocean. `SurfaceConfig.supported()` excludes both, so
+`searchRegion` skips the chunk outright. This is not a rate — it is a region of the
+world the search does not look at.
+
+**`inspect` lied about it rather than saying so.** It clipped to `radius` chunks
+around 0,0, so nothing was generated and every read returned the out-of-window
+`SOLID`; the tool printed a confident wall of stone for a position that really
+holds an 8-tall column. It now centres the box on the target, drops the ocean and
+mineshaft filters, and warns when a chunk was not generated. Any find reported by
+someone else lands in this case, because the world border allows chunk coordinates
+out to ±1,874,999.
+
+### What 8 tall actually costs, measured
+
+An 8-tall run is two 4-high columns. `ColumnPlacer` draws
+`2 + nextInt(nextInt(3) + 1)`, so P(h=4) = 1/9, and the second column's y is pinned
+to `y1 + h1` exactly.
+
+The terrain requirement is **much weaker than it looks**, and this is the useful
+part. The upper column needs `needWater` at the top of the lower one — water beside
+`base+3` — and air at `base+4`. It does *not* need water beside `base+1` or
+`base+2`, and it does not need the run's own top to be beside water. So a **5-tall
+water face is already enough for 8 tall**. Over 120M decoration seeds per row, on
+one isolated spot with soil at y=20:
+
+| water column | P(>=5) | P(>=8) |
+|---|---|---|
+| y=20..22 (3 tall) | 3.92e-6 | **0** in 120M |
+| y=20..24 (5 tall) | 9.52e-6 | 2.75e-7 |
+| y=20..26 (7 tall) | 9.73e-6 | 2.42e-7 |
+| y=20..36 (17 tall, the real find) | 9.15e-6 | 1.82e-7 (600M trials) |
+
+It saturates at 5. Height beyond `base+3` buys nothing, which is why the real find
+sitting against a 17-block face is not the improbable part of it.
+
+Combining with the spot geometry over 3.18M searched ocean chunks (60,000 seeds,
+radius 8), where `air pocket` is the contiguous air-and-water-beside run above the
+base:
+
+| quantity | value |
+|---|---|
+| stackable spots | 8.94e-4 /chunk (agrees with 6i) |
+| of those, face >= 5 — sufficient for 8 tall | 13.6% |
+| 8-capable spots | ~1.22e-4 /chunk |
+| P per decoration seed, given such a spot | ~2e-7 |
+| **chunks per expected 8-tall find** | **~5e10** |
+
+Against 1.4e8 for 5 tall (6i), an 8-tall is about **370x** more expensive: 70 days
+at the 8,636 chunks/s this machine manages on 12 threads. Note where the 370x comes
+from — 7.4x from the terrain and 50x from the RNG.
+
+### Why that inverts 6w
+
+Section 6w rejects reversal with "the rare part is not reversible and the
+reversible part is not rare", citing 19% for the stackable pair. That figure is for
+height 5. `gen/ChainPrefilter` measures the same terrain-free question at
+each height — q, the fraction of decoration seeds whose draws could chain a run of
+that height *somewhere*, enumerating the success-shift per column rather than
+tracking it:
+
+```
+200,000 decoration seeds, count=10
+   q(>= 5) = 6.07e-1
+   q(>= 7) = 1.57e-1
+   q(>= 8) = 3.38e-2
+   q(>=10) = 6.65e-4
+```
+
+q is exactly the speedup available to reversal: a search that enumerates seeds
+passing this test and only then generates terrain generates 1/q times fewer chunks
+than one that pays for terrain first. At height 5 that is 1.6x and not worth the
+machinery, which is what 6u measured from the other direction. **At height 8 it is
+30x**, and the filter here is deliberately loose — a sound one that tracks shifts
+instead of enumerating them accepts less, so 30x is a lower bound.
+
+### The lattice is the other half, and the coordinate is the evidence
+
+Reversal needs somewhere to *put* an RNG-good decoration seed. `setDecorationSeed`
+is affine in the chunk origin:
+
+```
+decorationSeed = (16*cx*a + 16*cz*b) ^ worldSeed        a, b = nextLong()|1 from setSeed(worldSeed)
+```
+
+For a fixed world seed that is a 2D lattice mod 2^48 with ~2^43.7 legal chunk
+coordinates, so a target seed is reachable with probability ~1/20, found by Gauss
+reduction rather than search. And the target set is **world-seed-independent** —
+a, b change, the set does not — so the cost of building it amortises across every
+world seed tried afterwards. That is what makes 1/q achievable instead of the
+`C_chunk / C_filter` ceiling that 6u ran into, and 6w's "9 chunk-generations per
+trial" objection does not apply, because a candidate is one position whose spot
+test needs that chunk's own noise, surface and carver walk.
+
+**-24848077, 18720986 is 1.55M chunks from the origin.** Nobody searches there.
+That is where a lattice solve lands, and it is the strongest evidence for how the
+find was made.
+
+### The lattice, built and verified
+
+`rng/DecorationLattice` does the solve. With `a, b` from the world seed,
+`low48(16*cx*a + 16*cz*b) == low48(target ^ worldSeed)`; every achievable left side
+is a multiple of 16, so divide through and the congruence becomes
+`cx + m*cz = v (mod 2^44)` with `m = b*a^-1`. That is a 2D lattice, reduced once per
+world seed by Lagrange-Gauss, then one Babai rounding per target.
+
+Two predictions, both confirmed over 200,000 random 48-bit targets on the find's own
+world seed:
+
+```
+reduced basis (3712981, 651373) and (-503742, 4649650)
+  low-4-bit reachable : 12521 (0.0626, predicted 0.0625)
+  solved in the border: 9938  (0.794 of reachable, predicted ~0.8)
+  verified against setDecorationSeed: 9938/9938, mismatches 0
+```
+
+The 1-in-16 is not a lattice property and cannot be optimised away: the low four
+bits of any chunk's decoration seed are the world seed's own, because the block
+coordinate is `16*cx`. Net yield is **|T|/20 candidate chunks per world seed**, and
+since the target set does not depend on the world seed, the cost of building it
+amortises over as many seeds as you care to try.
+
+End to end, the lattice given nothing but the world seed and the decoration seed
+returns the real find:
+
+```
+confirmed find is chunk -1553005,1170061, decoration seed 72846194777308
+  lattice asked for that seed returns chunk -1553005,1170061 -> same cane RNG
+```
+
+### The filter is sound on the one case that can test it
+
+6u's lesson was that an aggregate acceptance rate hides an unsound filter, and only
+the confirmed find catches it. `ChainPrefilter` on decoration seed 72846194777308
+with count 10 and feature index 5 reports **exactly 8**, from the raw LCG stream with
+no terrain of any kind:
+
+```
+confirmed 8-tall find (decoration seed 72846194777308, index 5): filter says 8 -> ACCEPTED
+```
+
+That is three independent things at once: the filter keeps the only real 8-tall
+known, the find is a plain 4+4 upward chain as section 5's mechanism predicts, and
+the flattened-stream model of the feature is right about a chunk 1.55M chunks from
+the origin.
+
+### Built: `reverse`, measured at 6.6x
+
+`ReverseSearcher` is the whole thing end to end — build the target set, lattice each
+member into a chunk, generate that chunk and its eight neighbours, run the real
+feature. Both searches on 12 threads on the same machine:
+
+```
+reverse 8:  453,158 candidates from 750,008 targets walked (0.604 each)
+            8,294 candidates/s, 1,938 searched chunks/s
+            952,839 chunks generated for 105,871 searched  (9.0x, as 6t predicted)
+search:     8,636 searched chunks/s
+```
+
+A reverse-searched chunk is conditioned on the RNG side already being satisfied, so
+it is worth 1/q = 29.5 of a box-scan chunk. Effective rate 1,938 x 29.5 = 57,200
+against 8,636: **6.6x**. On the earlier estimate of ~5e10 chunks per 8-tall find,
+that is 10 days here instead of 67.
+
+Two things cap it at 6.6x rather than 30x, both understood and neither a bug:
+
+- **1 target in 16.** Structural, and it costs nothing at runtime — targets are
+  bucketed by their low four bits and only the matching bucket is walked.
+- **9 chunks generated per chunk searched.** Candidates arrive scattered across the
+  world instead of in a box, so nothing amortises. This is exactly 6t's objection,
+  and it is now a measurement rather than an argument. The cheap biome gate already
+  absorbs most of it — only 23% of candidates are searchable ocean, and the rest are
+  rejected for 36 biome lookups — so what is left to win is the terrain test at a
+  single position, worth up to another ~5x.
+
+### Both known finds pass the pipeline, with their exact heights
+
+`ReversePipelineTest` runs both ground truths through filter and lattice, since a
+target set that misses a real find fails silently:
+
+```
+5-tall at 91,16,65:                  decoration seed 112095894509740, filter 5, lattice -> chunk 5,4
+8-tall at -24848077,21,18720986:     decoration seed  72846194777308, filter 8, lattice -> chunk -1553005,1170061
+```
+
+The filter reports each one's height **exactly**, from the LCG stream with no terrain
+— which is a much stronger statement than acceptance, and would be a surprising
+coincidence if the flattened-stream model were wrong anywhere.
+
+`DecorationLatticeTest` solves the congruence the slow way, one cz at a time across
+the whole border, and requires agreement: 32 of 32 reachable targets found over five
+world seeds, none invented. That also settles the candidate rate — 0.604 per
+reachable target, not the 0.794 the first probe showed, because `solve` returns one
+chunk and P(at least one lattice point in the box) is below E[count] = 0.8 for a
+skewed basis. The first measurement was one lucky world seed.
+
+### What is left
+
+1. `FrozenOceanSurfaceBuilder`, without which this class of find is unreachable
+   whatever the search strategy. The confirmed find is in one.
+2. The single-position terrain test, worth the remaining ~5x: the chain names one
+   (x, z, y), so the question is whether that column has soil, air, and water beside
+   at the base and at base+3 — not whether the chunk is worth searching. 6u measured
+   a terrain-free carver walk at 68 us against 110 for a whole chunk, but that walked
+   a whole chunk; five columns should be far cheaper.
+3. Whether any of this pays at height 7, where q = 0.157 gives only 6.4x before the
+   9x handicap, i.e. probably not.
+
+## 6ad. Two speedups on the reverse search, and where the rest of it is
+
+`reverse` shipped at 6.6x (6ac). Two changes took it to **13.9x**, and the profile
+that came out of them says the remaining gain is all in one place.
+
+### Restricting the chain to the depth where spots actually are: 2.15x
+
+The chain filter accepted a run starting anywhere in y 11..64. Real spots do not live
+there — of 2,847 stackable spots over 3.18M ocean chunks, soil y runs 8..51 with 88%
+between 12 and 34:
+
+```
+  y  8-11:   4.0%      y 24-27:  17.4%      y 40-43:   2.1%
+  y 12-15:  14.8%      y 28-31:  13.9%      y 44-47:   0.7%
+  y 16-19:  17.0%      y 32-35:   8.3%      y 48-51:   0.1%
+  y 20-23:  17.6%      y 36-39:   4.2%
+```
+
+q scales with the band's width, and the finds given up scale with the spot mass
+outside it, so cost per find goes as width/mass. That is worth 2.06x at its best and
+the curve is flat for bands 15 to 23 wide, so the default is the forgiving end:
+cane base y 13..35, 88% of the mass, q(>=8) **3.39e-2 -> 1.57e-2**, measured 2.15x.
+Only the *start* of a chain is banded — an 8-tall run beginning at y=35 has its upper
+column at y=39, and banding the candidates instead of the chain starts would break
+chains rather than narrow the search.
+
+### The cold biome lookup, and a fix worth only 10%
+
+A single `noiseGen` lookup at a scattered location costs **116 us**; the same lookup
+with the layer caches warm costs **1.67 us**. The box scan never sees this because its
+chunks are neighbours; the reverse search jumps millions of blocks between candidates,
+so it pays the pyramid build every time. `searchRegion` did 36 of them per candidate
+before it could decide the region held nothing searchable, so `reverse` now does the
+one lookup that decides it — the candidate's own chunk — and skips the rest.
+
+Predicted 4x. **Measured 10%.** The biome bill was never the problem:
+
+```
+per candidate, cold scattered location:
+   36 noiseGen (candidate scan) :  135 us   <- one cold pyramid, then 35 warm ones
+ 2304 voronoi (3x3 columns)     :  332 us   <- 0.14 us each once quart is warm
+  144 noiseGen (same area)      :    3 us
+```
+
+### Where the time is, measured rather than guessed
+
+```
+per candidate: lattice 0 us, biome gate 157 us, chunk 1189 us
+               -> 1346 us accounted of 1394 thread-us actual
+per searchable-ocean candidate: chunk 4005 us for 7.1 generated chunks
+```
+
+The accounting closes at 97%, and the answer is dull: it is the neighbourhood, exactly
+as 6t predicted. Per *generated* chunk the reverse search is already **cheaper** than
+the box scan — 563 us against 885 us, presumably from the smaller region's locality —
+so there is nothing left to win inside the generation code. The whole penalty is the
+ratio: **7.1 chunks generated per chunk searched, against 1.57 for the box scan.**
+
+### What that means for what is worth doing next
+
+- The single-position terrain test is not one optimisation among several, it is the
+  only one left that matters, and it is worth the whole 4.5x: 13.9x -> ~60x. The chain
+  names one (x, z, y), so the question is whether that column has soil at base-1, air
+  at base and base+4, and water beside base-1 and base+3 — five columns, not nine
+  chunks.
+- Shrinking the region, trimming the reset memset, cheaper voronoi: all worth a few
+  percent each. Not worth the risk to a validated pipeline.
+- Reversing the LCG directly instead of sampling forward for the target set: worth
+  nothing. The set costs 4.4 ms a member to build and is reused across every world
+  seed, so it has already amortised to zero.
+
+## 6ae. The position filter: 6.9x, and the reverse search lands near 95x
+
+6ad ended with one thing left worth doing, and it was worth what it promised.
+
+### The question, and why it needs no terrain
+
+A chain names an (x, z) and the base y of each of its columns, and **every one of
+those bases has to be air**. Below sea level, air has exactly one source:
+
+- the noise fills every non-solid block under y=63 with *water*, not air —
+  `Terrain.column` passes WATER as the fluid;
+- the LIQUID-step carvers never call `setCaveAir`. `Carver`'s underwater branch
+  writes water, or returns at y<=10;
+- lakes are sealed and structures keep their water (section 5), and chunks near a
+  mineshaft start — the one other thing that writes air down there — are skipped by
+  the search already.
+
+So cane at y in 11..62 **implies** an AIR-step carver reached its base, and a position
+no air carver reaches cannot hold cane. Rejecting on that loses nothing.
+
+And the walks need no terrain at all. Where a tunnel goes is pure RNG; only its
+*decisions* read the world. Run against a permissive stub — everything replaceable,
+nothing water — a carver carves a superset of what it really carves. That is the same
+argument and the same `Stub` as `CarverWalkFilter`, and crucially **it reuses the
+validated carvers unchanged**: `AirCarveProbe` supplies a different `Carver.Target`,
+not a second implementation of anything. None of the bit-exactness risk that 6ab is
+about applies here.
+
+The three places it could be wrong, all resolved in the permissive direction: chains
+that overflow the enumeration cap, chain positions outside the walked chunk, and
+`isWater`/`canReplace` on the stub. Each accepts rather than rejects.
+
+### Measured
+
+```
+                    before      after
+per candidate       1388 us     202 us
+  biome gate         154         110
+  air probe            -          49
+  chunk             1189          33
+candidates/s        8,643      59,356
+generated chunks per ocean candidate   7.1       0.15
+```
+
+**The probe rejects 97.88% of searchable-ocean candidates for 49 us.** Because it is
+sound, finds per second scale exactly with candidates per second, so that is a
+straight **6.9x** — and it collapses the 7.1-chunks-per-search handicap that 6ad
+identified as the only remaining cost, to 0.15.
+
+On top of 6ad's 13.9x, the reverse search now stands at roughly **95x** the box scan.
+Turning that into a time per find needs R_8 (1.22e-4 8-capable spots per chunk) and
+P_8 (~2e-7 per decoration seed), both measured but both estimates, and it comes out at
+**order hours rather than the 67 days** brute force wanted. That is the first number
+in this file that makes an 8-tall a thing you can go and get rather than a thing you
+wait for.
+
+### The test that guards it
+
+`ReversePipelineTest.theAirProbeAcceptsTheConfirmedEightTall`. The probe is silent
+when it is wrong — a search that runs forever with healthy-looking rates — so the
+only real 8-tall is the guard:
+
+```
+air probe: chain at -24848077,18720986 bases y=21 y=25 all carved -> accepted
+```
+
+Note what that line also settles. The chain filter, from the LCG stream alone, put the
+chain at exactly the block the real server has cane in, with bases 4 apart — so the
+find is a 4+4 upward chain, which until now was inferred from the block dump rather
+than known.
+
+### What is left
+
+1. `FrozenOceanSurfaceBuilder`. Now the largest known loss by a wide margin, and the
+   confirmed find is in one.
+2. The water half of the position test. Water beside base-1 and base+3 is needed too,
+   and requiring it to come from a LIQUID-step carver would cut further — but ~2% of
+   spots sit on the sea floor where sea fill supplies it, so unlike the air test this
+   one trades coverage. Measure before adopting.
+3. The biome gate is now the largest single cost at 110 us of 202, and it is one
+   cache-cold pyramid build per candidate. Nothing obvious is left in it.
+
+## 6af. The soil condition is also RNG: another 5.9x
+
+Same move as the depth band in 6ad, applied to the other terrain requirement. A chain's
+first column needs soil under its base, and 98% of real spots stand on `ORE_DIRT` blob
+dirt (6i). The blobs run from the **same decoration seed as the cane** —
+`setFeatureSeed(ds, 0, 6)` against the cane's `(ds, 5, 8)` — so "could a blob put dirt
+here" is answerable when the target set is built, for free, instead of by generating the
+chunk and looking.
+
+### The draw count is terrain-dependent, but boundedly
+
+`OreBlob.place` bails before drawing its 33 radii when the blob's box sits entirely
+above `OCEAN_FLOOR_WG`, so the stream is not a pure function of the seed. It is close
+to one: every blob spends 6 `next()` calls, plus 66 more if it placed. The state after
+k blobs depends only on **how many** placed, not which, so blob k begins at
+`6k + 66m` for some `m <= k` — 55 combinations, enumerated exactly as `ChainPrefilter`
+enumerates its success shifts. Enumerating m over-approximates, which is the accepting
+direction.
+
+`nextInt(3)` is the one draw here that can take Java's rejection retry and shift
+everything after it. About 9.3e-10 per call, so it never happens — but it is detected
+explicitly and the seed accepted, because a desynchronised read would be a *false
+reject*, which is the direction that silently loses finds.
+
+### Measured
+
+```
+q(>=8) with the depth band          1.5834e-02
+q(>=8) with the band and the soil   2.2211e-03      7.13x tighter
+per candidate                       205 us  (was 202)
+```
+
+The search-time cost is unchanged — the filter runs at target-set build time, which
+rises from 5.9 ms to ~42 ms a member and amortises over every world seed afterwards.
+
+**It costs coverage, and this is the honest part.** A blob reaches 6.7 blocks, so a
+*neighbouring* chunk's blob can supply the dirt — and its decoration seed needs `a` and
+`b`, hence a world seed, which is not chosen yet when the set is built. Measured over
+4.5M placed blocks: **17.9% of dirt lands outside its own chunk**, and by symmetry the
+same share of dirt inside a chunk came from a neighbour. So those finds are lost.
+
+Net: `7.13 x 0.821 = ` **5.9x**, taking the reverse search to roughly **560x** the box
+scan, and an 8-tall from ~3 hours to ~30 minutes.
+
+### Validation
+
+`DirtBlobFilterTest` drives the real `OreBlob` and requires the filter to accept every
+block it actually placed, at three ocean-floor heights so that different `m` paths
+through the stream are exercised:
+
+```
+accepted 487215 real dirt blocks, 0 rejected
+one fixed block accepted for 9.55% of seeds
+17.9% of placed dirt lands outside its own chunk (802608 of 4485367)
+```
+
+and the confirmed 8-tall survives — it stands on dirt at chunk-relative (3,20,10), which
+the filter keeps.
+
+The three figures are mutually consistent, which is the strongest check available:
+chain acceptance 13.94%, fixed-block acceptance 9.55%, and ~5% of chains falling outside
+the chunk and being accepted untested. `0.05 + 0.95*0.0955 = 0.14`. Chain positions sit
+further from the chunk edge than a single placement would, because a chain needs two
+invocations to agree on one (x, z).
+
+### What is left
+
+1. `FrozenOceanSurfaceBuilder`, still the largest known loss and now by a long way.
+2. The neighbour-blob 17.9%. Recoverable only by moving the soil test to search time,
+   where the world seed is known and all nine decoration seeds are computable — but
+   that trades the 7.13x for about 1.4x, so it is the wrong side of the deal.
+3. The biome gate, now 105 us of 205 per candidate and the single largest cost.
+
+## 6ag. Measuring R and P exactly, and three corrections
+
+The reverse search found one 7-tall in 77 minutes where I had predicted ~13. That gap
+turned out to be mostly my arithmetic, not the search, and chasing it produced better
+numbers than the ones it replaced.
+
+### The exact terrain condition
+
+`countGeometry` now computes `maxRun`: the tallest contiguous run the terrain permits
+from a base, maximised over every column composition. That is the real condition, and
+it is looser than the contiguous "face" the earlier measurements used, for two reasons
+the file had already recorded separately without joining up:
+
+- `ColumnPlacer` writes upward **unconditionally**, so only each column's *base* needs
+  air. The blocks above may be solid and simply get overwritten.
+- `needWater` is checked below each base, so water is needed at `base-1`,
+  `base+h1-1`, ... and nowhere in between. A 3+4 chain needs water beside `base+2`,
+  which a face test insisting on water beside `base+1` never sees.
+
+Two free checks on it, over 844,600 searched chunks: spots permitting >=4 comes to
+149,794, exactly the count of legal spots, since one column can be 4 unaided. And
+>=5 and >=6 are both 840, exactly `stackableRelaxed` — structurally, once any
+continuation exists the last column can be 4, so >=5 implies >=6. Both hold.
+
+### The numbers, direct rather than decomposed
+
+`probe:N` gated on `maxRun >= report` instead of on `stackable`, which is not a
+superset of it:
+
+| | height 7 | height 8 |
+|---|---|---|
+| R, chunks permitting it | 3.528e-04 | 1.752e-04 |
+| P, per decoration seed | 5.369e-07 | 8.446e-08 |
+| per chunk | 1.894e-10 | 1.480e-11 |
+| chunks per find | 5.28e9 | 6.76e10 |
+
+### Correction 1: the scenario is a flat 2x optimistic, at every height
+
+I had said the hand-built isolated spot would be increasingly optimistic with height,
+because real permitting spots cluster at the threshold while a 17-block face accepts
+any composition. **The data refutes that.** Scenario against measured:
+
+```
+h>=5:  1.1e-5 / 5.4e-6  = 2.04x     (6i)
+h>=7:  1.08e-6 / 5.369e-7 = 2.01x
+h>=8:  1.82e-7 / 8.446e-8 = 2.15x
+```
+
+Constant. Which is more useful than my story would have been: the scenario **is** a
+valid predictor of P, as long as it is divided by two.
+
+### Correction 2: the estimate was 1.6x out, not 5x
+
+Mid-investigation I claimed the prediction was ~5x wrong and P7 was near 1.1e-7. Both
+were wrong, and wrong because I extrapolated R7 from a 12-chunk sample. With the real
+numbers the predicted rate is 20.5 min at height 7, against the ~13 min I first quoted
+— 1.6x optimistic. Observing 1 find in 77 minutes against an expected 3.75 is a Poisson
+p of 0.11: on the unlucky side, not evidence of a defect.
+
+### Correction 3: the speedup was understated by 4.6x
+
+Computed from measured quantities only, with no chained ratios:
+
+```
+box scan   : 8,636 chunks/s    x 1.480e-11 per chunk     = 1.28e-7 finds/s  -> 90 days
+reverse    : 68,000 candidates/s x 4.80e-9 per candidate = 3.27e-4 finds/s  -> 51 min
+```
+
+where `P(find | candidate) = p * mass * (1 - leak) / q`, mass 0.878 for the depth band
+and 0.821 for the neighbour-blob leak. That is **~2,500x**, not the 560x recorded in
+6af. The 560 came from chaining a 13.9x that was expressed in searched-chunks/s with a
+6.9x expressed in candidates/s — two different units, so the product meant nothing.
+The individual measurements (q, candidates/s, filter selectivities) were all sound; the
+composition was not.
+
+**The lesson for this file: measure the end quantity, do not multiply ratios.** Both
+errors here came from composing correct factors that were not commensurable, and they
+pointed in opposite directions so the narrative looked plausible throughout.
+
+### Where this leaves it
+
+An 8-tall is ~51 minutes on twelve threads against ~90 days for the box scan. The
+binding constraint is no longer speed: at 68,000 candidates/s we produce candidates far
+faster than we can trust them, and 6ab's ~1-in-3 in-game failure rate is now the thing
+worth attacking. The 7-tall found at -7996270,18,-6279960 on seed 5180 is exactly that
+case — simulator air where the game has water at y=18..21.
+
+## 6ah. Ranking targets, and a correction to 6af's coverage figure
+
+`ProbabilityProbe` now records the chain properties of every real find it produces, and
+of the accepted population, so target quality is read off finds instead of argued about.
+256 finds at height 7, against a 400,000-seed population sample.
+
+### The soil filter costs 56.3% of finds, not 17.9%
+
+```
+finds the soil filter would reject: 144 of 256 (56.3%)
+```
+
+6af priced that loss at 17.9% and claimed a net 5.9x. Both were wrong. 17.9% was **the
+wrong quantity**: it measured how much placed dirt lands outside its own chunk, not how
+often a real find's soil is something an own-chunk blob could have supplied. Those
+differ whenever the soil is not ore-blob dirt at all — a possibility waved away on the
+strength of 6i's "98% of spots are inside the terrain", which does not imply blob dirt.
+
+Corrected: selectivity 7.13x, retention 0.437, **net 3.12x**. Still worth keeping, and
+still the second largest win in the reverse search, but half what was recorded.
+
+That also closes the gap 6ag left open. With the measured retention:
+
+```
+P(find | candidate) = 1.516e-10 * 0.878 * 0.437 / 1.1515e-2 = 5.05e-9
+                    -> 50 min per find at 66,000 candidates/s
+```
+
+Observed: 1 find in 155 minutes, against 3.1 expected. Poisson p = 0.19, which is
+ordinary. The model and the search now agree, and no defect is left to look for. Every
+step of the way the error was a factor composed from something measured on the wrong
+population — three times in one day, in both directions.
+
+### The chain model is nearly complete
+
+```
+finds whose chain the filter cannot see at all: 1 of 256 (0.4%)
+```
+
+So the flattened stream, the `{0,2,4,6}` shift enumeration and the upward-chain-only
+assumption between them miss 0.4% of real finds. The hypothesis in 6ag that chain
+invisibility explained the shortfall was wrong, and wrong in the reassuring direction.
+
+### What predicts a find, measured
+
+```
+earlier placements assumed     of finds     of pop    weight
+  0                            94.118%    60.745%     1.55x
+  1                             2.745%    24.257%     0.11x
+  2                             1.961%    10.348%     0.19x
+  3                             1.176%     4.650%     0.25x
+
+columns in the chain           of finds     of pop    weight
+  2                            89.804%    77.737%     1.16x
+  3                            10.196%    22.114%     0.46x
+  4                             0.000%     0.150%     0.00x
+
+base y                         of finds     of pop    weight
+  8..13                         5.490%     4.495%     1.22x
+  14..19                       24.314%    26.133%     0.93x
+  20..25                       26.275%    26.006%     1.01x
+  26..31                       30.980%    25.843%     1.20x
+  32..37                       12.941%    17.523%     0.74x
+```
+
+**Shift dominates.** A chain assuming no earlier placement in its chunk carries 94% of
+the finds but only 61% of the set, because a prior success is rare (~1.1e-3 cane columns
+per chunk) and three of them rarer still. Keeping shift 0 alone costs 6% of finds to
+drop 39% of the set: **1.55x**.
+
+**Fewer columns is better**, as predicted from the water requirement at each junction:
+two columns 1.16x, three 0.46x, and four produced no finds at all in 256.
+
+**Base y is spent.** 0.74x to 1.22x across the band, so the depth band of 6ad already
+banked that signal and there is little left in it.
+
+### Not multiplying these
+
+1.55x and 1.16x are not independent — a two-column chain is likelier to sit at shift 0 —
+and this file has now been wrong three times from composing factors that looked
+composable. The combined filter has to be built and its q and retention measured
+together, on finds, before any number goes here.
+
+## 6ai. A GPU build for one architecture is a silent 4.5x slowdown
+
+A 3060 owner ran the searcher and it said `no usable GPU`. The card was fine, the driver
+was fine, the toolkit was fine. The binary was built with `-arch=sm_89`, which is Ada
+only, so it had no code for an Ampere card.
+
+Three separate faults had to line up to make that unreadable, and each is worth naming.
+
+**The kernel did not notice its own launch failing.** The code checked
+`cudaDeviceSynchronize()`, which is the usual advice, and that check is useless here: when
+a launch is rejected there is nothing queued, so the synchronise returns `cudaSuccess`.
+The launch error sits in `cudaGetLastError()` instead. So the process exited 0 having
+tested every seed and accepted none — indistinguishable from a filter that legitimately
+rejected everything.
+
+Reproduced deliberately, by building for `sm_50` and running on the 4080:
+
+```
+progress 4096 4096 0
+tested=4096 accepted=0 dropped=0        <- exit 0
+```
+
+With the launch checked:
+
+```
+kernel launch failed: no kernel image is available for execution on the device
+this binary has no code for NVIDIA GeForce RTX 4080 (compute 8.9); rebuild it
+with -gencode arch=compute_89,code=sm_89
+```
+
+**The stderr carrying that message was discarded.** `GpuChainFilter` only attached a
+reader when it had a progress consumer, and the detection probe has none — so the one call
+whose failure needed explaining was the one call that threw the explanation away.
+
+**And the fallback was silent.** `detect()` returned null, the CPU path took over, and
+nothing said why. The CPU path is about 4.5x slower, which is slow enough to matter and
+fast enough not to look broken.
+
+### The fix
+
+Several `-gencode` rather than one `-arch` (`cuda/build.bat`): Turing, Ampere and Ada
+compiled in, plus `compute_89` PTX so a newer card JITs instead of failing.
+
+**And then no build script at all.** The kernel now ships inside the jar as a resource,
+unpacked to a temp file on first use. That works because nvcc links the CUDA runtime
+statically: the binary imports only `kernel32.dll` and `nvcuda.dll`, and the latter arrives
+with every NVIDIA driver. No toolkit, no compiler, no script on the user's machine. A
+binary beside the jar still wins, so a local rebuild overrides the shipped one.
+
+This matters more than convenience. Any fast path reached only by running a build script is
+a fast path most people will not have, and the failure is invisible: they get correct
+results, 4.5x slower, and no reason to suspect anything. Shipping the binary makes the fast
+path the default and the slow path the exception that has to explain itself.
+
+The cost is a binary in the tree, which can drift from its source — and had already done so
+once, when a failed compile left a stale exe running and the measurements looked fine.
+`BundledKernelTest` fails the build if `find_targets.cu` is newer than the shipped
+executable, and `build.bat` refreshes both copies. `.gitignore` needed a negation for it:
+`*.exe` had silently excluded it, which would have produced a clone whose jar built fine
+and shipped no kernel.
+
+Multi-architecture costs nothing at runtime. Measured on 200M seeds, single-arch `sm_89`
+26.71s against multi-arch 25.55s, with identical accept counts — the unused cubins are
+dead weight in the fatbin, not in the instruction stream. Only the file grows.
+
+`detect()` now records why it failed and the caller prints it, so the friend's case
+diagnoses itself and prescribes its own fix.
+
+### The general shape
+
+An error path that only executes on hardware the author does not own gets no testing from
+ordinary use, and this one degraded into a plausible-looking success. Building a
+deliberately broken binary took one command and turned a report of "no usable GPU" into
+the exact line of the fix. Worth doing whenever a failure is reported from a machine that
+is not to hand.

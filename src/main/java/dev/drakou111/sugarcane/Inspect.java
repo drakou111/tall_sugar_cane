@@ -53,9 +53,21 @@ public final class Inspect {
         int radius = args.length > 4 ? Integer.parseInt(args[4]) : 32;
         RegionSearcher.Stats stats = new RegionSearcher.Stats();
         RegionSearcher.Worker worker = new RegionSearcher.Worker(5, false, 0, stats, radius);
-        worker.prepare(seed);
         RegionSearcher.traceChunkX = chunkX;
         RegionSearcher.traceChunkZ = chunkZ;
+        // Centre the box on the target and drop the search-only filters, so a
+        // position anywhere in the world can be looked at - not just one within
+        // `radius` of the origin.
+        //
+        // These have to be set BEFORE prepare(), which is what reads them. Setting
+        // them after left the centre at 0,0, so the box check rejected every chunk
+        // and nothing was generated - which looks identical to an unsupported biome
+        // and is invisible near spawn, where 0,0 is the right centre anyway.
+        RegionSearcher.centreOverrideX = chunkX;
+        RegionSearcher.centreOverrideZ = chunkZ;
+        RegionSearcher.relaxFilters = true;
+        RegionSearcher.allBiomes = true;
+        worker.prepare(seed);
         // Regions are aligned to multiples of REGION starting from -radius, and the
         // searcher uses radius 32, so the grid is offset by -32.
         int originX = alignRegion(chunkX, radius);
@@ -65,6 +77,16 @@ public final class Inspect {
         worker.searchRegion(originX, originZ);
 
         ArrayWorld world = worker.world;
+        // y=200 is air in every generated chunk, so SOLID there means this chunk was
+        // never built: either it fell outside the region window, or a filter skipped
+        // it (an unimplemented surface builder, or a biome with no cane feature).
+        if (world.getBlock(tx, 200, tz) == Blocks.SOLID) {
+            System.out.println("\nWARNING: nothing was generated at this position - "
+                    + "the slice below is the out-of-window SOLID, not terrain. "
+                    + "Biome " + dev.drakou111.sugarcane.gen.BiomeIds.noiseGen(
+                            worker.biomeSource(), chunkX * 4 + 2, chunkZ * 4 + 2)
+                    + " at the chunk centre.");
+        }
         System.out.printf("%ncane columns within 6 blocks:%n");
         boolean any = false;
         for (int x = tx - 6; x <= tx + 6; x++) {

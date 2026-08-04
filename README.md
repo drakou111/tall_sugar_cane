@@ -41,6 +41,9 @@ java -jar target/sugarcane.jar search 1 1000000 6 24 5
 
 # look at the confirmed find and how it was built
 java -jar target/sugarcane.jar inspect 1500050556 91 16 65 6
+
+# reverse search: for 7 tall and up, this is the faster one
+java -jar target/sugarcane.jar reverse 8 24
 ```
 
 A find prints as:
@@ -84,6 +87,52 @@ pregeneration rather than by anything a player can do. Those print as
 Expect very roughly **one hit per 2 hours** on 24 cores at ~19,000 chunks/s, of
 which about half are 6 or taller. That rate is a projection from the measured
 geometry and RNG rates, not yet a long-run observation.
+
+### The reverse search
+
+`reverse <minHeight> [threads] [targets] [firstSeed] [seedCount]`
+
+`search` generates a chunk's terrain and only then discovers whether its RNG could
+ever have stacked anything. At height 5 that is fine, because 61% of chunks could.
+At height 8 only 3.4% could, so it throws away 29 chunks in 30. `reverse` picks the
+RNG first:
+
+1. run the cane draws with no terrain at all and keep the decoration seeds that
+   could chain a tall enough column;
+2. `setDecorationSeed` is affine in the chunk origin, so for any world seed a wanted
+   decoration seed can be *solved* for a chunk inside the world border by lattice
+   reduction — no searching;
+3. generate only those chunks.
+
+Step 1 does not depend on the world seed, so it is paid once and amortises. Only 3.4%
+of decoration seeds could build 8 tall anywhere, and only 1.57% within the depth band
+where real spots live, so each chunk this generates is worth 64 of the box scan's.
+Measured on the same machine, both on 12 threads: 2,010 chunks/s against 8,636/s,
+which after the 1/q weighting and the 88% of spots the band keeps is **13.9x**.
+
+Candidates arrive scattered rather than in a box, so each would cost its own 3x3
+neighbourhood — 7.1 chunks generated per chunk searched against the box scan's 1.57.
+A fourth step removes that: a chain names an (x, z) and a base y per column, every one
+of those has to be air, and below sea level air can only come from an air-step carver.
+The carver walks are pure RNG, so that question needs no terrain, and it rejects
+**97.9% of candidates for 49 us** — generated chunks per candidate fall to 0.15.
+A fifth step does the same for soil: the chain's base needs dirt under it, and deep dirt
+comes from ore blobs seeded off the same decoration seed as the cane — so that is also
+answerable with no terrain, and it tightens the set another 7.1x.
+
+Together that is roughly **560x** the box scan: an 8-tall goes from a two-month run to
+about half an hour. Both terrain filters cost some coverage (12% for the depth band, 18%
+for soil, from blobs that reach in from a neighbouring chunk), which is priced into that
+figure.
+
+Also structural, though it costs nothing at runtime: only 1 target in 16 is reachable
+for a given world seed, because the low four bits of a decoration seed are the world
+seed's own (the block coordinate is `16*cx`). Targets are bucketed by those bits and
+only the matching bucket is walked.
+
+Finds land anywhere in the world rather than near spawn — the first 8-tall ever
+found is at -24848077, 21, 18720986 — so `--spawn` has no analogue here. Use
+`inspect` on a hit before travelling.
 
 ## Verifying a hit
 
@@ -155,7 +204,8 @@ lakes, dungeons and structures are missing entirely.
 ```
 src/main/java/dev/drakou111/sugarcane/
   Cli.java              every entry point
-  RegionSearcher.java   the search
+  RegionSearcher.java   the box search
+  ReverseSearcher.java  the reverse search: pick the RNG, solve for the chunk
   Inspect.java          dump one position, with the placement trace
   gen/                  worldgen: surface builder, carvers, ore blobs, disks, the cane feature
   rng/                  java.util.Random and Mth, bit-exact

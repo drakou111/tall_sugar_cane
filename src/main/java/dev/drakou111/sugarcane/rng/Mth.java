@@ -57,4 +57,31 @@ public final class Mth {
         int n = (int) d;
         return d > (double) n ? n + 1 : n;
     }
+
+    /**
+     * Writes {@code SIN} as big-endian float bits, for a native port to load instead of
+     * recomputing it. Recomputing with C's {@code sin()} disagrees with Java at entry
+     * 32768 -- 0x250D3132 against 0x250D3000 -- and while that particular value is
+     * absorbed by the addition that follows it, two libms agreeing is not something to
+     * build on.
+     */
+    public static void writeSinTable(java.io.OutputStream out) throws java.io.IOException {
+        java.io.DataOutputStream d = new java.io.DataOutputStream(out);
+        for (float v : SIN) {
+            d.writeInt(Float.floatToRawIntBits(v));
+        }
+        d.flush();
+    }
+
+    public static void main(String[] args) throws java.io.IOException {
+        if (args.length < 1) {
+            System.err.println("usage: sin-table <file>");
+            System.exit(2);
+        }
+        try (java.io.OutputStream o = new java.io.BufferedOutputStream(
+                java.nio.file.Files.newOutputStream(java.nio.file.Path.of(args[0])))) {
+            writeSinTable(o);
+        }
+        System.out.printf("wrote %d entries of Mth.SIN to %s%n", SIN.length, args[0]);
+    }
 }
