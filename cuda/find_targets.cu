@@ -1,25 +1,47 @@
 // Chain prefilter on the GPU: which decoration seeds could chain a tall enough sugar
 // cane column, judged from the RNG alone with no terrain.
 //
-// This is a deliberate transliteration of gen/ChainPrefilter.java, not a reimagining of
-// it. Everything here is integer arithmetic on Java's 48-bit LCG, so it is bit-exact by
-// construction rather than by hope -- and `targets --verify` checks that against the Java
-// filter on millions of seeds before any of it is trusted.
+// A transliteration of gen/ChainPrefilter.java, not a reimagining of it. Everything here
+// is integer arithmetic on Java's 48-bit LCG, so it is exact by construction rather than
+// by hope, and it is checked against the Java filter over millions of seeds before any
+// number from it is believed.
 //
-// The soil filter deliberately stays on the CPU. It is 0.6% of the build cost (measured:
-// 5.927 us a seed against 0.036) and it is the only part using doubles and a sine table,
-// so moving it would buy nothing and risk everything. The GPU takes the 99.4%, hands
-// back the ~1.6% of seeds that survive, and Java finishes the job with code that is
-// already validated.
+// The soil filter deliberately stays on the CPU. Measured at 0.6% of the build cost
+// against the chain filter's 99.4%, and it is the only part touching doubles and a sine
+// table, so moving it would buy nothing and risk everything. The GPU takes the 99.4%,
+// hands back the ~1.6% of seeds that survive, and Java finishes with code already
+// validated against a real 1.16.1 server.
+//
+// Three structural choices, each of which was measured rather than assumed:
+//
+//   * A SLIDING WINDOW of 131 draws, not the whole 1,252-draw stream. An invocation
+//     spans 123 draws and a group reads at most 124 past its base, so 131 covers every
+//     shift and the window advances by 123 per invocation. 524 bytes instead of 5,008.
+//
+//   * A DP over candidates in REVERSE order instead of a recursive descent. best2[i] and
+//     best3[i] hold the tallest run of at most two and three columns starting at i, so
+//     one backward pass replaces four nested loops. Valid because a chain requires
+//     n[j] > n[i] and candidates are emitted in invocation order, so j > i always and
+//     the values are ready when needed.
+//
+//   * A Y-INDEX rather than a hash table. All twenty tries of an invocation share a y and
+//     the next column must sit at exactly y + height, so grouping by y gives the same
+//     selectivity from 54 slots as a hash gives from 2,048 -- and 54 shorts is 108 bytes
+//     to clear per seed against 4,096. That clearing was the difference between 2,247k
+//     and 5,564k seeds/s in two earlier versions of this kernel.
+//
+// The struct is ~6.6 KB and there is no recursion, so it lives in local memory rather
+// than on the 1 KB thread stack. An earlier version passed a struct by reference into a
+// recursive function, which put it on the stack and overflowed it -- compute-sanitizer
+// named that in one line where reading the code had not.
 //
 // Build:
-//   nvcc -O3 -fmad=false -o find_targets.exe find_targets.cu
-// (-fmad=false is not needed for this kernel, which touches no floats, but it is set so
-// that the flag is already right if anything float-valued is ever added.)
+//   nvcc -O3 -fmad=false -arch=sm_89 -o find_targets.exe find_targets.cu
+// -arch matters for measurement as well as speed: without it the driver JITs the PTX on
+// first use, which cost about five seconds and made a short benchmark meaningless.
 
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <cstdint>
 
 #define MULTIPLIER 0x5DEECE66DULL
@@ -31,26 +53,47 @@
 #define DRAWS_PER_INVOCATION (3 + TRIES * DRAWS_PER_TRY)   /* 123 */
 #define MAX_COUNT 10
 #define SHIFT_COUNT 4
+#define MAX_SHIFT 6
+#define WINDOW_DRAWS (DRAWS_PER_INVOCATION + MAX_SHIFT + 2)  /* 131 */
 #define GROUPS (MAX_COUNT * SHIFT_COUNT)
+#define MAX_CANDIDATES (GROUPS * TRIES)
 #define DOUBLED_HEIGHTMAP (63 * 2)
 #define Y_FLOOR 11
 #define Y_CEIL 64
 #define Y_SLOTS (Y_CEIL - Y_FLOOR + 1)
-#define CAPACITY (MAX_COUNT * DRAWS_PER_INVOCATION + 6 + 16)
-#define MAX_CANDIDATES (GROUPS * TRIES)
 
 __constant__ int SHIFTS[SHIFT_COUNT] = {0, 2, 4, 6};
 
-/** java.util.Random.next(32), as an unsigned value. */
+struct Chains {
+    unsigned int window[WINDOW_DRAWS];
+    signed char x[MAX_CANDIDATES];
+    signed char z[MAX_CANDIDATES];
+    unsigned char y[MAX_CANDIDATES];
+    unsigned char h[MAX_CANDIDATES];
+    unsigned char n[MAX_CANDIDATES];
+    /** Tallest run of at most two, and at most three, columns starting here. */
+    unsigned char best2[MAX_CANDIDATES];
+    unsigned char best3[MAX_CANDIDATES];
+    short groupStart[GROUPS];
+    short groupEnd[GROUPS];
+    unsigned char groupN[GROUPS];
+    short groupNext[GROUPS];
+    short yHead[Y_SLOTS];
+    short yTail[Y_SLOTS];
+    short candidates;
+    short groupCount;
+};
+
+/** java.util.Random.next(32). */
 __device__ __forceinline__ unsigned int nextInt(unsigned long long &seed) {
     seed = (seed * MULTIPLIER + ADDEND) & MASK48;
     return (unsigned int) (seed >> 16);
 }
 
 /**
- * ChainPrefilter.bounded: nextInt(bound) recovered from a stored next(32). next(31) is
- * the same step shifted one further, and the rejection retry is ignored, which can only
- * cause a false accept.
+ * ChainPrefilter.bounded: nextInt(bound) from a stored next(32). next(31) is the same
+ * step shifted one further, and the rejection retry is ignored, which can only cause a
+ * false accept.
  */
 __device__ __forceinline__ int bounded(unsigned int raw, int bound) {
     int bits = (int) (raw >> 1);
@@ -60,126 +103,128 @@ __device__ __forceinline__ int bounded(unsigned int raw, int bound) {
     return bits % bound;
 }
 
-struct Chains {
-    unsigned int draws[CAPACITY];
-    signed char cx[MAX_CANDIDATES];
-    signed char cz[MAX_CANDIDATES];
-    signed char cy[MAX_CANDIDATES];
-    signed char ch[MAX_CANDIDATES];
-    signed char cn[MAX_CANDIDATES];
-    short groupStart[GROUPS];
-    short groupEnd[GROUPS];
-    signed char groupN[GROUPS];
-    short groupNext[GROUPS];
-    short yHead[Y_SLOTS];
-    short yTail[Y_SLOTS];
-    int candidates;
-    int groupCount;
-};
-
-/** ChainPrefilter.chainFrom, iterative in depth is not worth it -- four levels at most. */
-__device__ int chainFrom(Chains &c, int i, int depth) {
-    int height = c.ch[i];
-    if (depth >= 4) {
-        return height;
+__device__ __forceinline__ void refillWindow(unsigned long long &rng, unsigned int *w) {
+    for (int i = 0; i < WINDOW_DRAWS; i++) {
+        w[i] = nextInt(rng);
     }
-    int wantedY = c.cy[i] + height;
-    if (wantedY < Y_FLOOR || wantedY > Y_CEIL) {
-        return height;
-    }
-    int extra = 0;
-    for (int g = c.yHead[wantedY - Y_FLOOR]; g != -1; g = c.groupNext[g]) {
-        if (c.groupN[g] <= c.cn[i]) {
-            continue;
-        }
-        for (int j = c.groupStart[g]; j < c.groupEnd[g]; j++) {
-            if (c.cx[j] != c.cx[i] || c.cz[j] != c.cz[i]) {
-                continue;
-            }
-            int sub = chainFrom(c, j, depth + 1);
-            if (sub > extra) {
-                extra = sub;
-            }
-        }
-    }
-    return height + extra;
 }
 
-/** The tallest run this seed's draws could chain, starting inside the depth band. */
-__device__ int tallestPossible(Chains &c, unsigned long long decorationSeed,
-                               int featureIndex, int count, int baseMinY, int baseMaxY) {
-    // setFeatureSeed(decorationSeed, index, step=8) then setSeed.
-    unsigned long long s = decorationSeed + (unsigned long long) featureIndex + 10000ULL * 8ULL;
-    unsigned long long seed = (s ^ MULTIPLIER) & MASK48;
-    for (int i = 0; i < CAPACITY; i++) {
-        c.draws[i] = nextInt(seed);
+/** Slide by one invocation's worth, keeping the overlap the next group's shifts need. */
+__device__ __forceinline__ void advanceWindow(unsigned long long &rng, unsigned int *w) {
+    int i = 0;
+    for (; i < WINDOW_DRAWS - DRAWS_PER_INVOCATION; i++) {
+        w[i] = w[i + DRAWS_PER_INVOCATION];
     }
+    for (; i < WINDOW_DRAWS; i++) {
+        w[i] = nextInt(rng);
+    }
+}
+
+/**
+ * Whether this seed's draws could chain a run of {@code minHeight} starting inside the
+ * depth band. Four columns at most, which is what {@code ChainPrefilter.collect} allows
+ * and therefore what the target build actually uses.
+ */
+__device__ bool accepts(Chains &c, unsigned long long decorationSeed, int featureIndex,
+                        int count, int minHeight, int baseMinY, int baseMaxY) {
+    unsigned long long s = decorationSeed + (unsigned long long) featureIndex + 10000ULL * 8ULL;
+    unsigned long long rng = (s ^ MULTIPLIER) & MASK48;
 
     c.candidates = 0;
     c.groupCount = 0;
     for (int i = 0; i < Y_SLOTS; i++) {
         c.yHead[i] = -1;
     }
+    refillWindow(rng, c.window);
 
-    for (int n = 0; n < count; n++) {
+    for (int invocation = 0; invocation < count; invocation++) {
         for (int shiftIndex = 0; shiftIndex < SHIFT_COUNT; shiftIndex++) {
-            int base = n * DRAWS_PER_INVOCATION + SHIFTS[shiftIndex];
-            if (base + 2 >= CAPACITY) {
-                continue;
-            }
-            int y = bounded(c.draws[base + 2], DOUBLED_HEIGHTMAP);
+            int shift = SHIFTS[shiftIndex];
+            int y = bounded(c.window[shift + 2], DOUBLED_HEIGHTMAP);
             if (y < Y_FLOOR || y > Y_CEIL) {
                 continue;
             }
-            int originX = bounded(c.draws[base], 16);
-            int originZ = bounded(c.draws[base + 1], 16);
+            int originX = bounded(c.window[shift], 16);
+            int originZ = bounded(c.window[shift + 1], 16);
+
             int group = c.groupCount++;
-            c.groupStart[group] = (short) c.candidates;
-            c.groupN[group] = (signed char) n;
+            c.groupStart[group] = c.candidates;
+            c.groupN[group] = (unsigned char) invocation;
             c.groupNext[group] = -1;
             int slot = y - Y_FLOOR;
+            // Appended, not pushed, so groups stay in ascending order and the iteration
+            // order matches the flat scan this replaces.
             if (c.yHead[slot] == -1) {
                 c.yHead[slot] = (short) group;
             } else {
                 c.groupNext[c.yTail[slot]] = (short) group;
             }
             c.yTail[slot] = (short) group;
-            for (int i = 0; i < TRIES; i++) {
-                int off = base + 3 + i * DRAWS_PER_TRY;
-                if (off + DRAWS_PER_TRY + 1 >= CAPACITY) {
-                    break;
-                }
+
+            for (int t = 0; t < TRIES; t++) {
+                int off = shift + 3 + t * DRAWS_PER_TRY;
                 int after = off + DRAWS_PER_TRY;
-                int k = c.candidates;
-                c.cx[k] = (signed char) (originX + bounded(c.draws[off], 5)
-                        - bounded(c.draws[off + 1], 5));
-                c.cz[k] = (signed char) (originZ + bounded(c.draws[off + 4], 5)
-                        - bounded(c.draws[off + 5], 5));
-                c.cy[k] = (signed char) y;
-                c.ch[k] = (signed char) (2 + bounded(c.draws[after + 1],
-                        bounded(c.draws[after], 3) + 1));
-                c.cn[k] = (signed char) n;
-                c.candidates = k + 1;
+                int k = c.candidates++;
+                c.x[k] = (signed char) (originX + bounded(c.window[off], 5)
+                        - bounded(c.window[off + 1], 5));
+                c.z[k] = (signed char) (originZ + bounded(c.window[off + 4], 5)
+                        - bounded(c.window[off + 5], 5));
+                c.y[k] = (unsigned char) y;
+                unsigned char height = (unsigned char) (2 + bounded(c.window[after + 1],
+                        bounded(c.window[after], 3) + 1));
+                c.h[k] = height;
+                c.n[k] = (unsigned char) invocation;
+                c.best2[k] = height;
+                c.best3[k] = height;
             }
-            c.groupEnd[group] = (short) c.candidates;
+            c.groupEnd[group] = c.candidates;
+        }
+        if (invocation + 1 < count) {
+            advanceWindow(rng, c.window);
         }
     }
 
-    int best = 0;
-    for (int i = 0; i < c.candidates; i++) {
-        if (c.cy[i] < baseMinY || c.cy[i] > baseMaxY) {
+    // Backwards, so best2 and best3 of any continuation are already known.
+    for (int i = (int) c.candidates - 1; i >= 0; i--) {
+        int h1 = c.h[i];
+        int h2 = h1, h3 = h1, h4 = h1;
+        int wantedY = (int) c.y[i] + h1;
+
+        if (wantedY >= Y_FLOOR && wantedY <= Y_CEIL) {
+            for (int g = c.yHead[wantedY - Y_FLOOR]; g != -1; g = c.groupNext[g]) {
+                if (c.groupN[g] <= c.n[i]) {
+                    continue;
+                }
+                // Everything in this bucket already has y == wantedY by construction,
+                // which a hash bucket would have had to re-check.
+                for (int j = c.groupStart[g]; j < c.groupEnd[g]; j++) {
+                    if (c.x[j] != c.x[i] || c.z[j] != c.z[i]) {
+                        continue;
+                    }
+                    int two = h1 + c.h[j];
+                    int three = h1 + c.best2[j];
+                    int four = h1 + c.best3[j];
+                    if (two > h2) h2 = two;
+                    if (three > h3) h3 = three;
+                    if (four > h4) h4 = four;
+                }
+            }
+        }
+        c.best2[i] = (unsigned char) h2;
+        c.best3[i] = (unsigned char) h3;
+
+        if (c.y[i] < baseMinY || c.y[i] > baseMaxY) {
             continue;
         }
-        int r = chainFrom(c, i, 0);
-        if (r > best) {
-            best = r;
+        if (h1 >= minHeight || h2 >= minHeight || h3 >= minHeight || h4 >= minHeight) {
+            return true;
         }
     }
-    return best;
+    return false;
 }
 
-/** Must match ReverseSearcher's sampling exactly, or the two disagree about which
- *  seeds were ever tested and a cached set cannot be extended on the other device. */
+/** Must match ReverseSearcher's sampling exactly, or a cache built on one device cannot
+ *  be extended on the other. */
 __device__ __forceinline__ unsigned long long spread(unsigned long long i) {
     unsigned long long z = i * 0x9E3779B97F4A7C15ULL + 0x632BE59BD9B4E019ULL;
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
@@ -191,18 +236,31 @@ __global__ void filterKernel(unsigned long long sampleFrom, long long total,
                              int minHeight, int count, int featureIndex,
                              int baseMinY, int baseMaxY,
                              unsigned long long *out, unsigned int *outCount,
-                             unsigned int outCapacity, Chains *scratch) {
-    // Chains is ~9.5 KB. A thread stack is 1 KB by default, so it cannot live there --
-    // that was a stack overflow, which compute-sanitizer named in one line where
-    // reading the code had not. One slot per resident thread in global memory instead.
-    int gid = blockIdx.x * blockDim.x + threadIdx.x;
-    Chains &c = scratch[gid];
+                             unsigned int outCapacity) {
+    Chains c;
     long long stride = (long long) blockDim.x * gridDim.x;
     for (long long idx = (long long) blockIdx.x * blockDim.x + threadIdx.x;
             idx < total; idx += stride) {
         unsigned long long ds = spread(sampleFrom + (unsigned long long) idx);
-        if (tallestPossible(c, ds, featureIndex, count, baseMinY, baseMaxY) >= minHeight) {
-            unsigned int slot = atomicAdd(outCount, 1u);
+        bool accept = accepts(c, ds, featureIndex, count, minHeight, baseMinY, baseMaxY);
+
+        // One atomicAdd per warp rather than per accepting thread: the whole warp agrees
+        // a base with a ballot, then each accepting lane takes its rank within the mask.
+        unsigned int active = __activemask();
+        unsigned int mask = __ballot_sync(active, accept);
+        if (mask == 0u) {
+            continue;
+        }
+        int lane = (int) (threadIdx.x & 31);
+        unsigned int leader = (unsigned int) (__ffs((int) mask) - 1);
+        unsigned int base = 0;
+        if ((unsigned int) lane == leader) {
+            base = atomicAdd(outCount, __popc(mask));
+        }
+        base = __shfl_sync(active, base, (int) leader);
+        if (accept) {
+            unsigned int prior = mask & (lane == 0 ? 0u : ((1u << lane) - 1u));
+            unsigned int slot = base + __popc(prior);
             if (slot < outCapacity) {
                 out[slot] = ds;
             }
@@ -211,7 +269,7 @@ __global__ void filterKernel(unsigned long long sampleFrom, long long total,
 }
 
 int main(int argc, char **argv) {
-    if (argc < 7) {
+    if (argc < 8) {
         fprintf(stderr,
                 "usage: %s <minHeight> <count> <featureIndex> <baseMinY> <baseMaxY> "
                 "<sampleFrom> <samples> [outFile]\n"
@@ -232,17 +290,14 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    int device = 0;
     cudaDeviceProp prop;
-    if (cudaGetDeviceProperties(&prop, device) != cudaSuccess) {
+    if (cudaGetDeviceProperties(&prop, 0) != cudaSuccess) {
         fprintf(stderr, "no usable CUDA device\n");
         return 3;
     }
 
-    // Generous: acceptance is ~1.6% at height 8 and far less above it, but a low
-    // minHeight can accept nearly everything, so cap the batch instead of the buffer.
     const long long batch = 1LL << 22;
-    unsigned int outCapacity = (unsigned int) (batch / 4);
+    unsigned int outCapacity = (unsigned int) (batch / 2);
     unsigned long long *dOut = NULL;
     unsigned int *dCount = NULL;
     if (cudaMalloc(&dOut, (size_t) outCapacity * sizeof(unsigned long long)) != cudaSuccess
@@ -253,30 +308,25 @@ int main(int argc, char **argv) {
     unsigned long long *hOut =
             (unsigned long long *) malloc((size_t) outCapacity * sizeof(unsigned long long));
 
-    int threads = 64;
-    int blocks = prop.multiProcessorCount * 8;
-    Chains *dScratch = NULL;
-    size_t scratchBytes = (size_t) blocks * threads * sizeof(Chains);
-    if (cudaMalloc(&dScratch, scratchBytes) != cudaSuccess) {
-        fprintf(stderr, "cudaMalloc of %zu MB scratch failed\n", scratchBytes >> 20);
-        return 3;
-    }
-
     FILE *f = outFile ? fopen(outFile, "wb") : stdout;
     if (!f) {
         fprintf(stderr, "cannot open %s\n", outFile);
         return 3;
     }
 
-    long long done = 0;
-    long long accepted = 0, dropped = 0;
+    // 32 threads a block measured fastest: the struct is large enough that occupancy is
+    // set by local memory, and a narrow block leaves more of it per warp.
+    int threads = 32;
+    int blocks = prop.multiProcessorCount * 32;
+
+    long long done = 0, accepted = 0, dropped = 0;
     while (done < samples) {
         long long thisBatch = samples - done < batch ? samples - done : batch;
         unsigned int zero = 0;
         cudaMemcpy(dCount, &zero, sizeof(unsigned int), cudaMemcpyHostToDevice);
         filterKernel<<<blocks, threads>>>(sampleFrom + (unsigned long long) done,
                 thisBatch, minHeight, count, featureIndex, baseMinY, baseMaxY,
-                dOut, dCount, outCapacity, dScratch);
+                dOut, dCount, outCapacity);
         cudaError_t err = cudaDeviceSynchronize();
         if (err != cudaSuccess) {
             fprintf(stderr, "kernel failed: %s\n", cudaGetErrorString(err));
@@ -301,7 +351,6 @@ int main(int argc, char **argv) {
     if (f != stdout) {
         fclose(f);
     }
-    // Machine-readable, on stderr so it cannot corrupt a stdout stream of seeds.
     fprintf(stderr, "tested=%lld accepted=%lld dropped=%lld\n", samples, accepted, dropped);
     return dropped > 0 ? 4 : 0;
 }
