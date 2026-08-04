@@ -72,3 +72,11 @@ src/main/java/dev/drakou111/sugarcane/experiments/
 
 ### Claude Code workspace ###
 .claude/
+
+### CUDA build output ###
+cuda/*.exe
+cuda/*.exp
+cuda/*.lib
+cuda/*.bin
+*.exe
+*.exp

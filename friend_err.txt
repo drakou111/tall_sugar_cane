@@ -1,0 +1,9 @@
+﻿.\friend.exe : scanning decoration seeds [0, 2000000) for height >= 8 (ocean count=10 index=5, base y 13..35, soil filter on)
+At line:1 char:677
++ ... 0=Get-Date; .\friend.exe 8 0 2000000 2>friend_err.txt 1>friend_out.tx ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (scanning decora...soil filter on):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+cuda batch-size=1048576, threads-per-block=256
+tested=2000000 found=4560

@@ -368,6 +368,26 @@ public final class ReverseSearcher {
      * q of FINDINGS 6ac, 3.4% at height 8, so this costs about 150 us / 0.034 = 4.4 ms
      * per member and is a one-off: the set is world-seed-independent.
      */
+    /**
+     * Samples handed out between checkpoints. At a height-independent ~7.7 thread-us a
+     * seed this is roughly half a minute of work on a dozen threads, which is a
+     * reasonable amount to be willing to lose.
+     */
+    private static final long EPOCH_SAMPLES = 50_000_000L;
+
+    /**
+     * Decoration seeds whose draws alone could chain a run of {@code minHeight} and
+     * whose soil its own chunk's blobs could supply, bucketed by their low four bits --
+     * the only ones a given world seed can reach.
+     *
+     * <p>Built in epochs with a checkpoint after each, because at the heights where this
+     * is expensive it is expensive in hours: q falls faster than the per-seed cost does,
+     * so a height-15 set is a day's work and losing it to a stray Ctrl-C is not
+     * acceptable. Each epoch hands out a fixed span of sample indices and runs it to
+     * completion before saving, so the file's {@code sampledThrough} always describes
+     * exactly what has been tested -- a ragged boundary would either re-test seeds or,
+     * worse, skip them silently.
+     */
     private static long[][] buildTargets(int minHeight, int targets, int threads,
             java.nio.file.Path cache) throws Exception {
         long start = System.currentTimeMillis();
@@ -375,94 +395,119 @@ public final class ReverseSearcher {
                 OCEAN_INDEX, ChainPrefilter.DEFAULT_BASE_MIN_Y,
                 ChainPrefilter.DEFAULT_BASE_MAX_Y, true, 0L, 0L);
 
-        long[] existing = new long[0];
-        long resumeFrom = 0L;
-        long priorTested = 0L;
+        long[] all = new long[0];
+        long sampleAt = 0L;
+        long totalTested = 0L;
         if (cache != null) {
             TargetCache.Loaded loaded = TargetCache.load(cache, wanted);
             if (loaded != null) {
-                existing = loaded.targets();
-                priorTested = loaded.header().tested();
-                resumeFrom = loaded.header().sampledThrough();
+                all = loaded.targets();
+                totalTested = loaded.header().tested();
+                sampleAt = loaded.header().sampledThrough();
                 System.out.printf("target set: loaded %d from %s (%.1f%% of the %d wanted)%n",
-                        existing.length, cache,
-                        100.0 * existing.length / targets, targets);
-                if (existing.length >= targets) {
-                    return bucket(java.util.Arrays.copyOf(existing, targets), targets,
-                            priorTested, System.currentTimeMillis() - start);
+                        all.length, cache, 100.0 * all.length / targets, targets);
+                if (all.length >= targets) {
+                    return bucket(java.util.Arrays.copyOf(all, targets), targets,
+                            totalTested, System.currentTimeMillis() - start);
                 }
                 System.out.printf("            extending by %d, resuming past sample %d%n",
-                        targets - existing.length, resumeFrom);
+                        targets - all.length, sampleAt);
             }
         }
 
-        final long sampleFrom = resumeFrom;
-        final int stillWanted = targets - existing.length;
-        AtomicLong tested = new AtomicLong();
-        AtomicLong found = new AtomicLong();
-        List<long[]> collected = new ArrayList<>();
+        int epoch = 0;
+        while (all.length < targets) {
+            final long epochFrom = sampleAt;
+            final long epochTo = sampleAt + EPOCH_SAMPLES;
+            final java.util.concurrent.atomic.AtomicLong next =
+                    new java.util.concurrent.atomic.AtomicLong(epochFrom);
+            final List<long[]> collected = new ArrayList<>();
+            final long chunk = 4096L;
 
-        Thread[] pool = new Thread[threads];
-        for (int t = 0; t < threads; t++) {
-            final long stride = t;
-            pool[t] = new Thread(() -> {
-                ChainPrefilter filter = new ChainPrefilter(OCEAN_COUNT);
-                DirtBlobFilter dirt = new DirtBlobFilter();
-                long[] mine = new long[64];
-                int n = 0;
-                for (long i = sampleFrom + stride; found.get() < stillWanted;
-                        i += threads) {
-                    // splitmix64 so the sampled seeds spread over the 48-bit space.
-                    long z = i * 0x9E3779B97F4A7C15L + 0x632BE59BD9B4E019L;
-                    z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L;
-                    z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL;
-                    z = (z ^ (z >>> 31)) & ((1L << 48) - 1);
-                    tested.incrementAndGet();
-                    int chains = filter.collectChains(z, OCEAN_INDEX, minHeight);
-                    if (chains == 0 && !filter.chainsOverflowed()) {
-                        continue;
+            Thread[] pool = new Thread[threads];
+            for (int t = 0; t < threads; t++) {
+                pool[t] = new Thread(() -> {
+                    ChainPrefilter filter = new ChainPrefilter(OCEAN_COUNT);
+                    DirtBlobFilter dirt = new DirtBlobFilter();
+                    long[] mine = new long[64];
+                    int n = 0;
+                    while (true) {
+                        long from = next.getAndAdd(chunk);
+                        if (from >= epochTo) {
+                            break;
+                        }
+                        long to = Math.min(from + chunk, epochTo);
+                        for (long i = from; i < to; i++) {
+                            // splitmix64 so the sampled seeds spread over the 48-bit
+                            // space. Not a bijection once masked to 48 bits, so this
+                            // samples rather than enumerates -- fine for a target set,
+                            // and the reason an exhaustive scan needs a different tool.
+                            long z = i * 0x9E3779B97F4A7C15L + 0x632BE59BD9B4E019L;
+                            z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L;
+                            z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL;
+                            z = (z ^ (z >>> 31)) & ((1L << 48) - 1);
+                            int chains = filter.collectChains(z, OCEAN_INDEX, minHeight);
+                            if (chains == 0 && !filter.chainsOverflowed()) {
+                                continue;
+                            }
+                            if (!soilPossible(filter, dirt, z, chains)) {
+                                continue;
+                            }
+                            if (n == mine.length) {
+                                mine = Arrays.copyOf(mine, n * 2);
+                            }
+                            mine[n++] = z;
+                        }
                     }
-                    // The chain's first column needs soil, and 98% of real spots stand
-                    // on ore-blob dirt seeded from this same decoration seed. Asking
-                    // here is free: it costs target-set build time, which amortises,
-                    // and buys 7.2x selectivity at search time.
-                    if (!soilPossible(filter, dirt, z, chains)) {
-                        continue;
+                    synchronized (collected) {
+                        collected.add(Arrays.copyOf(mine, n));
                     }
-                    if (n == mine.length) {
-                        mine = Arrays.copyOf(mine, n * 2);
-                    }
-                    mine[n++] = z;
-                    found.incrementAndGet();
-                }
-                synchronized (collected) {
-                    collected.add(Arrays.copyOf(mine, n));
-                }
-            }, "targets-" + t);
-            pool[t].start();
-        }
-        for (Thread thread : pool) {
-            thread.join();
+                }, "targets-" + t);
+                pool[t].start();
+            }
+            for (Thread thread : pool) {
+                thread.join();
+            }
+
+            int grown = all.length;
+            for (long[] part : collected) {
+                grown += part.length;
+            }
+            long[] merged = new long[grown];
+            System.arraycopy(all, 0, merged, 0, all.length);
+            int at = all.length;
+            for (long[] part : collected) {
+                System.arraycopy(part, 0, merged, at, part.length);
+                at += part.length;
+            }
+            all = merged;
+            totalTested += EPOCH_SAMPLES;
+            sampleAt = epochTo;
+            epoch++;
+
+            if (cache != null) {
+                TargetCache.save(cache, new TargetCache.Header(minHeight, OCEAN_COUNT,
+                        OCEAN_INDEX, ChainPrefilter.DEFAULT_BASE_MIN_Y,
+                        ChainPrefilter.DEFAULT_BASE_MAX_Y, true, totalTested, sampleAt),
+                        all, null);
+            }
+            double secs = (System.currentTimeMillis() - start) / 1000.0;
+            System.out.printf("  checkpoint %d: %d/%d targets, %d tested, %.0f s, "
+                            + "q = %.3e%s%n",
+                    epoch, all.length, targets, totalTested, secs,
+                    (double) all.length / totalTested,
+                    cache != null ? " (saved)" : "");
+            System.out.flush();
         }
 
-        // Merge whatever was cached with whatever was just built.
-        int total = existing.length;
-        for (long[] part : collected) {
-            total += part.length;
+        if (all.length > targets) {
+            all = java.util.Arrays.copyOf(all, targets);
         }
-        long[] all = new long[total];
-        System.arraycopy(existing, 0, all, 0, existing.length);
-        int at = existing.length;
-        for (long[] part : collected) {
-            System.arraycopy(part, 0, all, at, part.length);
-            at += part.length;
-        }
-        long totalTested = priorTested + tested.get();
         if (cache != null) {
             TargetCache.save(cache, new TargetCache.Header(minHeight, OCEAN_COUNT,
                     OCEAN_INDEX, ChainPrefilter.DEFAULT_BASE_MIN_Y,
-                    ChainPrefilter.DEFAULT_BASE_MAX_Y, true, totalTested,
-                    sampleFrom + tested.get() + threads), all, null);
+                    ChainPrefilter.DEFAULT_BASE_MAX_Y, true, totalTested, sampleAt),
+                    all, null);
             System.out.printf("target set: saved %d to %s%n", all.length, cache);
         }
         return bucket(all, targets, totalTested, System.currentTimeMillis() - start);

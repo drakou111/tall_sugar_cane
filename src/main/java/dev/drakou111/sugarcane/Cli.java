@@ -82,6 +82,13 @@ public final class Cli {
                             + "because the acceptance rate falls faster than the per-test cost "
                             + "does - about 0.4 ms at height 5, 5.9 ms at height 8.",
                     ReverseSearcher::targetsMain),
+            new Command("sin-table",
+                    "<file>",
+                    "Write Mth.SIN as big-endian float bits, for the CUDA scanner to load "
+                            + "rather than recompute. Recomputing it with C's sin() "
+                            + "disagrees with Java at entry 32768, so the table is handed "
+                            + "over rather than trusted to two libms agreeing.",
+                    args -> dev.drakou111.sugarcane.rng.Mth.main(args)),
             new Command("inspect",
                     "<seed> <x> <y> <z> [searchRadius]",
                     "Regenerate the region around one position and dump what the simulator "
