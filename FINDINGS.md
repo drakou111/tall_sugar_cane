@@ -2451,3 +2451,174 @@ using `double` where the game uses `float` diverges exactly where our finds live
 used to write a hardcoded `1` for the caller to patch, and a caller who forgot got a report
 of `0/0 cells, 0.0000% accuracy` — a wrong-seed world has no ocean chunks where the real one
 does, and nothing in the output said so.
+
+## 6ak. What every height from 7 to 25 costs, and where the game runs out
+
+The question was "how long do we wait for an N-tall, for N = 7..25". It needed R and P at
+every height, and the useful part turned out to be that the two decompose cleanly: the
+terrain barely resists at all and the RNG resists enormously.
+
+### The RNG side, modelled and then checked against 2e10 trials
+
+`yspread` is 0, so all 20 tries of an invocation share one y. A chain therefore needs one
+*distinct invocation per column*, each independently drawing the same (x, z) and the exact
+stacking y. That gives a per-column factor
+
+```
+A = (1/126) * (1/256) * sum over the 9x9 try offsets of [1 - (1 - t(dx)t(dz))^20]
+  = 5.2479e-04
+```
+
+and `P(>=N) = sum over k of C(10,k) * A^k * P(sum of k column heights >= N)`, with heights
+2, 3, 4 at 11/18, 5/18, 2/18. Measured on one ideal isolated spot, 2e10 decoration seeds:
+
+| N | columns | model | measured | ratio | events |
+|---|---|---|---|---|---|
+| 4 | 1 | 5.955e-4 | 5.924e-4 | 1.005 | 11,847,374 |
+| 5 | 2 | 7.782e-6 | 7.758e-6 | 1.003 | 155,150 |
+| 7 | 2 | 9.314e-7 | 9.322e-7 | 0.999 | 18,644 |
+| 8 | 2 | 1.610e-7 | 1.586e-7 | 1.015 | 3,171 |
+| 9 | 3 | 3.389e-9 | 3.250e-9 | 1.043 | 65 |
+| 10 | 3 | 1.051e-9 | 9.500e-10 | 1.106 | 19 |
+
+The three-column term was the one being extrapolated on faith and it holds to 4-11%. One
+run of exactly 13 appeared where 0.015 were expected (Poisson p = 1.4%); across twelve bins
+that is ordinary, but it sits exactly at the four-column boundary and is the first place the
+model could be wrong.
+
+Real terrain divides this by the haircut 6ag measured -- 0.69, 0.58, 0.53 at N = 5, 7, 8.
+Held flat at 0.55 below, which is mildly optimistic since it is still deepening.
+
+### The terrain side barely resists
+
+`diag` over 3,129,022 searched ocean chunks. The tail of `maxRun` decays only **0.668 per
+block**: 3.95e-4 chunks permit a 7, and ~2.4e-7 permit a 25. Across N = 7..25 the terrain
+term moves three orders of magnitude while the RNG term moves eighteen. **R is not the
+problem at any height and never becomes it.**
+
+### The answer
+
+| N | cols | chunks/find | box scan | reverse | target build |
+|---|---|---|---|---|---|
+| 7 | 2 | 4.9e9 | 3.6 d | 4.5 h | secs |
+| 8 | 2 | 5.3e10 | 38 d | 10.3 h | secs |
+| 9 | 3 | 4.5e12 | 9 y | 2.4 d | secs |
+| 10 | 3 | 2.1e13 | 42 y | 3.6 d | secs |
+| 11 | 3 | 1.6e14 | 309 y | 5.8 d | 2 min |
+| 12 | 3 | 1.7e15 | 3,290 y | 9.2 d | 14 min |
+| 13 | 4 | 8.3e16 | 1.6e5 y | 38 d | 2.7 h |
+| 15 | 4 | 4.3e18 | 8.4e6 y | 85 d | 2.6 d |
+| 17 | 5 | 2.6e21 | 5.1e9 y | 3 y | 124 d |
+| 20 | 5 | 3.7e24 | 7.4e12 y | 16 y | 90 y |
+| 25 | 7 | 2.1e31 | 4.1e19 y | 8,369 y | 9.8e5 y |
+
+24 threads. The staircase is entirely the column count -- 8->9 is x85 and 12->13 is x50,
+both crossing a column boundary.
+
+**The reverse search is far flatter than the box scan, and that is the result.** 7 -> 12
+costs the box scan 340,000x and costs reversal 49x, because `q(N)` falls almost as fast as
+the find rate and reversal divides by it. `q` measured directly to N = 15 over 60M
+decoration seeds: 1.575e-1, 3.393e-2, 2.176e-3, 7.167e-4, 1.548e-4, 2.303e-5, 1.933e-6,
+4.833e-7, 8.333e-8 for N = 7..15, reproducing 6ac's figures at 5, 7, 8 and 10.
+
+Caveat on the reverse column, in the spirit of 6ag's lesson: it is anchored on the only
+end-to-end observation there is -- two finds in 232 minutes on 12 threads (6ag + 6ah) -- so
+it carries +/-70% from the anchor alone. Everything else in the table is measured.
+
+Above N ~ 16 the binding cost stops being the search and becomes the target build, which
+scales as 1/q.
+
+### Where the game runs out
+
+Two bounds, agreeing. `2^48 * q(N) < 1` -- no decoration seed can chain the height at all --
+extrapolates to N ~ 24. Counting trials gives 22 to 25 depending on how much the upper 16
+seed bits buy, and that is the open part:
+
+- decoration seed, noise field and **carver walks are all low-48 properties**
+  (`setLargeFeatureSeed`, `CarverConfig:63`);
+- the upper 16 change only the biome map, which reaches terrain solely through
+  `getDepthAndScale` (`TruncatedNoise:378`);
+- every searchable ocean has **scale 0.10** and depth either -1.0 or -1.8.
+
+So a sister seed re-rolls the sea floor by the ocean/deep-ocean difference on a *fixed*
+carver walk. That is not a nudge and not a full re-roll, and the trial count is 3.96e27 or
+4.80e31 accordingly. **Unresolved.** The measurement that settles it: stride the seed by
+2^48 and count how often the best `maxRun` at a fixed chunk actually changes.
+
+### Per-candidate cost, and two things that do not work
+
+Measured under load (an unrelated 24-thread run sharing the box):
+
+```
+per candidate: biome gate 215 us, air probe 48 us, chunk 57 us  -> 320 of 348 thread-us
+6ae, uncontended:           110              49            33   -> 202
+```
+
+The air probe is unchanged at 48 vs 49; the gate nearly doubled. The probe is compute bound,
+the gate is a cache-cold pyramid build and is memory bound -- so **the dominant cost is also
+the one that degrades when workers share a machine**, which matters for any distributed plan.
+
+**Reordering does not help.** `CAVE_LAND = 0.1429 > CAVE_OCEAN = 0.0667` on the same
+`nextFloat()`, so `walk(..., ocean=false)` carves a superset and the probe *could* legally
+run before the gate. But 48 us is amortised over all candidates while the probe only runs on
+the 29.7% that are ocean -- its true per-run cost is 165 us, above the gate's 110. Moving it
+first: 165 + 110*0.025 + 33 = 201 us against 192. Slightly worse.
+
+**Carver reversal attacks the wrong term.** The probe is 49 us of 202, so making the carver
+test free caps at 1.32x. It only pays if it changes the pipeline shape rather than the
+per-candidate cost -- and note the probe is a *sound* filter, so generating only carver-good
+candidates adds no finds, it only stops paying for rejects. That ceiling is the 31,600 us
+currently burned per probe-passing candidate against ~200 us, i.e. ~150x, and it is available
+only if a joint solve is as cheap as the current sub-us Babai step.
+
+Which it may not be. `setDecorationSeed` combines its terms by **addition mod 2^48** -- hence
+a lattice, hence `DecorationLattice`. `setLargeFeatureSeed` combines by **XOR**. Constraining
+both at once is a mixed additive/bitwise system with no lattice to reduce, which is
+presumably why population+carver two-chunk resisted. And the counting is against it: a second
+congruence mod 2^48 divides the 0.8 border solutions per target by ~2^48, so for a fixed
+world seed there is essentially never a joint solution inside the border. Any such solver has
+to carry the world seed as a third unknown.
+
+### Three reported 11-talls are one target
+
+Reported: `-3944851142443026541` at 2361850,28,15559736; `3908902645157422835` at
+-9682102,28,22080008; `216080956173563027` at -6193110,28,-22740088. All three reproduce in
+the simulator as 4+3+4 from invocations 0/1/2.
+
+All three carry **decoration seed 109089712118451**, with byte-identical traces. Same-y and
+same relative offsets are consequences of that, not independent evidence. And all three world
+seeds are congruent to 3 mod 16 -- 1-in-256 by chance -- which is the bucket constraint: a
+world seed only reads `buckets[seed & 15]`, so **the effective target set per seed is T/16**.
+If bucket 3 holds one member, every find from a seed congruent to 3 mod 16 is forced to be
+that decoration seed at that y.
+
+The alternative explanation, that some targets are far more findable than others, was tested
+and is false. A target's chain geometry and its `DirtBlobFilter` verdict are functions of the
+decoration seed alone, so they precompute; one `AirCarveProbe` walk then serves the whole set
+at once. Over 419 in-chunk targets at height 11 and 60,000 walked chunks:
+
+```
+best 1245 passes, median 998, worst 533      2.3x spread, CV 17.6%
+top  1% of targets ->  1.2% of passes
+top 50% of targets -> 57.1% of passes
+overall pass rate 1.62%  (the live search measures 2.15%)
+```
+
+Near-uniform. **Ranking is not the lever; set size is**, and it is 16x smaller per seed than
+it looks.
+
+Two measurement traps worth recording, because both produced dramatic wrong answers first.
+Counting soil-rejected seeds as zero-yield targets is wrong -- the real set applies the soil
+filter at build time, so they are not members; that alone reported 88% of targets as dead.
+And `isCarved` returns **true** outside the walked chunk, so a chain sitting in a neighbour
+passes every trial. 25.8% of the set is in that state -- those are not high quality, they are
+untested, and they cost a full chunk generation every time. Together the two artefacts gave a
+dispersion of 18,422 where the truth is 30.
+
+### Still unverified
+
+None of the three 11-talls has been checked in game. They sit 15.7M, 24.1M and 23.6M blocks
+out -- past where 6aj measured the simulator 5.7x worse, with float precision still the open
+suspect and float ulp already 2 blocks by 16.8M. The terrain rolls independently in each, so
+at 6ab's ~1-in-3 failure rate P(all three false) is ~4%; the chain logic does not, so one
+in-game check settles the shape for all three at once.
