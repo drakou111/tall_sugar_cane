@@ -293,6 +293,10 @@ int main(int argc, char **argv) {
         fwrite(hOut, sizeof(unsigned long long), n, f);
         accepted += n;
         done += thisBatch;
+        // Relayed by GpuChainFilter so a long epoch is not a silent one. stderr, so it
+        // cannot corrupt a stdout stream of seeds.
+        fprintf(stderr, "progress %lld %lld %lld\n", done, samples, accepted);
+        fflush(stderr);
     }
     if (f != stdout) {
         fclose(f);

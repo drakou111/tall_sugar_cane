@@ -80,6 +80,18 @@ public final class GpuChainFilter {
     public long[] run(int minHeight, int count, int featureIndex, int baseMinY,
             int baseMaxY, long sampleFrom, long samples) throws IOException,
             InterruptedException {
+        return run(minHeight, count, featureIndex, baseMinY, baseMaxY, sampleFrom,
+                samples, null);
+    }
+
+    /**
+     * @param onProgress if non-null, called with (seeds done, seeds total, accepted so
+     *                   far) as the kernel reports them, so a long epoch is not silent
+     */
+    public long[] run(int minHeight, int count, int featureIndex, int baseMinY,
+            int baseMaxY, long sampleFrom, long samples,
+            java.util.function.LongConsumer onProgress) throws IOException,
+            InterruptedException {
         Path out = Files.createTempFile("targets-gpu-", ".bin");
         try {
             ProcessBuilder pb = new ProcessBuilder(binary.toString(),
@@ -89,8 +101,30 @@ public final class GpuChainFilter {
                     Long.toString(samples), out.toString());
             pb.redirectErrorStream(false);
             pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
-            pb.redirectError(ProcessBuilder.Redirect.DISCARD);
+            if (onProgress == null) {
+                pb.redirectError(ProcessBuilder.Redirect.DISCARD);
+            }
             Process proc = pb.start();
+            Thread relay = null;
+            if (onProgress != null) {
+                relay = new Thread(() -> {
+                    try (java.io.BufferedReader r = new java.io.BufferedReader(
+                            new java.io.InputStreamReader(proc.getErrorStream()))) {
+                        String line;
+                        while ((line = r.readLine()) != null) {
+                            if (line.startsWith("progress ")) {
+                                String[] f = line.split(" ");
+                                onProgress.accept(Long.parseLong(f[1]));
+                            }
+                        }
+                    } catch (Exception ignored) {
+                        // The process is finishing; progress reporting is not worth a
+                        // failure of its own.
+                    }
+                }, "gpu-progress");
+                relay.setDaemon(true);
+                relay.start();
+            }
             if (!proc.waitFor(6, TimeUnit.HOURS)) {
                 proc.destroyForcibly();
                 throw new IOException("the GPU filter did not finish within six hours");
@@ -104,6 +138,9 @@ public final class GpuChainFilter {
             }
             if (code != 0) {
                 throw new IOException("the GPU filter exited " + code);
+            }
+            if (relay != null) {
+                relay.join(2000);
             }
             byte[] raw = Files.readAllBytes(out);
             ByteBuffer bb = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN);

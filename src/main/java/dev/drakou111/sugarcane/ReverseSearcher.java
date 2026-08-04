@@ -395,6 +395,33 @@ public final class ReverseSearcher {
      */
     private static final long EPOCH_SAMPLES = 50_000_000L;
 
+    /** How often the target build reports itself. */
+    private static final long PROGRESS_MS = 5_000L;
+
+    /** 12,345,678 as 12.3M, so a progress line stays the same width as it grows. */
+    private static String compact(long n) {
+        if (n < 1_000_000L) {
+            return String.format("%,d", n);
+        }
+        if (n < 1_000_000_000L) {
+            return String.format("%.1fM", n / 1e6);
+        }
+        return String.format("%.2fB", n / 1e9);
+    }
+
+    private static String human(double seconds) {
+        if (seconds < 90) {
+            return String.format("%.0fs", seconds);
+        }
+        if (seconds < 5400) {
+            return String.format("%.1fmin", seconds / 60);
+        }
+        if (seconds < 172800) {
+            return String.format("%.1fh", seconds / 3600);
+        }
+        return String.format("%.1fd", seconds / 86400);
+    }
+
     /**
      * Decoration seeds whose draws alone could chain a run of {@code minHeight} and
      * whose soil its own chunk's blobs could supply, bucketed by their low four bits --
@@ -449,6 +476,58 @@ public final class ReverseSearcher {
             System.out.println("target set: no usable GPU filter found, using the CPU");
         }
 
+        // A line every few seconds, because the gap between checkpoints is 35 s on the
+        // CPU and an epoch at a high height can find nothing at all for minutes, which
+        // is indistinguishable from a hang.
+        final java.util.concurrent.atomic.AtomicLong testedBase =
+                new java.util.concurrent.atomic.AtomicLong(totalTested);
+        final java.util.concurrent.atomic.AtomicLong epochDone =
+                new java.util.concurrent.atomic.AtomicLong();
+        final java.util.concurrent.atomic.AtomicInteger foundNow =
+                new java.util.concurrent.atomic.AtomicInteger(all.length);
+        final java.util.concurrent.atomic.AtomicReference<String> phase =
+                new java.util.concurrent.atomic.AtomicReference<>("starting");
+        final long buildStart = System.currentTimeMillis();
+        final long testedAtStart = totalTested;
+        final int startedWith = all.length;
+        // Seconds per target, measured over whole epochs, so it does not drift within one.
+        final java.util.concurrent.atomic.AtomicReference<Double> epochRate =
+                new java.util.concurrent.atomic.AtomicReference<>(0.0);
+        final java.util.concurrent.atomic.AtomicReference<Double> epochQ =
+                new java.util.concurrent.atomic.AtomicReference<>(0.0);
+        Thread ticker = new Thread(() -> {
+            while (!Thread.currentThread().isInterrupted()) {
+                try {
+                    Thread.sleep(PROGRESS_MS);
+                } catch (InterruptedException e) {
+                    return;
+                }
+                long tested = testedBase.get() + epochDone.get();
+                long thisRun = tested - testedAtStart;
+                double secs = (System.currentTimeMillis() - buildStart) / 1000.0;
+                int found = foundNow.get();
+                double rate = secs > 0 ? thisRun / secs : 0;
+                int left = targets - found;
+                // From completed epochs only. Between checkpoints `found` is flat while
+                // elapsed grows, so a naive seconds-per-target inflates and the estimate
+                // visibly crawls upward while nothing is actually going wrong.
+                double perTarget = epochRate.get();
+                String eta = perTarget > 0 && left > 0
+                        ? String.format(", eta %s", human(left * perTarget))
+                        : "";
+                // q from completed epochs only, for the same reason as the eta: within an
+                // epoch `found` is flat while `tested` climbs, so the instantaneous ratio
+                // slides downward and looks like the yield collapsing.
+                double q = epochQ.get();
+                System.out.printf("  [%s] %s tested, %d/%d targets, %.2fM seeds/s%s%s%n",
+                        phase.get(), compact(tested), found, targets, rate / 1e6,
+                        q > 0 ? String.format(", q = %.3e", q) : "", eta);
+                System.out.flush();
+            }
+        }, "targets-progress");
+        ticker.setDaemon(true);
+        ticker.start();
+
         int epoch = 0;
         while (all.length < targets) {
             final long epochFrom = sampleAt;
@@ -461,9 +540,18 @@ public final class ReverseSearcher {
             if (gpu != null) {
                 // The GPU takes the chain filter over the whole epoch; the CPU applies
                 // the soil filter to the ~1.6% it hands back, in parallel.
+                phase.set("gpu chain filter");
+                epochDone.set(0);
                 long[] chainPassed = gpu.run(minHeight, OCEAN_COUNT, OCEAN_INDEX,
                         ChainPrefilter.DEFAULT_BASE_MIN_Y, ChainPrefilter.DEFAULT_BASE_MAX_Y,
-                        epochFrom, EPOCH_SAMPLES);
+                        epochFrom, EPOCH_SAMPLES, epochDone::set);
+                epochDone.set(EPOCH_SAMPLES);
+                phase.set("cpu soil filter");
+                System.out.printf("  epoch %d: gpu passed %d of %d seeds (%.2f%%), "
+                                + "sifting soil%n",
+                        epoch + 1, chainPassed.length, EPOCH_SAMPLES,
+                        100.0 * chainPassed.length / EPOCH_SAMPLES);
+                System.out.flush();
                 final long[] toSift = chainPassed;
                 final java.util.concurrent.atomic.AtomicInteger cursor =
                         new java.util.concurrent.atomic.AtomicInteger();
@@ -491,6 +579,7 @@ public final class ReverseSearcher {
                                 mine = Arrays.copyOf(mine, n * 2);
                             }
                             mine[n++] = z;
+                            foundNow.incrementAndGet();
                         }
                         synchronized (collected) {
                             collected.add(Arrays.copyOf(mine, n));
@@ -502,6 +591,7 @@ public final class ReverseSearcher {
                     thread.join();
                 }
             } else {
+            phase.set("cpu chain + soil");
             Thread[] pool = new Thread[threads];
             for (int t = 0; t < threads; t++) {
                 pool[t] = new Thread(() -> {
@@ -515,6 +605,7 @@ public final class ReverseSearcher {
                             break;
                         }
                         long to = Math.min(from + chunk, epochTo);
+                        epochDone.addAndGet(to - from);
                         for (long i = from; i < to; i++) {
                             // splitmix64 so the sampled seeds spread over the 48-bit
                             // space. Not a bijection once masked to 48 bits, so this
@@ -535,6 +626,7 @@ public final class ReverseSearcher {
                                 mine = Arrays.copyOf(mine, n * 2);
                             }
                             mine[n++] = z;
+                            foundNow.incrementAndGet();
                         }
                     }
                     synchronized (collected) {
@@ -566,6 +658,14 @@ public final class ReverseSearcher {
             java.util.Arrays.sort(merged);
             all = merged;
             totalTested += EPOCH_SAMPLES;
+            testedBase.set(totalTested);
+            epochDone.set(0);
+            foundNow.set(all.length);
+            if (all.length > startedWith) {
+                epochRate.set((System.currentTimeMillis() - buildStart) / 1000.0
+                        / (all.length - startedWith));
+            }
+            epochQ.set((double) all.length / totalTested);
             sampleAt = epochTo;
             epoch++;
 
@@ -584,7 +684,9 @@ public final class ReverseSearcher {
             System.out.flush();
         }
 
+        ticker.interrupt();
         if (all.length > targets) {
+            System.out.printf("  trimming %d found to the %d wanted%n", all.length, targets);
             all = java.util.Arrays.copyOf(all, targets);
         }
         if (cache != null) {
