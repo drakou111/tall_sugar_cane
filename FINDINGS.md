@@ -2237,3 +2237,86 @@ binding constraint is no longer speed: at 68,000 candidates/s we produce candida
 faster than we can trust them, and 6ab's ~1-in-3 in-game failure rate is now the thing
 worth attacking. The 7-tall found at -7996270,18,-6279960 on seed 5180 is exactly that
 case — simulator air where the game has water at y=18..21.
+
+## 6ah. Ranking targets, and a correction to 6af's coverage figure
+
+`ProbabilityProbe` now records the chain properties of every real find it produces, and
+of the accepted population, so target quality is read off finds instead of argued about.
+256 finds at height 7, against a 400,000-seed population sample.
+
+### The soil filter costs 56.3% of finds, not 17.9%
+
+```
+finds the soil filter would reject: 144 of 256 (56.3%)
+```
+
+6af priced that loss at 17.9% and claimed a net 5.9x. Both were wrong. 17.9% was **the
+wrong quantity**: it measured how much placed dirt lands outside its own chunk, not how
+often a real find's soil is something an own-chunk blob could have supplied. Those
+differ whenever the soil is not ore-blob dirt at all — a possibility waved away on the
+strength of 6i's "98% of spots are inside the terrain", which does not imply blob dirt.
+
+Corrected: selectivity 7.13x, retention 0.437, **net 3.12x**. Still worth keeping, and
+still the second largest win in the reverse search, but half what was recorded.
+
+That also closes the gap 6ag left open. With the measured retention:
+
+```
+P(find | candidate) = 1.516e-10 * 0.878 * 0.437 / 1.1515e-2 = 5.05e-9
+                    -> 50 min per find at 66,000 candidates/s
+```
+
+Observed: 1 find in 155 minutes, against 3.1 expected. Poisson p = 0.19, which is
+ordinary. The model and the search now agree, and no defect is left to look for. Every
+step of the way the error was a factor composed from something measured on the wrong
+population — three times in one day, in both directions.
+
+### The chain model is nearly complete
+
+```
+finds whose chain the filter cannot see at all: 1 of 256 (0.4%)
+```
+
+So the flattened stream, the `{0,2,4,6}` shift enumeration and the upward-chain-only
+assumption between them miss 0.4% of real finds. The hypothesis in 6ag that chain
+invisibility explained the shortfall was wrong, and wrong in the reassuring direction.
+
+### What predicts a find, measured
+
+```
+earlier placements assumed     of finds     of pop    weight
+  0                            94.118%    60.745%     1.55x
+  1                             2.745%    24.257%     0.11x
+  2                             1.961%    10.348%     0.19x
+  3                             1.176%     4.650%     0.25x
+
+columns in the chain           of finds     of pop    weight
+  2                            89.804%    77.737%     1.16x
+  3                            10.196%    22.114%     0.46x
+  4                             0.000%     0.150%     0.00x
+
+base y                         of finds     of pop    weight
+  8..13                         5.490%     4.495%     1.22x
+  14..19                       24.314%    26.133%     0.93x
+  20..25                       26.275%    26.006%     1.01x
+  26..31                       30.980%    25.843%     1.20x
+  32..37                       12.941%    17.523%     0.74x
+```
+
+**Shift dominates.** A chain assuming no earlier placement in its chunk carries 94% of
+the finds but only 61% of the set, because a prior success is rare (~1.1e-3 cane columns
+per chunk) and three of them rarer still. Keeping shift 0 alone costs 6% of finds to
+drop 39% of the set: **1.55x**.
+
+**Fewer columns is better**, as predicted from the water requirement at each junction:
+two columns 1.16x, three 0.46x, and four produced no finds at all in 256.
+
+**Base y is spent.** 0.74x to 1.22x across the band, so the depth band of 6ad already
+banked that signal and there is little left in it.
+
+### Not multiplying these
+
+1.55x and 1.16x are not independent — a two-column chain is likelier to sit at shift 0 —
+and this file has now been wrong three times from composing factors that looked
+composable. The combined filter has to be built and its q and retention measured
+together, on finds, before any number goes here.

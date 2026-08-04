@@ -144,9 +144,18 @@ public final class ProbabilityProbe {
         int baseY = ChainPrefilter.chainBaseY(best, 0);
         hitBaseY[Math.min(baseY, hitBaseY.length - 1)].incrementAndGet();
 
-        int rx = ChainPrefilter.chainX(best), rz = ChainPrefilter.chainZ(best);
-        if (rx >= 0 && rx <= 15 && rz >= 0 && rz <= 15
-                && !dirtFilter.couldSupply(ds, rx, baseY - 1, rz)) {
+        // Exactly what buildTargets asks: does ANY chain of this seed have soil its own
+        // chunk's blobs could supply? Testing only the cheapest chain, as an earlier
+        // version of this did, overstates the rejection badly.
+        boolean soilOk = false;
+        for (int i = 0; i < chains && !soilOk; i++) {
+            long c = chainFilter.chain(i);
+            int rx = ChainPrefilter.chainX(c), rz = ChainPrefilter.chainZ(c);
+            int sy = ChainPrefilter.chainBaseY(c, 0) - 1;
+            soilOk = rx < 0 || rx > 15 || rz < 0 || rz > 15
+                    || dirtFilter.couldSupply(ds, rx, sy, rz);
+        }
+        if (!soilOk) {
             hitsSoilRejected.incrementAndGet();
         }
     }
