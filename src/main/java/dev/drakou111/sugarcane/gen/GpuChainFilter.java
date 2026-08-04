@@ -39,6 +39,53 @@ public final class GpuChainFilter {
             Path.of("find_targets"),
     };
 
+    /**
+     * The kernel shipped inside the jar, so a user needs the jar and nothing else.
+     *
+     * <p>It is a normal resource that gets unpacked to a temp file and run. That works
+     * because nvcc links the CUDA runtime statically: the binary imports only
+     * {@code kernel32.dll} and {@code nvcuda.dll}, and the latter arrives with every
+     * NVIDIA driver. So no CUDA toolkit, no compiler, no build script on the user's
+     * machine -- which is the point, since asking someone to run a .bat to get the fast
+     * path means most people silently get the slow one.
+     *
+     * <p>A binary next to the jar still wins (see {@link #CANDIDATE_PATHS}), so a locally
+     * rebuilt kernel overrides the shipped one during development.
+     */
+    private static final String BUNDLED_RESOURCE = "/cuda/find_targets.exe";
+
+    /** Unpacked once per JVM; null once unpacking has been tried and failed. */
+    private static Path unpacked;
+    private static boolean unpackTried;
+
+    private static synchronized Path bundled() {
+        if (unpackTried) {
+            return unpacked;
+        }
+        unpackTried = true;
+        try (java.io.InputStream in =
+                     GpuChainFilter.class.getResourceAsStream(BUNDLED_RESOURCE)) {
+            if (in == null) {
+                return null;
+            }
+            String suffix = System.getProperty("os.name", "").toLowerCase().contains("win")
+                    ? ".exe" : "";
+            Path dir = Files.createTempDirectory("sugarcane-cuda");
+            Path exe = dir.resolve("find_targets" + suffix);
+            Files.copy(in, exe);
+            exe.toFile().setExecutable(true);
+            // Best effort: a searcher can run for days, so leaving one file per run in
+            // the temp directory is untidy rather than harmful, and deleting it while a
+            // child process still holds it would be worse.
+            exe.toFile().deleteOnExit();
+            dir.toFile().deleteOnExit();
+            unpacked = exe;
+        } catch (IOException e) {
+            lastFailure = "could not unpack the bundled kernel: " + e.getMessage();
+        }
+        return unpacked;
+    }
+
     private final Path binary;
 
     private GpuChainFilter(Path binary) {
@@ -59,7 +106,14 @@ public final class GpuChainFilter {
     /** @return a usable filter, or null if this machine has none */
     public static GpuChainFilter detect() {
         boolean sawBinary = false;
-        for (Path p : CANDIDATE_PATHS) {
+        // A local build first, then the copy inside the jar.
+        java.util.List<Path> tries = new java.util.ArrayList<>(CANDIDATE_PATHS.length + 1);
+        java.util.Collections.addAll(tries, CANDIDATE_PATHS);
+        Path shipped = bundled();
+        if (shipped != null) {
+            tries.add(shipped);
+        }
+        for (Path p : tries) {
             if (!Files.isRegularFile(p)) {
                 continue;
             }
@@ -77,13 +131,13 @@ public final class GpuChainFilter {
                 }
                 lastFailure = p + " ran but accepted nothing, which should be impossible at "
                         + "height 2 -- suspect an argument mismatch between this build and "
-                        + "the binary, or rebuild it with cuda/build.bat";
+                        + "the binary";
             } catch (Exception e) {
                 lastFailure = p + ": " + e.getMessage();
             }
         }
         if (!sawBinary) {
-            lastFailure = "no binary found in cuda/ or the working directory";
+            lastFailure = "no CUDA binary: none beside the jar, and none bundled inside it";
         }
         return null;
     }

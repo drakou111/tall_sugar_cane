@@ -84,3 +84,12 @@ cuda/*.pdb
 cuda/*.obj
 vc140.pdb
 contrib/
+
+# ...except the kernel that ships inside the jar, which is tracked on purpose so a
+# clone builds a jar that needs nothing else installed. Without this negation the
+# *.exe rule above drops it silently: the jar still builds, and every user of it
+# quietly gets the 4.5x slower CPU path.
+!src/main/resources/cuda/find_targets.exe
+
+__pycache__/
+*.pyc

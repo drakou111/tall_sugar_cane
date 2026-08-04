@@ -9,7 +9,16 @@ import java.time.Duration;
 public class SeedReporter {
 
     // Paste your Google Apps Script Web App URL here
-    private static final String WEB_APP_URL = "https://script.google.com/macros/s/AKfycbwtYOsLc2kRDX_wzh1ap1vk8bpGIhhT4TeiZ5iQPsajPAdqvYh8GV3XjDMXdxIBR6_s/exec";
+    private static final String DEFAULT_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbwtYOsLc2kRDX_wzh1ap1vk8bpGIhhT4TeiZ5iQPsajPAdqvYh8GV3XjDMXdxIBR6_s/exec";
+
+    /**
+     * Where reports go. Overridable with {@code -Dsugarcane.reportUrl=...} so the
+     * reporting path can be exercised end to end against a local server: the only other
+     * way to check it is to post a fake find to the shared spreadsheet, which is not a
+     * test, it is vandalism with extra steps.
+     */
+    private static final String WEB_APP_URL =
+            System.getProperty("sugarcane.reportUrl", DEFAULT_WEB_APP_URL);
     private final HttpClient httpClient;
 
     public SeedReporter() {

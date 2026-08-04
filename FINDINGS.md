@@ -2364,6 +2364,24 @@ fast enough not to look broken.
 Several `-gencode` rather than one `-arch` (`cuda/build.bat`): Turing, Ampere and Ada
 compiled in, plus `compute_89` PTX so a newer card JITs instead of failing.
 
+**And then no build script at all.** The kernel now ships inside the jar as a resource,
+unpacked to a temp file on first use. That works because nvcc links the CUDA runtime
+statically: the binary imports only `kernel32.dll` and `nvcuda.dll`, and the latter arrives
+with every NVIDIA driver. No toolkit, no compiler, no script on the user's machine. A
+binary beside the jar still wins, so a local rebuild overrides the shipped one.
+
+This matters more than convenience. Any fast path reached only by running a build script is
+a fast path most people will not have, and the failure is invisible: they get correct
+results, 4.5x slower, and no reason to suspect anything. Shipping the binary makes the fast
+path the default and the slow path the exception that has to explain itself.
+
+The cost is a binary in the tree, which can drift from its source — and had already done so
+once, when a failed compile left a stale exe running and the measurements looked fine.
+`BundledKernelTest` fails the build if `find_targets.cu` is newer than the shipped
+executable, and `build.bat` refreshes both copies. `.gitignore` needed a negation for it:
+`*.exe` had silently excluded it, which would have produced a clone whose jar built fine
+and shipped no kernel.
+
 Multi-architecture costs nothing at runtime. Measured on 200M seeds, single-arch `sm_89`
 26.71s against multi-arch 25.55s, with identical accept counts — the unused cubins are
 dead weight in the fatbin, not in the instruction stream. Only the file grows.

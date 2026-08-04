@@ -24,5 +24,16 @@ if errorlevel 1 (
   echo build failed
   exit /b 1
 )
-echo built %~dp0find_targets.exe
+
+REM Also refresh the copy that ships inside the jar. Users get the fast path from the jar
+REM alone and never run this script; forgetting to copy would leave the jar shipping a
+REM stale kernel, which has already happened once and cost a real find. BundledKernelTest
+REM fails the Maven build if this copy is older than the source.
+copy /y "%~dp0find_targets.exe" "%~dp0..\src\main\resources\cuda\find_targets.exe" >nul
+if errorlevel 1 (
+  echo could not refresh src\main\resources\cuda\find_targets.exe
+  exit /b 1
+)
+
+echo built %~dp0find_targets.exe and refreshed the bundled copy
 endlocal

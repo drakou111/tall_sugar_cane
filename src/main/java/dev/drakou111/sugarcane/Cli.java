@@ -92,10 +92,11 @@ public final class Cli {
                             + "chain filter automatically when cuda/find_targets.exe is "
                             + "present and a device answers a test batch, which is ~4.7x "
                             + "faster; --cpu forces the CPU path. Either device produces a "
-                            + "byte-identical file. If the GPU is skipped it says why, "
-                            + "because the fallback is 4.5x slower and used to be silent: "
-                            + "build the kernel with cuda/build.bat, which covers Turing "
-                            + "through Ada rather than one architecture.",
+                            + "byte-identical file. The kernel ships inside this jar and "
+                            + "needs no CUDA toolkit, only an NVIDIA driver, so there is "
+                            + "nothing to build or install; if the GPU is skipped anyway "
+                            + "it says why, because the fallback is 4.5x slower and used "
+                            + "to be silent.",
                     ReverseSearcher::targetsMain),
             new Command("inspect",
                     "<seed> <x> <y> <z> [searchRadius]",

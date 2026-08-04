@@ -52,11 +52,14 @@ public final class ProtoValidator {
 
     // Categories written by export_proto.py.
     private static final int OTHER = 0, AIR = 1, WATER = 2, STONE = 3, DIRT = 4,
-            SAND = 5, GRAVEL = 6, CLAY = 7, GRASS = 8, CANE = 9, ICE = 10;
+            SAND = 5, GRAVEL = 6, CLAY = 7, GRASS = 8, CANE = 9, ICE = 10, LAVA = 11;
+
+    /** The depth band the reverse search draws chain bases from (ChainPrefilter). */
+    private static final int LAVA_BAND_MIN = 13, LAVA_BAND_MAX = 35;
 
     private static final String[] NAMES = {
             "other", "air", "water", "stone", "dirt", "sand", "gravel", "clay",
-            "grass", "cane", "ice"};
+            "grass", "cane", "ice", "lava"};
 
     public static void main(String[] args) throws IOException {
         if (args[0].equals("spot")) {
@@ -125,11 +128,13 @@ public final class ProtoValidator {
         // 4531414558 was reported 5 tall and came back 2 for exactly this: air at
         // -87,25,96 that the game has as water.
         long simAirRealWater = 0, simWaterRealAir = 0;
+        long simAirRealLava = 0, simWaterRealLava = 0, simWaterRealLavaInBand = 0;
+        long realLava = 0, realLavaInBand = 0;
         long realAirSimSolid = 0;
         long simWater = 0, simWaterRealSolid = 0;
         long simSoil = 0, simSoilRealNot = 0, realSoilSimNot = 0;
         long oceanChunks = 0;
-        long[][] confusion = new long[11][11];
+        long[][] confusion = new long[NAMES.length][NAMES.length];
         // What actually decides the search: a spot is a conjunction of about six
         // blocks at a carve boundary, so its error rate can be far worse than the
         // per-block rate.
@@ -256,6 +261,9 @@ public final class ProtoValidator {
                             if (realCat == WATER) {
                                 simAirRealWater++;
                             }
+                            if (realCat == LAVA) {
+                                simAirRealLava++;
+                            }
                         }
                         if (simCat == WATER) {
                             simWater++;
@@ -264,6 +272,21 @@ public final class ProtoValidator {
                             }
                             if (realCat == AIR) {
                                 simWaterRealAir++;
+                            }
+                            // Cane needs water beside its soil. Simulated water that is
+                            // really lava satisfies a condition the game does not, so it
+                            // invents a spot outright.
+                            if (realCat == LAVA) {
+                                simWaterRealLava++;
+                                if (y >= LAVA_BAND_MIN && y <= LAVA_BAND_MAX) {
+                                    simWaterRealLavaInBand++;
+                                }
+                            }
+                        }
+                        if (realCat == LAVA) {
+                            realLava++;
+                            if (y >= LAVA_BAND_MIN && y <= LAVA_BAND_MAX) {
+                                realLavaInBand++;
                             }
                         }
                         if (realCat == AIR && (simCat == STONE || simCat == DIRT
@@ -304,6 +327,14 @@ public final class ProtoValidator {
         System.out.printf("%nthe errors that invent geometry:%n");
         System.out.printf("  simulated AIR that is really solid   : %d / %d air  (%.4f%%)%n",
                 simAirRealSolid, simAir, 100.0 * simAirRealSolid / Math.max(1, simAir));
+        System.out.printf("  simulated WATER that is really LAVA  : %d / %d water (%.4f%%)"
+                        + ", %d of them in the y %d..%d band%n",
+                simWaterRealLava, simWater, 100.0 * simWaterRealLava / Math.max(1, simWater),
+                simWaterRealLavaInBand, LAVA_BAND_MIN, LAVA_BAND_MAX);
+        System.out.printf("  simulated AIR that is really LAVA    : %d / %d air  (%.4f%%)%n",
+                simAirRealLava, simAir, 100.0 * simAirRealLava / Math.max(1, simAir));
+        System.out.printf("  (real lava cells seen: %d, of which %d in the band; the "
+                        + "simulator models none above y=11)%n", realLava, realLavaInBand);
         System.out.printf("  simulated WATER that is really solid : %d / %d water (%.4f%%)%n",
                 simWaterRealSolid, simWater, 100.0 * simWaterRealSolid / Math.max(1, simWater));
         System.out.printf("  simulated SOIL that is really not    : %d / %d soil  (%.4f%%)%n",
@@ -432,6 +463,7 @@ public final class ProtoValidator {
             case GRASS -> 'g';
             case CANE -> 'C';
             case ICE -> 'I';
+            case LAVA -> 'L';
             default -> '?';
         };
     }
