@@ -209,6 +209,13 @@ public final class RegionSearcher {
             thread.join();
         }
         stats.print(System.currentTimeMillis() - start);
+        if (probeTrials > 0) {
+            // The baseline to divide the finds' properties by: the same properties over
+            // accepted seeds generally. Sampled here rather than during the search so
+            // it costs nothing on the hot path.
+            new ProbabilityProbe().samplePopulation(5, report, 400_000L);
+            ProbabilityProbe.printRanking();
+        }
     }
 
     /**

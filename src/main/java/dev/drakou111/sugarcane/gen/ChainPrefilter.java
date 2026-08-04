@@ -84,6 +84,9 @@ public final class ChainPrefilter {
     private final int[] cy;
     private final int[] ch;
     private final int[] cn;
+    /** Which SHIFTS index each candidate was read at, i.e. how many earlier
+     *  placements it assumes. 0 assumes none, 3 assumes three. */
+    private final int[] cs;
     private int candidates;
 
     /**
@@ -120,6 +123,7 @@ public final class ChainPrefilter {
         this.cy = new int[max];
         this.ch = new int[max];
         this.cn = new int[max];
+        this.cs = new int[max];
     }
 
     /** @return the tallest run this seed's draws could chain together, ignoring terrain */
@@ -146,7 +150,8 @@ public final class ChainPrefilter {
 
         candidates = 0;
         for (int n = 0; n < count; n++) {
-            for (int shift : SHIFTS) {
+            for (int shiftIndex = 0; shiftIndex < SHIFTS.length; shiftIndex++) {
+                int shift = SHIFTS[shiftIndex];
                 int base = n * DRAWS_PER_INVOCATION + shift;
                 if (base + 2 >= capacity) {
                     continue;
@@ -173,6 +178,7 @@ public final class ChainPrefilter {
                     cy[candidates] = y;
                     ch[candidates] = 2 + bounded(draws[after + 1], bounded(draws[after], 3) + 1);
                     cn[candidates] = n;
+                    cs[candidates] = shiftIndex;
                     candidates++;
                 }
             }
@@ -262,9 +268,18 @@ public final class ChainPrefilter {
      */
     private long pack(int x, int z, int columns) {
         long packed = (long) (x + 4) | (long) (z + 4) << 5 | (long) columns << 10;
+        int maxShift = 0;
         for (int i = 0; i < columns; i++) {
             packed |= (long) cy[path[i]] << (13 + 7 * i);
+            if (cs[path[i]] > maxShift) {
+                maxShift = cs[path[i]];
+            }
         }
+        // Bits 41..44: how many earlier placements this chain assumes. The base's own
+        // assumption is the interesting one - a chain needing three prior successes in
+        // the same chunk is far less likely to be real than one needing none.
+        packed |= (long) cs[path[0]] << 41;
+        packed |= (long) maxShift << 43;
         return packed;
     }
 
@@ -283,6 +298,21 @@ public final class ChainPrefilter {
     /** Base y of column {@code i}, every one of which has to be air. */
     public static int chainBaseY(long chain, int i) {
         return (int) (chain >>> (13 + 7 * i) & 127);
+    }
+
+    /**
+     * Earlier placements the chain's first column assumes, 0..3. Each one is a
+     * successful placement before it in the chunk's stream, and those are rare
+     * (~1.1e-3 cane columns per chunk), so a high value marks a target that is
+     * unlikely ever to cash in.
+     */
+    public static int chainBaseShift(long chain) {
+        return (int) (chain >>> 41 & 3);
+    }
+
+    /** The largest such assumption across the chain's columns. */
+    public static int chainMaxShift(long chain) {
+        return (int) (chain >>> 43 & 3);
     }
 
     /**

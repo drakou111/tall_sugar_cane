@@ -48,13 +48,16 @@ public final class Cli {
                             + "the progress line prints, in minutes (default 1).",
                     RegionSearcher::main),
             new Command("reverse",
-                    "<minHeight> [threads] [targets] [firstSeed] [seedCount]",
+                    "<minHeight> [threads] [targets] [firstSeed] [seedCount] [--targets=<file>]",
                     "Reverse search: choose the cane RNG first, then solve for the chunk "
                             + "that has it. Builds a set of decoration seeds whose draws "
                             + "could chain a tall enough column, then uses the decoration "
                             + "seed lattice to turn each one into real coordinates inside "
                             + "the world border. Worth it from height 7 up; below that use "
-                            + "`search`. Prints the same HIT lines.",
+                            + "`search`. Prints the same HIT lines. --targets=<file> "
+                            + "caches the target set, which does not depend on the "
+                            + "world seed, so its build cost is paid once ever and a "
+                            + "later run can extend it rather than rebuild it.",
                     ReverseSearcher::main),
             new Command("inspect",
                     "<seed> <x> <y> <z> [searchRadius]",

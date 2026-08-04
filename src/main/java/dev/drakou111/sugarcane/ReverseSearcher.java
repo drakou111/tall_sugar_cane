@@ -6,6 +6,7 @@ import dev.drakou111.sugarcane.gen.BiomeIds;
 import dev.drakou111.sugarcane.gen.ChainPrefilter;
 import dev.drakou111.sugarcane.gen.DirtBlobFilter;
 import dev.drakou111.sugarcane.gen.SugarCaneFeature;
+import dev.drakou111.sugarcane.gen.TargetCache;
 import dev.drakou111.sugarcane.rng.DecorationLattice;
 import dev.drakou111.sugarcane.validate.BiomeSourceValidator;
 
@@ -133,11 +134,29 @@ public final class ReverseSearcher {
         return false;
     }
 
-    public static void main(String[] args) throws InterruptedException {
-        int minHeight = args.length > 0 ? Integer.parseInt(args[0]) : 8;
-        int threads = args.length > 1 ? Integer.parseInt(args[1])
+    /** Where to keep the target set, so its build cost is paid once ever. */
+    private static final String CACHE_FLAG = "--targets=";
+
+    public static void main(String[] args) throws Exception {
+        int minHeight;
+        int threads;
+        int targets;
+        // Flags first, so the positional arguments below are not thrown off by them.
+        java.nio.file.Path cache = null;
+        java.util.List<String> positional = new java.util.ArrayList<>(args.length);
+        for (String arg : args) {
+            if (arg.startsWith(CACHE_FLAG)) {
+                cache = java.nio.file.Path.of(arg.substring(CACHE_FLAG.length()));
+            } else {
+                positional.add(arg);
+            }
+        }
+        args = positional.toArray(new String[0]);
+        int minHeightArg = args.length > 0 ? Integer.parseInt(args[0]) : 8;
+        minHeight = minHeightArg;
+        threads = args.length > 1 ? Integer.parseInt(args[1])
                 : Runtime.getRuntime().availableProcessors();
-        int targets = args.length > 2 ? Integer.parseInt(args[2]) : 20_000;
+        targets = args.length > 2 ? Integer.parseInt(args[2]) : 20_000;
         long firstSeed = args.length > 3 ? Long.parseLong(args[3]) : 1L;
         long seedCount = args.length > 4 ? Long.parseLong(args[4]) : Long.MAX_VALUE;
 
@@ -149,7 +168,17 @@ public final class ReverseSearcher {
         System.out.printf("reverse search for height >= %d, %d threads, target set %d, "
                         + "seeds from %d%n", minHeight, threads, targets, firstSeed);
 
-        long[][] buckets = buildTargets(minHeight, targets, threads);
+        long[][] buckets;
+        try {
+            buckets = buildTargets(minHeight, targets, threads, cache);
+        } catch (java.io.IOException e) {
+            // A cache built for other parameters cannot hold what this run is looking
+            // for, so searching it would be a run that can never succeed. Say so
+            // plainly rather than unwinding a stack trace over it.
+            System.err.println("target set: " + e.getMessage());
+            System.exit(2);
+            return;
+        }
 
         RegionSearcher.Stats stats = new RegionSearcher.Stats();
         AtomicLong nextSeed = new AtomicLong(firstSeed);
@@ -304,9 +333,36 @@ public final class ReverseSearcher {
      * q of FINDINGS 6ac, 3.4% at height 8, so this costs about 150 us / 0.034 = 4.4 ms
      * per member and is a one-off: the set is world-seed-independent.
      */
-    private static long[][] buildTargets(int minHeight, int targets, int threads)
-            throws InterruptedException {
+    private static long[][] buildTargets(int minHeight, int targets, int threads,
+            java.nio.file.Path cache) throws Exception {
         long start = System.currentTimeMillis();
+        TargetCache.Header wanted = new TargetCache.Header(minHeight, OCEAN_COUNT,
+                OCEAN_INDEX, ChainPrefilter.DEFAULT_BASE_MIN_Y,
+                ChainPrefilter.DEFAULT_BASE_MAX_Y, true, 0L, 0L);
+
+        long[] existing = new long[0];
+        long resumeFrom = 0L;
+        long priorTested = 0L;
+        if (cache != null) {
+            TargetCache.Loaded loaded = TargetCache.load(cache, wanted);
+            if (loaded != null) {
+                existing = loaded.targets();
+                priorTested = loaded.header().tested();
+                resumeFrom = loaded.header().sampledThrough();
+                System.out.printf("target set: loaded %d from %s (%.1f%% of the %d wanted)%n",
+                        existing.length, cache,
+                        100.0 * existing.length / targets, targets);
+                if (existing.length >= targets) {
+                    return bucket(java.util.Arrays.copyOf(existing, targets), targets,
+                            priorTested, System.currentTimeMillis() - start);
+                }
+                System.out.printf("            extending by %d, resuming past sample %d%n",
+                        targets - existing.length, resumeFrom);
+            }
+        }
+
+        final long sampleFrom = resumeFrom;
+        final int stillWanted = targets - existing.length;
         AtomicLong tested = new AtomicLong();
         AtomicLong found = new AtomicLong();
         List<long[]> collected = new ArrayList<>();
@@ -319,7 +375,8 @@ public final class ReverseSearcher {
                 DirtBlobFilter dirt = new DirtBlobFilter();
                 long[] mine = new long[64];
                 int n = 0;
-                for (long i = stride; found.get() < targets; i += threads) {
+                for (long i = sampleFrom + stride; found.get() < stillWanted;
+                        i += threads) {
                     // splitmix64 so the sampled seeds spread over the 48-bit space.
                     long z = i * 0x9E3779B97F4A7C15L + 0x632BE59BD9B4E019L;
                     z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L;
@@ -353,29 +410,49 @@ public final class ReverseSearcher {
             thread.join();
         }
 
-        int[] sizes = new int[16];
+        // Merge whatever was cached with whatever was just built.
+        int total = existing.length;
         for (long[] part : collected) {
-            for (long target : part) {
-                sizes[(int) (target & 15L)]++;
-            }
+            total += part.length;
+        }
+        long[] all = new long[total];
+        System.arraycopy(existing, 0, all, 0, existing.length);
+        int at = existing.length;
+        for (long[] part : collected) {
+            System.arraycopy(part, 0, all, at, part.length);
+            at += part.length;
+        }
+        long totalTested = priorTested + tested.get();
+        if (cache != null) {
+            TargetCache.save(cache, new TargetCache.Header(minHeight, OCEAN_COUNT,
+                    OCEAN_INDEX, ChainPrefilter.DEFAULT_BASE_MIN_Y,
+                    ChainPrefilter.DEFAULT_BASE_MAX_Y, true, totalTested,
+                    sampleFrom + tested.get() + threads), all, null);
+            System.out.printf("target set: saved %d to %s%n", all.length, cache);
+        }
+        return bucket(all, targets, totalTested, System.currentTimeMillis() - start);
+    }
+
+    /** Splits a target set by low four bits, which is the only slice a world seed uses. */
+    private static long[][] bucket(long[] all, int targets, long tested, long ms) {
+        int[] sizes = new int[16];
+        for (long target : all) {
+            sizes[(int) (target & 15L)]++;
         }
         long[][] buckets = new long[16][];
         int[] at = new int[16];
         for (int i = 0; i < 16; i++) {
             buckets[i] = new long[sizes[i]];
         }
-        for (long[] part : collected) {
-            for (long target : part) {
-                int b = (int) (target & 15L);
-                buckets[b][at[b]++] = target;
-            }
+        for (long target : all) {
+            int b = (int) (target & 15L);
+            buckets[b][at[b]++] = target;
         }
 
-        double seconds = (System.currentTimeMillis() - start) / 1000.0;
         System.out.printf("target set: %d seeds from %d tested (q = %.4e) in %.1f s, "
                         + "%d per low-4-bit bucket%n%n",
-                found.get(), tested.get(), (double) found.get() / tested.get(),
-                seconds, sizes[0]);
+                all.length, tested, tested > 0 ? (double) all.length / tested : 0.0,
+                ms / 1000.0, sizes[0]);
         return buckets;
     }
 }
