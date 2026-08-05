@@ -93,13 +93,19 @@ public final class SisterScan {
                 for (int u = next.getAndIncrement(); u < count; u = next.getAndIncrement()) {
                     long full = low48 | ((long) u << 48);
                     worker.prepare(full);
+                    long before = stats.chunksSearched.get();
                     worker.searchOneChunk(chunkX, chunkZ);
-                    ArrayWorld world = worker.world;
-                    // y=200 is air in anything that generated; SOLID means this sister's
-                    // biome has no implemented surface builder and nothing was built.
-                    if (world.getBlock(tx, 200, tz) == Blocks.SOLID) {
+                    // Ask whether a chunk was actually searched, rather than inspecting the
+                    // world for a sentinel. searchRegion returns at `if (!anySearchable)`
+                    // BEFORE it calls world.reset, so a sister whose chunk is not searchable
+                    // leaves the previous sister's terrain and cane sitting in the buffer --
+                    // and a sentinel read then reports that neighbour's find as this one's.
+                    // That inflated the count by 15% and made it depend on which sister a
+                    // thread happened to do first.
+                    if (stats.chunksSearched.get() == before) {
                         continue;
                     }
+                    ArrayWorld world = worker.world;
                     generated.incrementAndGet();
                     int height = tallestAt(world, tx, tz);
                     synchronized (lock) {
