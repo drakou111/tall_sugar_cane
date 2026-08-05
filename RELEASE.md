@@ -32,9 +32,15 @@ are, and 8 per bucket amortises that over nothing.
 java -jar sugarcane.jar targets 12 1000 targets12.bin 24
 ```
 
-About eight minutes on 24 threads, and worth **~2.7x**. The ceiling is 3.4x and the curve
-flattens past ~5,000. The set never depends on the world seed, so this is paid once and
-reused by everyone, forever.
+Worth **~2.7x**, ceiling 3.4x, curve flat past ~5,000.
+
+Budget about **2.4 hours** for 1,000 at height 12. Two things make that slower than it
+sounds: the chain filter runs on the GPU, so the build samples ~7.5e6 seeds/s whatever
+thread count you give it, and contiguity cuts q from 4.55e-8 to 1.63e-8 -- which is the
+point of the filter, but q is also what the build divides by, so each member costs 2.8x
+more to find. It checkpoints and resumes, so you can stop it whenever.
+
+The set never depends on the world seed, so one person builds it and everyone uses it.
 
 Together with the filter that is roughly **5x**.
 

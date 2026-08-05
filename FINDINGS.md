@@ -3016,8 +3016,35 @@ at 64, 12,133 at 8, 2,564 at 1. The sweep's saving on lattice and probe still be
 extra prepares. The set size is the lever.
 
 Growing to 1,000 recovers about **2.7x**; the ceiling with setup fully amortised is 3.4x,
-and past roughly 5,000 the curve is flat. The build runs at 1.9 targets/s on 24 threads,
-so 1,000 is about eight minutes — once, ever, for every seed anyone searches.
+and past roughly 5,000 the curve is flat.
+
+### What the build actually costs, which is not what was first claimed
+
+An earlier version of this section said 1,000 height-12 targets was about eight minutes.
+That was wrong twice over, and both errors point the same way.
+
+It came from a 4-thread run that produced 31 targets in 98 s, scaled by six for 24
+threads. **The build does not scale with threads.** Measured on 24 threads it samples
+7.5e6 seeds/s; the 4-thread run sampled 7.1e6. The chain filter runs on the GPU and the
+CPU only sifts soil on the ~1.6% handed back, so seed throughput is the card's and the
+thread count barely enters it. Scaling a thread count linearly was an assumption, not a
+measurement, and nothing checked it.
+
+The second error is that the figure was taken under the *ascending* rule. Contiguity cuts
+q, and q is exactly what the build divides by, so every member costs proportionally more:
+
+| rule | q at height 12 | seconds per target, 24 threads |
+|---|---|---|
+| ascending | 4.55e-8 | 2.9 |
+| contiguous | **1.63e-8** | **8.5** |
+
+So 1,000 contiguous height-12 targets is about **2.4 hours**, not eight minutes. That 2.8x
+is also an independent confirmation of the filter itself, arriving from a different
+direction than the 2.5x measured by re-testing an existing set.
+
+Still obviously worth doing: the build checkpoints and resumes, the set never depends on
+the world seed, and one person building it covers everyone -- which matters more here
+than the wall clock, because the collaborators are on other cards.
 
 ### The two together
 
