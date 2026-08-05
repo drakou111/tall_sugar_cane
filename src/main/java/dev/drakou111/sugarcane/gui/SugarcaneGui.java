@@ -36,7 +36,8 @@ public final class SugarcaneGui {
     private final JTextArea console = new JTextArea();
     private final JButton run = new JButton("Run");
     private final JButton stop = new JButton("Stop");
-    private final JCheckBox report = new JCheckBox("report finds to the shared spreadsheet");
+    private final JCheckBox report = new JCheckBox("report finds as");
+    private final JTextField user = new JTextField(14);
     private final JTabbedPane tabs = new JTabbedPane();
     private final List<Supplier<List<String>>> argsPerTab = new ArrayList<>();
     private volatile Process running;
@@ -68,6 +69,17 @@ public final class SugarcaneGui {
         controls.add(run);
         controls.add(stop);
         controls.add(report);
+        controls.add(user);
+        // The name only matters when reporting, and a live field that does nothing is a
+        // question the user has to answer for themselves.
+        user.setEnabled(report.isSelected());
+        report.addActionListener(e -> user.setEnabled(report.isSelected()));
+        String saved = dev.drakou111.sugarcane.Cli.savedUsername();
+        if (saved != null && !saved.isBlank()) {
+            user.setText(saved);
+        }
+        user.setToolTipText("saved to config.properties on the first run that uses it, so "
+                + "it only has to be typed once");
         JButton clear = new JButton("Clear");
         clear.addActionListener(e -> console.setText(""));
         controls.add(clear);

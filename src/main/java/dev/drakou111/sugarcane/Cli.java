@@ -23,7 +23,19 @@ import java.util.Scanner;
 public final class Cli {
 
     private static final String CONFIG_FILE = "config.properties";
+    /**
+     * {@code --user=<name>}: the name finds are reported under. Saved to
+     * {@link #CONFIG_FILE}, so it is given once rather than every run.
+     *
+     * <p>It exists because {@code --yes-report} deliberately never touches stdin — a
+     * backgrounded run would stop dead on a prompt — which used to mean anyone reporting
+     * without an interactive first run was stuck as Anonymous forever. That includes
+     * every run started from the GUI, which always passes the flag.
+     */
+    private static final String USER_FLAG = "--user=";
     private static String reporterUsername;
+    /** Set by {@code --user=<name>}: overrides the saved name and replaces it. */
+    private static String userOverride;
 
     public static boolean reportFinds;
 
@@ -146,6 +158,8 @@ public final class Cli {
                 reporting = Reporting.NO;
             } else if (arg.equals("--yes-report")) {
                 reporting = Reporting.YES;
+            } else if (arg.startsWith(USER_FLAG)) {
+                userOverride = arg.substring(USER_FLAG.length()).trim();
             } else {
                 rest.add(arg);
             }
@@ -203,6 +217,16 @@ public final class Cli {
             }
         }
 
+        // An explicit name wins over the saved one, and replaces it, so --user= is given
+        // once rather than every run.
+        if (userOverride != null && !userOverride.isEmpty()) {
+            boolean changed = !userOverride.equals(reporterUsername);
+            reporterUsername = userOverride;
+            if (changed) {
+                saveUsername(props, configFile);
+            }
+        }
+
         if (reporting == Reporting.NO) {
             reportFinds = false;
             return;
@@ -214,7 +238,9 @@ public final class Cli {
             if (reporterUsername == null || reporterUsername.trim().isEmpty()) {
                 reporterUsername = "Anonymous";
                 System.out.println("--yes-report: no username in " + CONFIG_FILE
-                        + ", reporting as Anonymous.");
+                        + ", reporting as Anonymous. Pass --user=<name> once to set it.");
+            } else {
+                System.out.println("reporting finds as " + reporterUsername);
             }
             return;
         }
@@ -238,13 +264,32 @@ public final class Cli {
                 reporterUsername = "Anonymous";
             }
 
-            props.setProperty("username", reporterUsername);
-            try (FileOutputStream out = new FileOutputStream(configFile)) {
-                props.store(out, "Sugarcane Finder User Configuration");
-                System.out.println("Saved username to " + CONFIG_FILE);
-            } catch (IOException e) {
-                System.err.println("Failed to save config file: " + e.getMessage());
-            }
+            saveUsername(props, configFile);
+        }
+    }
+
+    private static void saveUsername(Properties props, File configFile) {
+        props.setProperty("username", reporterUsername);
+        try (FileOutputStream out = new FileOutputStream(configFile)) {
+            props.store(out, "Sugarcane Finder User Configuration");
+            System.out.println("Saved username \"" + reporterUsername + "\" to " + CONFIG_FILE);
+        } catch (IOException e) {
+            System.err.println("Failed to save config file: " + e.getMessage());
+        }
+    }
+
+    /** The saved name, or null. Read by the GUI so its field starts filled in. */
+    public static String savedUsername() {
+        File configFile = new File(CONFIG_FILE);
+        if (!configFile.exists()) {
+            return null;
+        }
+        Properties props = new Properties();
+        try (FileInputStream in = new FileInputStream(configFile)) {
+            props.load(in);
+            return props.getProperty("username");
+        } catch (IOException e) {
+            return null;
         }
     }
 
