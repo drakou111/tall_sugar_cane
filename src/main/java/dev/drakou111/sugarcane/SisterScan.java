@@ -41,8 +41,8 @@ public final class SisterScan {
         int ty = Integer.parseInt(args[2]);
         int tz = Integer.parseInt(args[3]);
         int count = args.length > 4 ? Integer.parseInt(args[4]) : 65536;
-        int threads = args.length > 5 ? Integer.parseInt(args[5])
-                : Runtime.getRuntime().availableProcessors();
+        int threads = Cli.clampThreads(args.length > 5 ? Integer.parseInt(args[5])
+                : Runtime.getRuntime().availableProcessors());
         int minHeight = args.length > 6 ? Integer.parseInt(args[6]) : 5;
 
         int chunkX = tx >> 4, chunkZ = tz >> 4;

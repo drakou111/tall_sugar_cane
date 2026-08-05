@@ -76,11 +76,37 @@ final class MinecraftTextures {
         return img;
     }
 
+    /**
+     * Point at a jar explicitly. Returns false and changes nothing if it has no textures,
+     * so a wrong pick cannot silently leave the game with no art.
+     */
+    static synchronized boolean use(Path candidate) {
+        try (ZipFile zip = new ZipFile(candidate.toFile())) {
+            if (zip.getEntry(MARKER) == null) {
+                return false;
+            }
+        } catch (Exception e) {
+            return false;
+        }
+        jar = candidate;
+        searched = true;
+        CACHE.clear();
+        return true;
+    }
+
     private static void find() {
         if (searched) {
             return;
         }
         searched = true;
+        // An explicit answer beats any amount of guessing.
+        String override = System.getProperty("sugarcane.mcjar");
+        if (override != null && !override.isBlank()) {
+            Path p = Path.of(override);
+            if (Files.isRegularFile(p) && use(p)) {
+                return;
+            }
+        }
         for (Path candidate : candidates()) {
             try (ZipFile zip = new ZipFile(candidate.toFile())) {
                 if (zip.getEntry(MARKER) != null) {
@@ -110,12 +136,27 @@ final class MinecraftTextures {
             roots.add(Path.of(appData, "PrismLauncher", "instances"));
             roots.add(Path.of(appData, "curseforge", "minecraft", "Install", "versions"));
             roots.add(Path.of(appData, ".minecraft", "libraries", "com", "mojang", "minecraft"));
+            // The other launchers people actually use.
+            roots.add(Path.of(appData, "MultiMC", "instances"));
+            roots.add(Path.of(appData, "PolyMC", "instances"));
+            roots.add(Path.of(appData, "ATLauncher", "versions"));
+            roots.add(Path.of(appData, "gdlauncher_next", "instances"));
+            roots.add(Path.of(appData, "ModrinthApp", "meta", "versions"));
+            roots.add(Path.of(appData, "com.modrinth.theseus", "meta", "versions"));
+            roots.add(Path.of(appData, ".technic", "modpacks"));
         }
+        // Deliberately NOT %LOCALAPPDATA%\Packages: that is the Microsoft Store app,
+        // which is Bedrock and has no Java assets at all. Walking it cost 1.8 seconds on
+        // the event thread and could never have found anything.
         if (home != null) {
             roots.add(Path.of(home, ".minecraft", "versions"));                       // Linux
             roots.add(Path.of(home, "Library", "Application Support", "minecraft",    // macOS
                     "versions"));
             roots.add(Path.of(home, "curseforge", "minecraft", "Install", "versions"));
+            roots.add(Path.of(home, ".local", "share", "PrismLauncher", "instances"));
+            roots.add(Path.of(home, ".local", "share", "multimc", "instances"));
+            roots.add(Path.of(home, "Library", "Application Support", "PrismLauncher",
+                    "instances"));
         }
 
         List<Path> found = new ArrayList<>();

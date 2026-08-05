@@ -163,8 +163,8 @@ public final class RegionSearcher {
         long seeds = args.length > 1 ? Long.parseLong(args[1]) : 0L;
         final boolean unbounded = seeds <= 0;
         int radius = args.length > 2 ? Integer.parseInt(args[2]) : 16;
-        int threads = args.length > 3 ? Integer.parseInt(args[3])
-                : Runtime.getRuntime().availableProcessors();
+        int threads = Cli.clampThreads(args.length > 3 ? Integer.parseInt(args[3])
+                : Runtime.getRuntime().availableProcessors());
         int report = args.length > 4 ? Integer.parseInt(args[4]) : 5;
         // "probe:<trials>": on every chunk that offers a stackable spot, replay the
         // cane feature over that many synthetic decoration seeds. Measures P.

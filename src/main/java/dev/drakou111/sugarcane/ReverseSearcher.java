@@ -366,8 +366,8 @@ public final class ReverseSearcher {
         int minHeight = Integer.parseInt(args[0]);
         int count = Integer.parseInt(args[1]);
         java.nio.file.Path file = java.nio.file.Path.of(args[2]);
-        int threads = args.length > 3 ? Integer.parseInt(args[3])
-                : Runtime.getRuntime().availableProcessors();
+        int threads = Cli.clampThreads(args.length > 3 ? Integer.parseInt(args[3])
+                : Runtime.getRuntime().availableProcessors());
 
         System.out.printf("building a target set for height >= %d, %d wanted, %d threads%n",
                 minHeight, count, threads);
@@ -400,8 +400,8 @@ public final class ReverseSearcher {
             System.exit(2);
             return;
         }
-        threads = args.length > 1 ? Integer.parseInt(args[1])
-                : Runtime.getRuntime().availableProcessors();
+        threads = Cli.clampThreads(args.length > 1 ? Integer.parseInt(args[1])
+                : Runtime.getRuntime().availableProcessors());
         targets = args.length > 2 ? Integer.parseInt(args[2]) : 20_000;
         long firstSeed = args.length > 3 ? Long.parseLong(args[3]) : 1L;
         // 0 or negative means the same as leaving it off: keep going.

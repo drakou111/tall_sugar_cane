@@ -295,6 +295,28 @@ public final class Cli {
         }
     }
 
+    /**
+     * Threads, never more than the machine has.
+     *
+     * <p>Oversubscribing does not just fail to help: every worker holds its own region
+     * buffer and biome caches, so past the core count the extra threads add memory and
+     * cache pressure and the search gets slower. Asking for 64 on a 24-thread box is
+     * always a mistake, so it is corrected rather than obeyed.
+     */
+    public static int clampThreads(int requested) {
+        int cores = Runtime.getRuntime().availableProcessors();
+        if (requested < 1) {
+            System.out.println("threads " + requested + " is not usable, using 1");
+            return 1;
+        }
+        if (requested > cores) {
+            System.out.println("threads " + requested + " exceeds this machine's " + cores
+                    + ", using " + cores);
+            return cores;
+        }
+        return requested;
+    }
+
     public static String getReporterUsername() {
         return reporterUsername != null ? reporterUsername : "Anonymous";
     }

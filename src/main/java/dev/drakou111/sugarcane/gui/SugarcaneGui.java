@@ -2,6 +2,8 @@ package dev.drakou111.sugarcane.gui;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
+import javax.swing.plaf.UIResource;
+import javax.swing.text.JTextComponent;
 import java.awt.*;
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -58,33 +60,164 @@ public final class SugarcaneGui {
     }
 
     private static void dark() {
+        dark(true);
+    }
+
+    /**
+     * Install a dark palette, whatever look and feel this JVM actually has.
+     *
+     * <p>Ordering is the whole trick, and getting it wrong is what produced a white window
+     * on a machine without Nimbus. Nimbus reads its {@code nimbus*} keys <em>as it
+     * initialises</em>, so those must be set before {@code setLookAndFeel}. But
+     * {@code setLookAndFeel} then installs that look and feel's own defaults and wipes
+     * anything else put before it — so the generic keys have to be set afterwards. Both
+     * sides, or one of the two look and feels comes out stock.
+     *
+     * @param preferNimbus false forces the cross-platform look and feel, which is how the
+     *                     no-Nimbus path gets tested on a machine that has it
+     */
+    static void dark(boolean preferNimbus) {
+        UIManager.put("control", PANEL);
+        UIManager.put("info", PANEL);
+        UIManager.put("nimbusBase", new Color(0x23252A));
+        UIManager.put("nimbusBlueGrey", PANEL);
+        UIManager.put("nimbusLightBackground", FIELD);
+        UIManager.put("nimbusSelectionBackground", ACCENT);
+        UIManager.put("nimbusSelectedText", Color.WHITE);
+        UIManager.put("nimbusFocus", ACCENT);
+        UIManager.put("nimbusBorder", new Color(0x4A4D52));
+        UIManager.put("nimbusDisabledText", new Color(0x6B6F76));
+        UIManager.put("text", TEXT);
+        UIManager.put("menuText", TEXT);
+        UIManager.put("infoText", TEXT);
+        UIManager.put("controlText", TEXT);
+
         try {
+            String nimbus = null;
             for (UIManager.LookAndFeelInfo laf : UIManager.getInstalledLookAndFeels()) {
                 if ("Nimbus".equals(laf.getName())) {
-                    UIManager.setLookAndFeel(laf.getClassName());
+                    nimbus = laf.getClassName();
                     break;
                 }
             }
-            UIManager.put("control", PANEL);
-            UIManager.put("info", PANEL);
-            UIManager.put("nimbusBase", new Color(0x23252A));
-            UIManager.put("nimbusBlueGrey", PANEL);
-            UIManager.put("nimbusLightBackground", FIELD);
-            UIManager.put("nimbusSelectionBackground", ACCENT);
-            UIManager.put("nimbusSelectedText", Color.WHITE);
-            UIManager.put("nimbusFocus", ACCENT);
-            UIManager.put("nimbusBorder", new Color(0x4A4D52));
-            UIManager.put("nimbusDisabledText", new Color(0x6B6F76));
-            UIManager.put("text", TEXT);
-            UIManager.put("menuText", TEXT);
-            UIManager.put("infoText", TEXT);
-            UIManager.put("controlText", TEXT);
-            UIManager.put("Panel.background", PANEL);
-            UIManager.put("TextArea.background", FIELD);
-            UIManager.put("TextArea.foreground", TEXT);
-            UIManager.put("ScrollPane.background", PANEL);
+            // Metal takes its bevels from a MetalTheme, not from UIManager defaults, so
+            // putting controlHighlight and friends does nothing and every button keeps a
+            // white outline. The theme has to be installed, and before the look and feel.
+            javax.swing.plaf.metal.MetalLookAndFeel.setCurrentTheme(new DarkMetal());
+            // Never fall through to the system look and feel: on Windows it paints
+            // natively and ignores colour keys, which is exactly how this ended up white.
+            UIManager.setLookAndFeel(preferNimbus && nimbus != null ? nimbus
+                    : UIManager.getCrossPlatformLookAndFeelClassName());
         } catch (Exception ignored) {
             // Cosmetic only: a look and feel that will not load is not worth failing over.
+        }
+
+        // After, so they survive whatever setLookAndFeel just installed.
+        for (String k : new String[]{"Panel", "TabbedPane", "ScrollPane", "Viewport",
+                "SplitPane", "OptionPane", "CheckBox", "Label", "Button", "ComboBox",
+                "TextField", "TextArea"}) {
+            UIManager.put(k + ".background", k.startsWith("Text") ? FIELD : PANEL);
+            UIManager.put(k + ".foreground", TEXT);
+        }
+        UIManager.put("Button.select", ACCENT);
+        UIManager.put("TextField.caretForeground", TEXT);
+        // Metal and Basic draw their bevels from these. Left stock they are near-white,
+        // which outlines every control in bright lines on a dark window.
+        UIManager.put("controlHighlight", new Color(0x4A4D52));
+        UIManager.put("controlLtHighlight", new Color(0x53575D));
+        UIManager.put("controlShadow", new Color(0x26282C));
+        UIManager.put("controlDkShadow", new Color(0x1A1B1E));
+        UIManager.put("Separator.foreground", new Color(0x4A4D52));
+        UIManager.put("Separator.background", PANEL);
+    }
+
+    /** Metal's palette, which it reads from here rather than from UIManager. */
+    private static final class DarkMetal extends javax.swing.plaf.metal.DefaultMetalTheme {
+        private static javax.swing.plaf.ColorUIResource c(Color col) {
+            return new javax.swing.plaf.ColorUIResource(col);
+        }
+
+        @Override
+        protected javax.swing.plaf.ColorUIResource getPrimary1() {
+            return c(new Color(0x23252A));
+        }
+
+        @Override
+        protected javax.swing.plaf.ColorUIResource getPrimary2() {
+            return c(ACCENT);
+        }
+
+        @Override
+        protected javax.swing.plaf.ColorUIResource getPrimary3() {
+            return c(new Color(0x3A5070));
+        }
+
+        @Override
+        protected javax.swing.plaf.ColorUIResource getSecondary1() {
+            return c(new Color(0x17181B));
+        }
+
+        @Override
+        protected javax.swing.plaf.ColorUIResource getSecondary2() {
+            return c(new Color(0x3A3D42));
+        }
+
+        @Override
+        protected javax.swing.plaf.ColorUIResource getSecondary3() {
+            return c(PANEL);
+        }
+
+        /** The one that matters: Metal paints its highlights with "white". */
+        @Override
+        protected javax.swing.plaf.ColorUIResource getWhite() {
+            return c(new Color(0x53575D));
+        }
+
+        @Override
+        protected javax.swing.plaf.ColorUIResource getBlack() {
+            return c(new Color(0x101114));
+        }
+
+        @Override
+        public javax.swing.plaf.ColorUIResource getControlTextColor() {
+            return c(TEXT);
+        }
+
+        @Override
+        public javax.swing.plaf.ColorUIResource getSystemTextColor() {
+            return c(TEXT);
+        }
+
+        @Override
+        public javax.swing.plaf.ColorUIResource getUserTextColor() {
+            return c(TEXT);
+        }
+
+        @Override
+        public javax.swing.plaf.ColorUIResource getInactiveControlTextColor() {
+            return c(new Color(0x6B6F76));
+        }
+    }
+
+    /**
+     * Force the palette onto anything the look and feel coloured itself.
+     *
+     * <p>Swing tags colours it supplied as {@link UIResource}, so this repaints those and
+     * leaves alone anything set deliberately — the muted hints, the console, the gold in
+     * the slot machine. It is the belt to the UIManager braces: whatever look and feel
+     * ends up loading, the window comes out dark.
+     */
+    private static void forceDark(Component c) {
+        if (c.getBackground() instanceof UIResource) {
+            c.setBackground(c instanceof JTextComponent ? FIELD : PANEL);
+        }
+        if (c.getForeground() instanceof UIResource) {
+            c.setForeground(TEXT);
+        }
+        if (c instanceof Container parent) {
+            for (Component child : parent.getComponents()) {
+                forceDark(child);
+            }
         }
     }
 
@@ -161,10 +294,10 @@ public final class SugarcaneGui {
         top.add(tabs, BorderLayout.CENTER);
         top.add(controls, BorderLayout.SOUTH);
 
-        split = new JSplitPane(JSplitPane.VERTICAL_SPLIT, top,
-                new JScrollPane(console));
+        split = new JSplitPane(JSplitPane.VERTICAL_SPLIT, top, scroll(console));
         split.setResizeWeight(0.0);
         frame.add(split);
+        forceDark(frame.getContentPane());
         frame.setSize(940, 720);
         frame.setLocationRelativeTo(null);
         frame.setVisible(true);
@@ -189,23 +322,51 @@ public final class SugarcaneGui {
      * of its own way. Capped at the usable screen height, after which it simply stops.
      */
     private void makeRoomForStack(int stackPixels) {
-        if (frame == null || split == null) {
+        if (frame == null || split == null || !frame.isShowing()) {
             return;
+        }
+        // Leave a maximized or iconified window alone. Resizing a maximized frame on
+        // Windows leaves it flagged maximized at the new size, which reads as the window
+        // collapsing or minimising itself the moment you press SPIN.
+        if (frame.getExtendedState() != Frame.NORMAL) {
+            split.setDividerLocation(baseDivider + Math.max(0, stackPixels - 40));
+            return;
+        }
+        if (baseHeight <= 0) {
+            baseHeight = Math.max(frame.getHeight(), 720);   // never grow down from zero
         }
         int max = GraphicsEnvironment.getLocalGraphicsEnvironment()
                 .getMaximumWindowBounds().height;
-        int want = Math.min(baseHeight + Math.max(0, stackPixels - 40), max);
+        int extra = Math.max(0, stackPixels - 40);
+        // Clamped below by the base as well as above by the screen: this may only ever
+        // make the window taller than it started, never shorter.
+        int want = Math.max(baseHeight, Math.min(baseHeight + extra, Math.max(baseHeight, max)));
         if (frame.getHeight() != want) {
             frame.setSize(frame.getWidth(), want);
         }
-        split.setDividerLocation(baseDivider + Math.max(0, stackPixels - 40));
+        split.setDividerLocation(baseDivider + extra);
+    }
+
+    /**
+     * A scroll pane that moves at a usable speed.
+     *
+     * <p>Swing's default unit increment is one pixel for anything that is not a JList or
+     * JTable, so a wheel notch crawls. 16 is roughly a line.
+     */
+    private static JScrollPane scroll(Component view) {
+        JScrollPane pane = new JScrollPane(view);
+        pane.getVerticalScrollBar().setUnitIncrement(16);
+        pane.getVerticalScrollBar().setBlockIncrement(160);
+        pane.getHorizontalScrollBar().setUnitIncrement(16);
+        pane.setBorder(BorderFactory.createEmptyBorder());
+        return pane;
     }
 
     private void addTab(String name, Tab tab) {
         JPanel wrapper = new JPanel(new BorderLayout());
         wrapper.add(tab.panel, BorderLayout.NORTH);
         wrapper.setBorder(new EmptyBorder(8, 8, 8, 8));
-        tabs.addTab(name, new JScrollPane(wrapper));
+        tabs.addTab(name, scroll(wrapper));
         argsPerTab.add(tab.args);
     }
 

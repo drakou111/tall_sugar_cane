@@ -84,9 +84,9 @@ final class SlotMachine extends JPanel {
     private static final Color GOLD = new Color(0xE8C15A);
 
     private final Image[] sprites = new Image[SYMBOLS.length];
-    private final BufferedImage caneRaw;
-    private final BufferedImage dirtRaw;
-    private final BufferedImage waterRaw;
+    private BufferedImage caneRaw;
+    private BufferedImage dirtRaw;
+    private BufferedImage waterRaw;
     private final Symbol[] shown = {Symbol.DIRT, Symbol.SAND, Symbol.WATER};
     private final long[] stopAt = new long[3];
     private final Random random = new Random();
@@ -98,6 +98,7 @@ final class SlotMachine extends JPanel {
     private final JButton spin = new JButton("SPIN");
     private final JButton cash = new JButton("cash out");
     private final JButton refill = new JButton("+25 credits");
+    private JButton pick;
     private final Board board = new Board();
     private final Timer timer;
     /** Told how many pixels of stack there are, so the window can make room. */
@@ -115,12 +116,15 @@ final class SlotMachine extends JPanel {
         this.grow = grow;
         setLayout(new BorderLayout(0, 8));
         setOpaque(false);
+        // Drawn art first, so the window opens now. Hunting a Minecraft install means
+        // walking launcher directories, which measured 1.4 seconds on a cold cache -- on
+        // the event thread that is the window hanging before it appears.
         for (int i = 0; i < SYMBOLS.length; i++) {
-            sprites[i] = scaled(image(SYMBOLS[i]), CELL - 16);
+            sprites[i] = scaled(drawn(SYMBOLS[i]), CELL - 16);
         }
-        caneRaw = raw(Symbol.SUGAR_CANE);
-        dirtRaw = raw(Symbol.DIRT);
-        waterRaw = raw(Symbol.WATER);
+        caneRaw = drawn(Symbol.SUGAR_CANE);
+        dirtRaw = drawn(Symbol.DIRT);
+        waterRaw = drawn(Symbol.WATER);
 
         JLabel title = new JLabel("stack a column", SwingConstants.CENTER);
         title.setFont(new Font(Font.MONOSPACED, Font.BOLD, 17));
@@ -142,6 +146,27 @@ final class SlotMachine extends JPanel {
             status();
         });
         buttons.add(refill);
+        // Only offered when the search came up empty, which is the only time it helps.
+        pick = new JButton("find Minecraft jar...");
+        pick.setVisible(false);          // shown by the scan below if it comes up empty
+        pick.addActionListener(e -> {
+            JFileChooser chooser = new JFileChooser();
+            chooser.setDialogTitle("pick a Minecraft client jar");
+            chooser.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter(
+                    "Minecraft client jar", "jar"));
+            if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) {
+                return;
+            }
+            if (MinecraftTextures.use(chooser.getSelectedFile().toPath())) {
+                reloadSprites();
+                pick.setVisible(false);
+                showTextureSource();
+                board.repaint();
+            } else {
+                origin.setText("that jar has no block textures in it");
+            }
+        });
+        buttons.add(pick);
 
         JPanel south = new JPanel(new BorderLayout(0, 5));
         south.setOpaque(false);
@@ -157,11 +182,44 @@ final class SlotMachine extends JPanel {
         add(board, BorderLayout.CENTER);
         add(south, BorderLayout.SOUTH);
 
+        Thread loader = new Thread(() -> {
+            MinecraftTextures.source();     // the expensive part, off the event thread
+            SwingUtilities.invokeLater(() -> {
+                if (MinecraftTextures.source() != null) {
+                    reloadSprites();
+                }
+                showTextureSource();
+                pick.setVisible(MinecraftTextures.source() == null);
+                board.repaint();
+            });
+        }, "texture-scan");
+        loader.setDaemon(true);
+        loader.start();
+
         spin.addActionListener(e -> pull());
         cash.addActionListener(e -> cashOut());
         cash.setEnabled(false);
         timer = new Timer(45, e -> tick());
         status();
+    }
+
+    private void showTextureSource() {
+        Path jar = MinecraftTextures.source();
+        origin.setText(jar == null
+                ? "no Minecraft install found - textures drawn from a palette"
+                : "textures: " + jar.getFileName() + " (" + shorten(jar) + ")");
+    }
+
+    private void reloadSprites() {
+        // Drawn art first, so the window opens now. Hunting a Minecraft install means
+        // walking launcher directories, which measured 1.4 seconds on a cold cache -- on
+        // the event thread that is the window hanging before it appears.
+        for (int i = 0; i < SYMBOLS.length; i++) {
+            sprites[i] = scaled(drawn(SYMBOLS[i]), CELL - 16);
+        }
+        caneRaw = drawn(Symbol.SUGAR_CANE);
+        dirtRaw = drawn(Symbol.DIRT);
+        waterRaw = drawn(Symbol.WATER);
     }
 
     // ------------------------------------------------------------------ play
