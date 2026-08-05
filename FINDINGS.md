@@ -2718,3 +2718,77 @@ Four low-48 seeds across eight threads leaves half the threads idle while the re
 "accounted" and "actual" diverging, and they agree once the seeds outnumber the threads.
 And `LayerCaches.enlarge` costs 301 us against 38 us for the biome source it enlarges,
 which is worth knowing but was not the bottleneck it looked like.
+
+## 6am. A double-precision terrain kernel is not worth building, measured
+
+Terrain noise is the biggest single cost left, so it is the obvious thing to put on the
+GPU. It should not be, and the reason is specific to what kind of arithmetic it is.
+
+### Where the time is
+
+Splitting the chunk build, per searched chunk:
+
+```
+noise             2653 us   54%
+carvers           1389 us   28%
+surface builder    709 us   14%
+world writes       109 us    2%
+decorate+feature    42 us    1%
+```
+
+Chunk generation is 83% of the per-candidate cost, so noise alone is ~45% of the whole
+search. Amdahl therefore caps a perfect noise kernel at **1.8x**, and noise plus carvers
+at **3.1x**. Those are ceilings, not estimates.
+
+### Why the existing kernel is fast and this one would not be
+
+`find_targets.cu` reaches 8,047k seeds/s because it is integer LCG work — one `double` in
+the whole file — and integer throughput on a consumer card is full rate. Minecraft's noise
+is `double` throughout and bit-exactness leaves no choice, and **Ada consumer parts run
+FP64 at 1/64 of FP32**: an RTX 4080 is ~48.7 TFLOPS FP32 against ~0.76 TFLOPS FP64. That
+0.76 is about the same as this 24-thread CPU's FP64 peak, so there is no headroom to win.
+
+Measured with matching implementations of `PerlinNoiseSampler.sample`, 16 octaves:
+
+```
+GPU  RTX 4080, -fmad=false, best of 12 runs      750 M octave-evals/s
+CPU  24 threads                                  865 M octave-evals/s
+```
+
+Both land at 7-9% of their respective FP64 peaks — the workload is gradient-lookup bound,
+not FLOP bound, on either device. **The GPU is not faster.** An opportunistic earlier
+reading of 932 M/s, taken when the card happened to be idle, is 1.03x; the honest summary
+is a tie either way.
+
+The measurement was taken on a busy machine — the GPU sat at 99% utilisation and 304 W
+from a game, Wallpaper Engine, Minecraft and browsers throughout, and three consecutive
+identical runs spanned 84 to 344 M octave-evals/s. Best-of-12 is therefore a lower bound
+on the uncontended rate. It does not change the conclusion: to be worth the second
+implementation the kernel would need ~2x, which is more than double the best figure ever
+observed and above what the FP64 rate allows.
+
+### What that leaves
+
+The only GPU route with real headroom is to stop trying to be exact. FP32 runs at 64x the
+FP64 rate, so a **permissive FP32 prefilter** — reject a candidate only when the single
+precision result plus its error bound says the base is unambiguously water, and hand
+survivors to the exact CPU path — sidesteps both the rate problem and the exactness
+problem at once. Same argument that lets `AirCarveProbe` run against a permissive stub: a
+filter needs soundness, not exactness.
+
+### Two things this exercise got wrong first
+
+Worth recording because both produced confident wrong output.
+
+**A claimed FMA demonstration that was not one.** Building the same kernel with and without
+`-fmad=false` appeared to give −2.0620 against −2.0464, which reads as a dramatic
+confirmation that nvcc's default contraction changes the terrain. It was not: the host-side
+permutation shuffle had `(int)` binding to the shift instead of the modulo, so a negative
+index wrote out of bounds, and two separately linked binaries corrupted different stack
+bytes. With the bug fixed both builds agree exactly. The FMA hazard is still real in
+principle and `build.bat` still carries the flag — but it has not been demonstrated here,
+and the earlier claim in this file's history should not be relied on.
+
+**A GPU number taken on a contended card.** The first reading of 932 M/s was not
+reproducible and neither was anything else until the contention was noticed. A benchmark
+that swings 4x between identical runs is reporting the rest of the desktop, not the kernel.
