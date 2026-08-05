@@ -6,6 +6,7 @@ import dev.drakou111.sugarcane.gen.BiomeIds;
 import dev.drakou111.sugarcane.gen.ChainPrefilter;
 import dev.drakou111.sugarcane.gen.DirtBlobFilter;
 import dev.drakou111.sugarcane.gen.GpuChainFilter;
+import dev.drakou111.sugarcane.gen.OrbitSampler;
 import dev.drakou111.sugarcane.gen.LiquidCarveProbe;
 import dev.drakou111.sugarcane.gen.SugarCaneFeature;
 import dev.drakou111.sugarcane.gen.TargetCache;
@@ -985,14 +986,14 @@ public final class ReverseSearcher {
                         long to = Math.min(from + chunk, epochTo);
                         epochDone.addAndGet(to - from);
                         for (long i = from; i < to; i++) {
-                            // splitmix64 so the sampled seeds spread over the 48-bit
-                            // space. Not a bijection once masked to 48 bits, so this
-                            // samples rather than enumerates -- fine for a target set,
-                            // and the reason an exhaustive scan needs a different tool.
-                            long z = i * 0x9E3779B97F4A7C15L + 0x632BE59BD9B4E019L;
-                            z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L;
-                            z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL;
-                            z = (z ^ (z >>> 31)) & ((1L << 48) - 1);
+                            // Runs of orbit neighbours from a splitmix-scattered start.
+                            // The kernel keeps a ring of invocations and pays for one new
+                            // invocation per seed instead of `count`; this ordering is what
+                            // makes that possible. The CPU gains nothing from it and
+                            // recomputes every seed from scratch, which is the point -- the
+                            // two paths must still produce the same set.
+                            long z = OrbitSampler.sampleAt(i, OCEAN_INDEX,
+                                    SugarCaneFeature.VEGETAL_DECORATION);
                             int chains = filter.collectChains(z, OCEAN_INDEX, minHeight);
                             if (chains == 0 && !filter.chainsOverflowed()) {
                                 continue;

@@ -73,6 +73,11 @@
 #define Y_CEIL 64
 #define Y_SLOTS (Y_CEIL - Y_FLOOR + 1)
 
+/* Must match OrbitSampler.RUN and its LCG^123 jump constants. */
+#define ORBIT_RUN 64
+#define JUMP_A 0x6A8C38D11115ULL
+#define JUMP_C 0x5DB66A6C93D5ULL
+
 __constant__ int SHIFTS[SHIFT_COUNT] = {0, 2, 4, 6};
 
 struct Chains {
@@ -88,6 +93,8 @@ struct Chains {
     /** Tallest run of at most two, and at most three, columns starting here. */
     unsigned char best2[MAX_CANDIDATES];
     unsigned char best3[MAX_CANDIDATES];
+    /** The group's y, so the y-buckets rebuild each step without re-reading candidates. */
+    unsigned char groupY[GROUPS];
     short groupStart[GROUPS];
     short groupEnd[GROUPS];
     unsigned char groupN[GROUPS];
@@ -135,146 +142,197 @@ __device__ __forceinline__ void advanceWindow(unsigned long long &rng, unsigned 
 }
 
 /**
- * Whether this seed's draws could chain a run of {@code minHeight} starting inside the
- * depth band. Four columns at most, which is what {@code ChainPrefilter.collect} allows
- * and therefore what the target build actually uses.
+ * Derive one invocation's four shift-views into a fixed ring slot.
+ *
+ * <p>Slots are fixed rather than appended: group {@code slot*SHIFT_COUNT+shiftIndex} always
+ * owns candidates {@code group*TRIES ..+TRIES}, so one invocation can be overwritten in
+ * place while the other {@code count-1} stay put. A group whose y falls outside the legal
+ * column is marked empty by {@code groupStart == groupEnd} instead of being skipped, since
+ * skipping would move everything after it.
+ *
+ * <p>{@code absN} is an absolute invocation counter, not a position in the ring. The DP
+ * only ever compares invocation numbers to each other, so absolute values order correctly
+ * and -- unlike ring-relative ones -- do not all have to be rewritten on every slide.
  */
-__device__ bool accepts(Chains &c, unsigned long long decorationSeed, int featureIndex,
-                        int count, int minHeight, int baseMinY, int baseMaxY,
-                        int maxBaseShift, int maxColumns, int maxSlack) {
-    unsigned long long s = decorationSeed + (unsigned long long) featureIndex + 10000ULL * 8ULL;
-    unsigned long long rng = (s ^ MULTIPLIER) & MASK48;
+__device__ void deriveSlot(Chains &c, int slot, int absN) {
+    for (int shiftIndex = 0; shiftIndex < SHIFT_COUNT; shiftIndex++) {
+        int group = slot * SHIFT_COUNT + shiftIndex;
+        int base = group * TRIES;
+        int shift = SHIFTS[shiftIndex];
+        c.groupN[group] = (unsigned char) absN;
+        c.groupStart[group] = (short) base;
 
-    c.candidates = 0;
-    c.groupCount = 0;
+        int y = bounded(c.window[shift + 2], DOUBLED_HEIGHTMAP);
+        if (y < Y_FLOOR || y > Y_CEIL) {
+            c.groupEnd[group] = (short) base;
+            continue;
+        }
+        c.groupEnd[group] = (short) (base + TRIES);
+        c.groupY[group] = (unsigned char) y;
+
+        int originX = bounded(c.window[shift], 16);
+        int originZ = bounded(c.window[shift + 1], 16);
+        for (int t = 0; t < TRIES; t++) {
+            int off = shift + 3 + t * DRAWS_PER_TRY;
+            int after = off + DRAWS_PER_TRY;
+            int k = base + t;
+            c.x[k] = (signed char) (originX + bounded(c.window[off], 5)
+                    - bounded(c.window[off + 1], 5));
+            c.z[k] = (signed char) (originZ + bounded(c.window[off + 4], 5)
+                    - bounded(c.window[off + 5], 5));
+            c.y[k] = (unsigned char) y;
+            c.h[k] = (unsigned char) (2 + bounded(c.window[after + 1],
+                    bounded(c.window[after], 3) + 1));
+            c.n[k] = (unsigned char) absN;
+            c.s[k] = (unsigned char) shiftIndex;
+        }
+    }
+}
+
+/**
+ * Whether the {@code count} invocations currently in the ring could chain a run of
+ * {@code minHeight} starting inside the depth band.
+ *
+ * <p>Logical invocation L lives in slot {@code (head + L) % count}. The y-buckets are
+ * rebuilt ascending and the DP runs descending, which is the same relative order the flat
+ * per-seed scan had -- the DP needs a continuation's best2/best3 ready before its
+ * predecessor, and a continuation always has the higher invocation number.
+ */
+__device__ bool chainExists(Chains &c, int head, int count, int minHeight,
+                            int baseMinY, int baseMaxY, int maxBaseShift, int maxColumns,
+                            int maxSlack) {
     for (int i = 0; i < Y_SLOTS; i++) {
         c.yHead[i] = -1;
     }
-    refillWindow(rng, c.window);
-
-    for (int invocation = 0; invocation < count; invocation++) {
-        for (int shiftIndex = 0; shiftIndex < SHIFT_COUNT; shiftIndex++) {
-            int shift = SHIFTS[shiftIndex];
-            int y = bounded(c.window[shift + 2], DOUBLED_HEIGHTMAP);
-            if (y < Y_FLOOR || y > Y_CEIL) {
+    for (int L = 0; L < count; L++) {
+        int slot = head + L;
+        if (slot >= count) {
+            slot -= count;
+        }
+        for (int sh = 0; sh < SHIFT_COUNT; sh++) {
+            int g = slot * SHIFT_COUNT + sh;
+            if (c.groupStart[g] == c.groupEnd[g]) {
                 continue;
             }
-            int originX = bounded(c.window[shift], 16);
-            int originZ = bounded(c.window[shift + 1], 16);
-
-            int group = c.groupCount++;
-            c.groupStart[group] = c.candidates;
-            c.groupN[group] = (unsigned char) invocation;
-            c.groupNext[group] = -1;
-            int slot = y - Y_FLOOR;
-            // Appended, not pushed, so groups stay in ascending order and the iteration
-            // order matches the flat scan this replaces.
-            if (c.yHead[slot] == -1) {
-                c.yHead[slot] = (short) group;
+            int ys = (int) c.groupY[g] - Y_FLOOR;
+            c.groupNext[g] = -1;
+            if (c.yHead[ys] == -1) {
+                c.yHead[ys] = (short) g;
             } else {
-                c.groupNext[c.yTail[slot]] = (short) group;
+                c.groupNext[c.yTail[ys]] = (short) g;
             }
-            c.yTail[slot] = (short) group;
-
-            for (int t = 0; t < TRIES; t++) {
-                int off = shift + 3 + t * DRAWS_PER_TRY;
-                int after = off + DRAWS_PER_TRY;
-                int k = c.candidates++;
-                c.x[k] = (signed char) (originX + bounded(c.window[off], 5)
-                        - bounded(c.window[off + 1], 5));
-                c.z[k] = (signed char) (originZ + bounded(c.window[off + 4], 5)
-                        - bounded(c.window[off + 5], 5));
-                c.y[k] = (unsigned char) y;
-                unsigned char height = (unsigned char) (2 + bounded(c.window[after + 1],
-                        bounded(c.window[after], 3) + 1));
-                c.h[k] = height;
-                c.n[k] = (unsigned char) invocation;
-                c.s[k] = (unsigned char) shiftIndex;
-                c.best2[k] = height;
-                c.best3[k] = height;
-            }
-            c.groupEnd[group] = c.candidates;
-        }
-        if (invocation + 1 < count) {
-            advanceWindow(rng, c.window);
+            c.yTail[ys] = (short) g;
         }
     }
 
-    // Backwards, so best2 and best3 of any continuation are already known.
-    for (int i = (int) c.candidates - 1; i >= 0; i--) {
-        int h1 = c.h[i];
-        int h2 = h1, h3 = h1, h4 = h1;
-        int wantedY = (int) c.y[i] + h1;
+    for (int L = count - 1; L >= 0; L--) {
+        int slot = head + L;
+        if (slot >= count) {
+            slot -= count;
+        }
+        for (int sh = SHIFT_COUNT - 1; sh >= 0; sh--) {
+            int gi = slot * SHIFT_COUNT + sh;
+            for (int i = (int) c.groupEnd[gi] - 1; i >= (int) c.groupStart[gi]; i--) {
+                int h1 = c.h[i];
+                int h2 = h1, h3 = h1, h4 = h1;
+                int wantedY = (int) c.y[i] + h1;
 
-        if (wantedY >= Y_FLOOR && wantedY <= Y_CEIL) {
-            for (int g = c.yHead[wantedY - Y_FLOOR]; g != -1; g = c.groupNext[g]) {
-                if (c.groupN[g] <= c.n[i]) {
+                if (wantedY >= Y_FLOOR && wantedY <= Y_CEIL) {
+                    for (int g = c.yHead[wantedY - Y_FLOOR]; g != -1; g = c.groupNext[g]) {
+                        if (c.groupN[g] <= c.n[i]) {
+                            continue;
+                        }
+                        for (int j = c.groupStart[g]; j < c.groupEnd[g]; j++) {
+                            if (c.x[j] != c.x[i] || c.z[j] != c.z[i]) {
+                                continue;
+                            }
+                            // Placements only accumulate, so a continuation cannot read
+                            // the stream at the same offset as the column it sits on --
+                            // that column is itself a placement. Only the i -> j step
+                            // needs checking; best2[j] and best3[j] enforce it further up.
+                            if (c.s[j] <= c.s[i]) {
+                                continue;
+                            }
+                            // The slack budget. Only 0 and unbounded are local rules and
+                            // therefore expressible in a DP that memoises per candidate;
+                            // the host refuses anything in between.
+                            if (maxSlack == 0 && c.s[j] != c.s[i] + 1) {
+                                continue;
+                            }
+                            int two = h1 + c.h[j];
+                            int three = h1 + c.best2[j];
+                            int four = h1 + c.best3[j];
+                            if (two > h2) h2 = two;
+                            if (three > h3) h3 = three;
+                            if (four > h4) h4 = four;
+                        }
+                    }
+                }
+                c.best2[i] = (unsigned char) h2;
+                c.best3[i] = (unsigned char) h3;
+
+                if (c.y[i] < baseMinY || c.y[i] > baseMaxY || c.s[i] > maxBaseShift) {
                     continue;
                 }
-                // Everything in this bucket already has y == wantedY by construction,
-                // which a hash bucket would have had to re-check.
-                for (int j = c.groupStart[g]; j < c.groupEnd[g]; j++) {
-                    if (c.x[j] != c.x[i] || c.z[j] != c.z[i]) {
-                        continue;
-                    }
-                    // The shift index counts successful placements before an invocation,
-                    // and placements only accumulate -- so a continuation cannot read the
-                    // stream at the same offset as the column it sits on, and that column
-                    // is itself a placement. Without this the filter accepts chains that
-                    // would have to be built out of order, which is most of them.
-                    //
-                    // Only the i -> j step needs checking: best2[j] and best3[j] are
-                    // properties of j alone and already enforce it further up.
-                    if (c.s[j] <= c.s[i]) {
-                        continue;
-                    }
-                    // The slack budget: how many foreign placements may land between the
-                    // chain's own columns. Only 0 and unbounded are implementable here.
-                    // The DP memoises best2/best3 per candidate, which is sound when the
-                    // rule is local -- contiguity (s[j] == s[i] + 1) is, because best2[j]
-                    // already forces j's own continuation to be consecutive, so the whole
-                    // chain comes out contiguous. A budget shared along a path is not
-                    // local and would need a slack dimension on the table; the host
-                    // refuses those values rather than quietly disagreeing with the CPU.
-                    if (maxSlack == 0 && c.s[j] != c.s[i] + 1) {
-                        continue;
-                    }
-                    int two = h1 + c.h[j];
-                    int three = h1 + c.best2[j];
-                    int four = h1 + c.best3[j];
-                    if (two > h2) h2 = two;
-                    if (three > h3) h3 = three;
-                    if (four > h4) h4 = four;
+                if (h1 >= minHeight
+                        || (maxColumns >= 2 && h2 >= minHeight)
+                        || (maxColumns >= 3 && h3 >= minHeight)
+                        || (maxColumns >= 4 && h4 >= minHeight)) {
+                    return true;
                 }
             }
-        }
-        c.best2[i] = (unsigned char) h2;
-        c.best3[i] = (unsigned char) h3;
-
-        if (c.y[i] < baseMinY || c.y[i] > baseMaxY || c.s[i] > maxBaseShift) {
-            continue;
-        }
-        // Only as many columns as the height needs: a longer chain needs water at another
-        // junction and is measurably less likely to be real.
-        if (h1 >= minHeight
-                || (maxColumns >= 2 && h2 >= minHeight)
-                || (maxColumns >= 3 && h3 >= minHeight)
-                || (maxColumns >= 4 && h4 >= minHeight)) {
-            return true;
         }
     }
     return false;
 }
 
-/** Must match ReverseSearcher's sampling exactly, or a cache built on one device cannot
+/** Must match OrbitSampler.runStart exactly, or a cache built on one device cannot
  *  be extended on the other. */
-__device__ __forceinline__ unsigned long long spread(unsigned long long i) {
-    unsigned long long z = i * 0x9E3779B97F4A7C15ULL + 0x632BE59BD9B4E019ULL;
+__device__ __forceinline__ unsigned long long runStart(unsigned long long r) {
+    unsigned long long z = r * 0x9E3779B97F4A7C15ULL + 0x632BE59BD9B4E019ULL;
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
     z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
     return (z ^ (z >> 31)) & MASK48;
 }
 
+/**
+ * OrbitSampler.shift: the seed whose stream is this one's, one invocation in.
+ *
+ * <p>JUMP_A and JUMP_C are LCG^123 collapsed to one step. Held as literals rather than
+ * computed, because deriving them per thread would cost 123 iterations to reproduce a
+ * compile-time constant. OrbitSamplerTest pins the Java side against real streams and
+ * the byte-identical CPU/GPU set check pins this against that.
+ */
+__device__ __forceinline__ unsigned long long orbitShift(unsigned long long ds,
+                                                         int featureIndex) {
+    unsigned long long k = (unsigned long long) featureIndex + 10000ULL * 8ULL;
+    unsigned long long state = ((ds + k) ^ MULTIPLIER) & MASK48;
+    state = (JUMP_A * state + JUMP_C) & MASK48;
+    return ((state ^ MULTIPLIER) - k) & MASK48;
+}
+
+/** OrbitSampler.sampleAt: the seed at a global sample index. */
+__device__ __forceinline__ unsigned long long sampleAt(unsigned long long i,
+                                                       int featureIndex) {
+    unsigned long long ds = runStart(i / ORBIT_RUN);
+    for (unsigned long long j = i % ORBIT_RUN; j > 0; j--) {
+        ds = orbitShift(ds, featureIndex);
+    }
+    return ds;
+}
+
+/**
+ * One thread per run of {@link ORBIT_RUN} seeds.
+ *
+ * <p>The whole point of the run: consecutive seeds differ by one invocation, so the ring
+ * fills once at {@code count} invocations and every seed after costs one. A run of 64
+ * averages (10 + 63) / 64 = 1.14 invocations per seed against 10 unrolled.
+ *
+ * <p>Emission is a plain atomicAdd per accepted seed rather than the warp ballot this had
+ * when a thread could accept at most once. A thread now accepts a variable number of times,
+ * which the ballot cannot express, and at the acceptance rates a real build runs at -- q is
+ * around 1e-8 at height 12 -- the contention it was avoiding does not exist.
+ */
 __global__ void filterKernel(unsigned long long sampleFrom, long long total,
                              int minHeight, int count, int featureIndex,
                              int baseMinY, int baseMaxY, int maxBaseShift, int maxColumns,
@@ -283,31 +341,46 @@ __global__ void filterKernel(unsigned long long sampleFrom, long long total,
                              unsigned int outCapacity) {
     Chains c;
     long long stride = (long long) blockDim.x * gridDim.x;
-    for (long long idx = (long long) blockIdx.x * blockDim.x + threadIdx.x;
-            idx < total; idx += stride) {
-        unsigned long long ds = spread(sampleFrom + (unsigned long long) idx);
-        bool accept = accepts(c, ds, featureIndex, count, minHeight, baseMinY, baseMaxY,
-                              maxBaseShift, maxColumns, maxSlack);
+    long long runs = (total + ORBIT_RUN - 1) / ORBIT_RUN;
 
-        // One atomicAdd per warp rather than per accepting thread: the whole warp agrees
-        // a base with a ballot, then each accepting lane takes its rank within the mask.
-        unsigned int active = __activemask();
-        unsigned int mask = __ballot_sync(active, accept);
-        if (mask == 0u) {
-            continue;
+    for (long long r = (long long) blockIdx.x * blockDim.x + threadIdx.x;
+            r < runs; r += stride) {
+        unsigned long long firstIdx = sampleFrom + (unsigned long long) r * ORBIT_RUN;
+        unsigned long long ds = sampleAt(firstIdx, featureIndex);
+
+        unsigned long long k = (unsigned long long) featureIndex + 10000ULL * 8ULL;
+        unsigned long long rng = ((ds + k) ^ MULTIPLIER) & MASK48;
+        refillWindow(rng, c.window);
+        for (int L = 0; L < count; L++) {
+            deriveSlot(c, L, L);
+            if (L + 1 < count) {
+                advanceWindow(rng, c.window);
+            }
         }
-        int lane = (int) (threadIdx.x & 31);
-        unsigned int leader = (unsigned int) (__ffs((int) mask) - 1);
-        unsigned int base = 0;
-        if ((unsigned int) lane == leader) {
-            base = atomicAdd(outCount, __popc(mask));
+
+        int head = 0;
+        int absNext = count;
+        long long steps = total - (long long) (firstIdx - sampleFrom);
+        if (steps > ORBIT_RUN) {
+            steps = ORBIT_RUN;
         }
-        base = __shfl_sync(active, base, (int) leader);
-        if (accept) {
-            unsigned int prior = mask & (lane == 0 ? 0u : ((1u << lane) - 1u));
-            unsigned int slot = base + __popc(prior);
-            if (slot < outCapacity) {
-                out[slot] = ds;
+        for (long long step = 0; step < steps; step++) {
+            if (chainExists(c, head, count, minHeight, baseMinY, baseMaxY,
+                            maxBaseShift, maxColumns, maxSlack)) {
+                unsigned int slot = atomicAdd(outCount, 1u);
+                if (slot < outCapacity) {
+                    out[slot] = ds;
+                }
+            }
+            if (step + 1 < steps) {
+                // One new invocation replaces the oldest; the other count-1 stay put.
+                advanceWindow(rng, c.window);
+                deriveSlot(c, head, absNext++);
+                head++;
+                if (head >= count) {
+                    head = 0;
+                }
+                ds = orbitShift(ds, featureIndex);
             }
         }
     }
