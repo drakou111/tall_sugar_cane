@@ -292,28 +292,11 @@ final class SlotMachine extends JPanel {
         refill.setEnabled(credits <= 0 && !running);
     }
 
-    /** Steep, because the real rates are: 4 is free, 8 is rare, 12 is a story. */
+    /** A run pays what it grew: one credit per block. */
     private static int payout(int h) {
-        return switch (h) {
-            case 0, 1, 2, 3 -> 0;
-            case 4 -> 1;
-            case 5 -> 4;
-            case 6 -> 9;
-            case 7 -> 20;
-            case 8 -> 50;
-            case 9 -> 120;
-            case 10 -> 280;
-            case 11 -> 650;
-            case 12 -> 1500;
-            default -> h >= 20 ? 50000 : 1500 * (1 << Math.min(h - 12, 10));
-        };
+        return h;
     }
 
-    /**
-     * What a run of this height actually costs to find, from the table in FINDINGS 6ak.
-     * A real number is more interesting than a caption, and it makes the payout curve
-     * legible: each step up is roughly an order of magnitude more chunks.
-     */
     private static String flavour(int h) {
         return switch (h) {
             case 0, 1 -> "";
@@ -478,9 +461,8 @@ final class SlotMachine extends JPanel {
                 }
                 g2.drawString(mix + "  (" + columns
                         + (columns == 1 ? " column)" : " columns)"), tx, y0 + 44);
-                g2.drawString("worth " + payout(height), tx, y0 + 60);
                 g2.setColor(height >= 8 ? GOLD : MUTED);
-                g2.drawString(flavour(height), tx, y0 + 76);
+                g2.drawString(flavour(height), tx, y0 + 60);
             } else {
                 g2.drawString("no column yet", tx, y0 + 44);
             }
