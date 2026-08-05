@@ -27,6 +27,9 @@ class BundledKernelTest {
     private static final Path RESOURCE = Path.of("src", "main", "resources", "cuda",
             "find_targets.exe");
     private static final Path SOURCE = Path.of("cuda", "find_targets.cu");
+    private static final Path NOISE_RESOURCE = Path.of("src", "main", "resources", "cuda",
+            "noise_column.exe");
+    private static final Path NOISE_SOURCE = Path.of("cuda", "noise_column.cu");
 
     @Test
     void theKernelIsBundled() {
@@ -47,5 +50,25 @@ class BundledKernelTest {
                         + " (source " + cu + ", binary " + exe + "). Run cuda/build.bat: "
                         + "the jar would otherwise ship a kernel that does not match its "
                         + "source.");
+    }
+
+    @Test
+    void theNoiseKernelIsBundled() {
+        assertNotNull(getClass().getResourceAsStream("/cuda/noise_column.exe"),
+                "the jar must carry /cuda/noise_column.exe; a kernel that only exists on "
+                        + "the machine that built it is a kernel nobody else has");
+    }
+
+    @Test
+    void theBundledNoiseKernelIsNotOlderThanItsSource() throws IOException {
+        if (!Files.isRegularFile(NOISE_SOURCE) || !Files.isRegularFile(NOISE_RESOURCE)) {
+            return;
+        }
+        FileTime source = Files.getLastModifiedTime(NOISE_SOURCE);
+        FileTime built = Files.getLastModifiedTime(NOISE_RESOURCE);
+        assertTrue(built.compareTo(source) >= 0,
+                "noise_column.cu is newer than the bundled noise_column.exe - rebuild with "
+                        + "cuda/build.bat. A stale kernel here is worse than a slow one: it "
+                        + "is silently different terrain.");
     }
 }
