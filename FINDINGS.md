@@ -2897,9 +2897,49 @@ shift 0 uses shifts {0,1,2}, {0,1,3} or {0,2,3}, none of which spends more than 
 Over random decoration seeds in the default band the same rules give 1.2x / 2.0x at
 height 7 and 1.0x / 1.6x at height 9.
 
-### Why it is not adopted
+### f, measured: contiguity keeps 87.9% of real finds
 
-Contiguity **rejects the confirmed 5-tall** on seed 1500050556. That chain runs shift
+`ProbabilityProbe` already replays the cane feature over synthetic decoration seeds on
+real ocean terrain and inspects the chain of every find, which is what 6ah's weights came
+from. It now also asks whether a contiguous window would have kept each find. That is f,
+and it is the only thing that decides this.
+
+Over 76 real finds on real terrain (height >= 5, `probe:12000`):
+
+```
+finds an ASCENDING window keeps (count 10): 66
+finds a CONTIGUOUS window would keep:   58 (87.9%)
+finds a slack<=1 window would keep:     65 (98.5%)
+```
+
+**First measurement of this was wrong and read 98.9%.** The probe's own filters are built
+at `COUNT_DESERT`, 60 invocations, because it is shared with biomes that have them. Ocean
+runs the feature 10 times, so a filter told to expect 60 reads 50 invocations of stream
+the chunk never ran, and those phantom candidates can supply a consecutive chain the real
+chunk did not have. That inflates f in exactly the direction that flatters contiguity.
+The slack filters are built at `COUNT_DEFAULT` for this reason, and f is taken against
+what an ascending filter at the same count keeps, not against all finds -- a find neither
+rule can see is not evidence about either.
+
+So contiguity is a **net 2.20x** at these chains: 2.50x fewer targets, 87.9% of finds kept.
+
+Every find in the sample is a 2-column chain, which has one gap for a foreign placement
+to land in. Reaching 12 takes three columns and therefore two gaps, so f there is about
+0.879^2 = 77%, and the net is about **1.9x**. Still clearly worth having.
+
+### The confirmed 5-tall is the minority case, not half the population
+
+Which is what made the earlier reading of this so misleading. Two confirmed finds split
+1-1 on contiguity, and taking that at face value put f at 50% -- close enough to the 40%
+break-even to look like a coin flip. It is not: the 5-tall is in the 12% whose chunk
+grew something else between the stack's columns, and one draw from a 12% class is
+unremarkable in a sample of two.
+
+### What adopting it costs
+
+
+
+It still **rejects the confirmed 5-tall** on seed 1500050556. That chain runs shift
 0 -> 2 because the chunk really did grow an unrelated column between the two that make
 the stack, and it is visible in game. The confirmed 8-tall runs 0 -> 1 and survives
 either way.
@@ -2914,18 +2954,14 @@ and q fell 3x at height 8 with no coverage lost at all. Contiguity removes chain
 are perfectly possible, and is the same kind of trade as narrowing the base band —
 judged on cost per find, not on coverage.
 
-At break-even it needs contiguous chains to hold 40% of real finds, since it keeps 40%
-of the set. The only direct evidence is the two confirmed finds, which split 1-1. That
-is 50% on a sample of two: nominally ahead, and nowhere near enough to act on.
+Break-even is f = 40%, since it keeps 40% of the set. Measured f is 87.9%, so it clears
+that by more than a factor of two and the decision is not close.
 
-### What would settle it
+Shipping it is still not free work. A set built under a slack budget is not
+interchangeable with one built without it, so it has to go in the `TargetCache` header,
+which means version 4 and every existing target file invalidated. `find_targets.cu` needs
+the same rule or a GPU-built set stops matching a CPU-built one, and that equality is the
+only check that the two paths have not drifted.
 
-The shift structure of a real find is recoverable from its decoration seed, so a box
-scan collecting every run of 6 or more and recording whether its chain was contiguous
-would measure the 40% directly. Sixes are common enough to gather a real sample in
-hours. Until then `maxSlack` stays unrestricted, and is a knob rather than a default.
-
-Note it is not wired to the CLI or the cache header on purpose: a set built under a
-slack budget is not interchangeable with one built without it, so exposing it means a
-`TargetCache` version bump, and that invalidates every target file anyone is holding.
-Worth doing once the measurement says it is worth doing.
+Both are worth doing, and the moment to do them is a rebuild that is happening anyway --
+see 6ap, where the live set turns out to be 10x smaller than it should be.

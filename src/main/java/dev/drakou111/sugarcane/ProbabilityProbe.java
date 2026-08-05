@@ -64,6 +64,14 @@ public final class ProbabilityProbe {
     /** Real finds the ranked filter would still keep. Measured jointly, because the two
      *  signals are correlated and multiplying 1.55 by 1.16 would be a guess. */
     private static final AtomicLong hitsRankedKept = new AtomicLong();
+    /**
+     * Real finds a contiguous-RNG-window filter would still keep: the fraction f in
+     * FINDINGS 6ao. Contiguity shrinks the target set 2.5x, so it is a net win only if
+     * f > 0.40. The two confirmed finds split 1-1 and that is far too small a sample,
+     * which is what this counts properly.
+     */
+    private static final AtomicLong hitsSlack0Kept = new AtomicLong();
+    private static final AtomicLong hitsSlack1Kept = new AtomicLong();
     private final ChainPrefilter rankedFilter =
             new ChainPrefilter(SugarCaneFeature.COUNT_DESERT, ChainPrefilter.DEFAULT_BASE_MIN_Y,
                     ChainPrefilter.DEFAULT_BASE_MAX_Y, 0, 2);
@@ -77,6 +85,23 @@ public final class ProbabilityProbe {
     }
 
     private final ChainPrefilter chainFilter = new ChainPrefilter(SugarCaneFeature.COUNT_DESERT);
+    /**
+     * Same filter, but the chain's columns must be consecutive placements.
+     *
+     * <p>Built at {@code COUNT_DEFAULT}, not {@code COUNT_DESERT} like the filters above.
+     * The probe runs on ocean, which invokes the feature 10 times, and a filter told to
+     * expect 60 reads 50 invocations of stream that the chunk never ran. Those phantom
+     * candidates can supply a consecutive chain the real chunk did not have, which would
+     * inflate f in exactly the direction that makes contiguity look good.
+     */
+    private final ChainPrefilter slack0Filter =
+            new ChainPrefilter(SugarCaneFeature.COUNT_DEFAULT).maxSlack(0);
+    private final ChainPrefilter slack1Filter =
+            new ChainPrefilter(SugarCaneFeature.COUNT_DEFAULT).maxSlack(1);
+    /** The same honest baseline to divide by: ascending, and only 10 invocations. */
+    private final ChainPrefilter ascFilter =
+            new ChainPrefilter(SugarCaneFeature.COUNT_DEFAULT);
+    private static final AtomicLong hitsAscKept = new AtomicLong();
     private final DirtBlobFilter dirtFilter = new DirtBlobFilter();
 
     public ProbabilityProbe() {
@@ -148,6 +173,20 @@ public final class ProbabilityProbe {
                 || rankedFilter.chainsOverflowed()) {
             hitsRankedKept.incrementAndGet();
         }
+        // Would a contiguous window still have this seed? This is f, and it is the only
+        // thing that decides whether contiguity is worth its 2.5x.
+        if (ascFilter.collectChains(ds, index, minHeight) > 0
+                || ascFilter.chainsOverflowed()) {
+            hitsAscKept.incrementAndGet();
+        }
+        if (slack0Filter.collectChains(ds, index, minHeight) > 0
+                || slack0Filter.chainsOverflowed()) {
+            hitsSlack0Kept.incrementAndGet();
+        }
+        if (slack1Filter.collectChains(ds, index, minHeight) > 0
+                || slack1Filter.chainsOverflowed()) {
+            hitsSlack1Kept.incrementAndGet();
+        }
         long best = cheapest(chains);
         hitBaseShift[ChainPrefilter.chainBaseShift(best)].incrementAndGet();
         hitColumns[Math.min(ChainPrefilter.chainColumns(best), hitColumns.length - 1)]
@@ -218,6 +257,18 @@ public final class ProbabilityProbe {
         System.out.printf("finds the RANKED filter would keep:     %d (%.1f%%)"
                         + "   <- shift 0 and minimum columns, jointly%n",
                 hitsRankedKept.get(), 100.0 * hitsRankedKept.get() / hits);
+        // f, against the 2.5x smaller set contiguity leaves. Net = 2.5 * f.
+        // f is contiguous-over-ascending at the SAME invocation count, not over all
+        // finds: a find neither rule can see is not evidence against either of them.
+        long asc = Math.max(1, hitsAscKept.get());
+        double f0 = hitsSlack0Kept.get() / (double) asc;
+        System.out.printf("finds an ASCENDING window keeps (count 10): %d%n", hitsAscKept.get());
+        System.out.printf("finds a CONTIGUOUS window would keep:   %d (%.1f%%)"
+                        + "   <- f; contiguity nets %.2fx against its 2.50x%n",
+                hitsSlack0Kept.get(), 100.0 * f0, 2.50 * f0);
+        System.out.printf("finds a slack<=1 window would keep:     %d (%.1f%%)"
+                        + "   <- free at height 12, so this should be ~100%%%n",
+                hitsSlack1Kept.get(), 100.0 * hitsSlack1Kept.get() / asc);
         report("earlier placements assumed", hitBaseShift, popBaseShift);
         report("columns in the chain", hitColumns, popColumns);
         reportBanded("base y", hitBaseY, popBaseY);
