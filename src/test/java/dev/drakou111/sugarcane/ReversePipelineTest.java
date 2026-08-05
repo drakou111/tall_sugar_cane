@@ -82,6 +82,34 @@ class ReversePipelineTest {
      * are y=21 and y=25 and both must come back carved.
      */
     /**
+     * Both confirmed finds need a placement interleaved between their own columns, which
+     * is the thing it is most tempting to forbid: chains that assume an unrelated success
+     * look like noise, and forbidding them is a 4.3x at height 8 and 22x at height 9.
+     *
+     * <p>It would also have thrown away every find this project has ever verified in game.
+     * The 8-tall's only chain is baseShift 0 / maxShift 1, the 5-tall's are baseShift 0 /
+     * maxShift 2. This test exists so that a future attempt at the same optimisation fails
+     * here rather than silently in a search that then finds nothing.
+     */
+    @Test
+    void theRankedFilterKeepsChainsWithInterleavedPlacements() {
+        assertTrue(rankedKeeps(72846194777308L, 8), "confirmed 8-tall");
+        assertTrue(rankedKeeps(112095894509740L, 5), "confirmed 5-tall");
+
+        ChainPrefilter gated = new ChainPrefilter(SugarCaneFeature.COUNT_DEFAULT,
+                11, 64, 3, 4, 0);
+        assertEquals(0, gated.collectChains(72846194777308L, OCEAN_INDEX, 8),
+                "if this ever passes, the 8-tall no longer needs an interleaved placement "
+                        + "and the maxAnyShift trade is worth measuring again");
+    }
+
+    private static boolean rankedKeeps(long decorationSeed, int height) {
+        ChainPrefilter ranked = ChainPrefilter.ranked(SugarCaneFeature.COUNT_DEFAULT, height);
+        return ranked.collectChains(decorationSeed, OCEAN_INDEX, height) > 0
+                || ranked.chainsOverflowed();
+    }
+
+    /**
      * The water half of the position test is the one filter here that can lose real
      * finds -- a spot on the sea floor gets its water from the noise fill, not a carver
      * -- so the two confirmed finds are the only guard against it silently discarding

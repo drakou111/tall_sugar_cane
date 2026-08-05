@@ -86,6 +86,7 @@ public final class ChainPrefilter {
      * against 77.7% of the set, and four-column chains produced none at all in 256.
      */
     private final int maxBaseShift;
+    private final int maxAnyShift;
     private final int maxColumns;
     private final int capacity;
     private final int[] draws;
@@ -141,8 +142,10 @@ public final class ChainPrefilter {
 
     /** The ranked filter: shift 0 only, and no more columns than the height needs. */
     public static ChainPrefilter ranked(int count, int minHeight) {
+        // maxAnyShift deliberately left unrestricted. See its javadoc: gating it at 0
+        // rejects both confirmed finds.
         return new ChainPrefilter(count, DEFAULT_BASE_MIN_Y, DEFAULT_BASE_MAX_Y, 0,
-                minimumColumns(minHeight));
+                minimumColumns(minHeight), SHIFTS.length - 1);
     }
 
     /** A column is at most 4 tall, so this is the fewest that can reach the height. */
@@ -161,6 +164,36 @@ public final class ChainPrefilter {
 
     public ChainPrefilter(int count, int baseMinY, int baseMaxY, int maxBaseShift,
             int maxColumns) {
+        this(count, baseMinY, baseMaxY, maxBaseShift, maxColumns, SHIFTS.length - 1);
+    }
+
+    /**
+     * @param maxAnyShift cap on the shift of <em>every</em> column, not just the first.
+     *                    {@code maxBaseShift} only ever gated the base, so a chain could
+     *                    assume no placement before it and still assume one interleaved
+     *                    between its own columns — which is the same implausible thing in
+     *                    a less visible place. A chain needing a success elsewhere in the
+     *                    chunk between two of its columns is as unlikely as one needing it
+     *                    beforehand: cane columns run about 1.1e-3 per chunk, and 6ah
+     *                    measured base shift 1 at 0.11x the population rate against shift
+     *                    0's 1.55x.
+     *
+     *                    <p><b>And that reasoning is wrong, which is why this defaults to
+     *                    unrestricted.</b> It looks like a free 4.3x at height 8 and 22x at
+     *                    height 9. It is not free: both confirmed finds need an interleaved
+     *                    placement. The 8-tall's only chain is baseShift 0, maxShift 1; the
+     *                    5-tall's two chains are baseShift 0, maxShift 2. Gating at 0
+     *                    rejects them both. So the population argument — an extra success
+     *                    is rare, therefore chains assuming one are worthless — is exactly
+     *                    inverted by the only evidence there is, and a filter built on it
+     *                    would have discarded every find this project has ever confirmed.
+     *
+     *                    <p>Kept as a parameter so the trade can be measured again if more
+     *                    real finds ever exist, not because it should be turned on.
+     */
+    public ChainPrefilter(int count, int baseMinY, int baseMaxY, int maxBaseShift,
+            int maxColumns, int maxAnyShift) {
+        this.maxAnyShift = maxAnyShift;
         this.count = count;
         this.baseMinY = baseMinY;
         this.baseMaxY = baseMaxY;
@@ -325,6 +358,9 @@ public final class ChainPrefilter {
                 if (cx[j] != cx[i] || cz[j] != cz[i]) {
                     continue;
                 }
+                if (cs[j] > maxAnyShift) {
+                    continue;   // an interleaved placement, same implausibility as a prior one
+                }
                 collect(j, depth + 1, newTotal);
                 if (chainOverflow) {
                     return;
@@ -425,6 +461,9 @@ public final class ChainPrefilter {
             for (int j = groupStart[g]; j < groupEnd[g]; j++) {
                 if (cx[j] != cx[i] || cz[j] != cz[i]) {
                     continue;
+                }
+                if (cs[j] > maxAnyShift) {
+                    continue;   // interleaved placement; see maxAnyShift
                 }
                 extra = Math.max(extra, chainFrom(j, depth + 1));
             }

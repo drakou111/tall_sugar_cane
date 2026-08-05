@@ -67,6 +67,17 @@ public final class SisterScan {
         AtomicInteger shown = new AtomicInteger();
         AtomicLong bestSeed = new AtomicLong();
         int[] histogram = new int[64];
+        // Sisters share their carver walks, so the carved pocket is the same in all of
+        // them and only the terrain the noise puts around it moves. Grouping the hits by
+        // what the blocks near the cane actually are says how many genuinely different
+        // situations these are -- which is the number that matters, because the game
+        // disagreeing with the simulator is a property of the local terrain, and identical
+        // terrain will disagree identically.
+        java.util.Map<Long, long[]> shapes = new java.util.HashMap<>();
+        // The terrain of the seed actually asked about, so its row can be called out: if
+        // that one has already been checked in game, its whole group is spent.
+        java.util.concurrent.atomic.AtomicLong querShape =
+                new java.util.concurrent.atomic.AtomicLong(0);
         Object lock = new Object();
         long start = System.currentTimeMillis();
 
@@ -110,6 +121,16 @@ public final class SisterScan {
                             }
                         }
                     }
+                    if (height >= minHeight) {
+                        long shape = localShape(world, tx, tz);
+                        if (full == seed) {
+                            querShape.set(shape);
+                        }
+                        synchronized (lock) {
+                            long[] row = shapes.computeIfAbsent(shape, k -> new long[]{0, full});
+                            row[0]++;
+                        }
+                    }
                     best.accumulateAndGet(height, Math::max);
                     if (best.get() == height) {
                         bestSeed.set(full);
@@ -133,6 +154,38 @@ public final class SisterScan {
             }
         }
         System.out.printf("tallest %d, on seed %d%n", best.get(), bestSeed.get());
+        if (!shapes.isEmpty()) {
+            System.out.printf("%n%d DISTINCT local terrains among the hits "
+                            + "(x+/-2, z+/-2, y 16..40). Sisters share their carvers, so "
+                            + "identical terrain will disagree with the game identically -- "
+                            + "check one seed per row, not one per hit:%n",
+                    shapes.size());
+            long qs = querShape.get();
+            shapes.entrySet().stream()
+                    .sorted((a, b) -> Long.compare(b.getValue()[0], a.getValue()[0]))
+                    .limit(24)
+                    .forEach(e -> System.out.printf("  %6d sisters share this terrain   "
+                                    + "representative seed %-22d%s%n",
+                            e.getValue()[0], e.getValue()[1],
+                            e.getKey() == qs && qs != 0
+                                    ? "  <== the terrain of the seed you asked about" : ""));
+        }
+    }
+
+    /** A hash of the blocks around the cane, so identical situations collapse together. */
+    private static long localShape(ArrayWorld world, int x, int z) {
+        long h = 1469598103934665603L;
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                for (int y = 16; y <= 40; y++) {
+                    byte b = world.getBlock(x + dx, y, z + dz);
+                    // Cane itself is the result, not the situation: two sisters that
+                    // differ only in what grew are the same terrain.
+                    h = (h ^ (b == Blocks.SUGAR_CANE ? Blocks.AIR : b)) * 1099511628211L;
+                }
+            }
+        }
+        return h;
     }
 
     /** The contiguous cane run through this column, wherever in it the cane sits. */
