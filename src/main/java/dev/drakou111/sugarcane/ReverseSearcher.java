@@ -286,6 +286,7 @@ public final class ReverseSearcher {
     private static final String MAX_SHIFT_FLAG = "--max-shift=";
     private static final String MAX_COLUMNS_FLAG = "--max-columns=";
     private static final String MAX_SLACK_FLAG = "--max-slack=";
+    private static final String SHIFT_LEVELS_FLAG = "--shift-levels=";
     private static boolean forceCpu = false;
     private static int reportHeight = 0;
     private static java.nio.file.Path cacheOverride = null;
@@ -302,6 +303,7 @@ public final class ReverseSearcher {
      * in the 12% it drops.
      */
     private static int maxSlack = 0;
+    private static int shiftLevelsOverride = -1;
 
     /**
      * Builds or extends a target set and stops, without searching anything.
@@ -343,6 +345,9 @@ public final class ReverseSearcher {
                 maxBaseShiftOverride = Integer.parseInt(arg.substring(MAX_SHIFT_FLAG.length()));
             } else if (arg.startsWith(MAX_COLUMNS_FLAG)) {
                 maxColumnsOverride = Integer.parseInt(arg.substring(MAX_COLUMNS_FLAG.length()));
+            } else if (arg.startsWith(SHIFT_LEVELS_FLAG)) {
+                shiftLevelsOverride =
+                        Integer.parseInt(arg.substring(SHIFT_LEVELS_FLAG.length()));
             } else if (arg.startsWith(MAX_SLACK_FLAG)) {
                 maxSlack = Integer.parseInt(arg.substring(MAX_SLACK_FLAG.length()));
                 if (maxSlack < 0) {
@@ -753,6 +758,13 @@ public final class ReverseSearcher {
         return maxBaseShiftOverride >= 0 ? maxBaseShiftOverride : MAX_BASE_SHIFT;
     }
 
+    /** Overridable so the five-level path can be exercised at a height that finds things.
+     *  Heights up to 16 need four and get four, which is why every existing set stays valid. */
+    private static int shiftLevels(int minHeight) {
+        return shiftLevelsOverride > 0 ? shiftLevelsOverride
+                : ChainPrefilter.shiftLevelsFor(minHeight);
+    }
+
     private static int maxColumns(int minHeight) {
         return maxColumnsOverride >= 0 ? maxColumnsOverride
                 : ChainPrefilter.minimumColumns(minHeight);
@@ -765,9 +777,10 @@ public final class ReverseSearcher {
     }
 
     private static ChainPrefilter rankedFilter(int minHeight) {
-        return ChainPrefilter.forHeight(OCEAN_COUNT, ChainPrefilter.DEFAULT_BASE_MIN_Y,
+        int levels = shiftLevels(minHeight);
+        return new ChainPrefilter(OCEAN_COUNT, ChainPrefilter.DEFAULT_BASE_MIN_Y,
                 ChainPrefilter.DEFAULT_BASE_MAX_Y, maxBaseShift(), maxColumns(minHeight),
-                minHeight)
+                levels - 1, levels)
                 .maxSlack(maxSlack);
     }
 
@@ -844,19 +857,7 @@ public final class ReverseSearcher {
         // the same as a device that works, and every way of not having one -- no CUDA, no
         // driver, wrong toolkit, missing file -- should fall back quietly rather than
         // fail the run.
-        // The kernel is built for four shift levels. A height needing five is not
-        // something it can express, and a set it built would be silently short of every
-        // five-column chain -- so refuse rather than produce one.
-        GpuChainFilter gpu = forceCpu || ChainPrefilter.shiftLevelsFor(minHeight)
-                > ChainPrefilter.DEFAULT_SHIFT_LEVELS ? null : GpuChainFilter.detect();
-        if (gpu == null && !forceCpu
-                && ChainPrefilter.shiftLevelsFor(minHeight)
-                        > ChainPrefilter.DEFAULT_SHIFT_LEVELS) {
-            System.out.printf("height %d needs %d shift levels and the kernel has %d, "
-                            + "so this build runs on the CPU%n",
-                    minHeight, ChainPrefilter.shiftLevelsFor(minHeight),
-                    ChainPrefilter.DEFAULT_SHIFT_LEVELS);
-        }
+        GpuChainFilter gpu = forceCpu ? null : GpuChainFilter.detect();
         if (forceCpu) {
             System.out.println("target set: --cpu given, using the CPU chain filter");
         } else if (gpu != null) {
@@ -936,6 +937,7 @@ public final class ReverseSearcher {
                 long[] chainPassed = gpu.run(minHeight, OCEAN_COUNT, OCEAN_INDEX,
                         ChainPrefilter.DEFAULT_BASE_MIN_Y, ChainPrefilter.DEFAULT_BASE_MAX_Y,
                         maxBaseShift(), maxColumns(minHeight), maxSlack,
+                        shiftLevels(minHeight),
                         epochFrom, EPOCH_SAMPLES, epochDone::set);
                 epochDone.set(EPOCH_SAMPLES);
                 phase.set("cpu soil filter");

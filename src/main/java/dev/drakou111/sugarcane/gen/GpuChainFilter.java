@@ -129,7 +129,7 @@ public final class GpuChainFilter {
                 // on the argument count instead of silently reading sampleFrom as slack.
                 long[] probe = candidate.run(2, SugarCaneFeature.COUNT_DEFAULT, 5,
                         ChainPrefilter.DEFAULT_BASE_MIN_Y, ChainPrefilter.DEFAULT_BASE_MAX_Y,
-                        3, 4, 4, 0L, 4096L);
+                        3, 4, 4, ChainPrefilter.DEFAULT_SHIFT_LEVELS, 0L, 4096L);
                 if (probe.length > 0) {
                     return candidate;
                 }
@@ -155,11 +155,11 @@ public final class GpuChainFilter {
      * samples)}. These still need the soil filter applied before they are targets.
      */
     public long[] run(int minHeight, int count, int featureIndex, int baseMinY,
-            int baseMaxY, int maxBaseShift, int maxColumns, int maxSlack,
+            int baseMaxY, int maxBaseShift, int maxColumns, int maxSlack, int shiftLevels,
             long sampleFrom, long samples)
             throws IOException, InterruptedException {
         return run(minHeight, count, featureIndex, baseMinY, baseMaxY, maxBaseShift,
-                maxColumns, maxSlack, sampleFrom, samples, null);
+                maxColumns, maxSlack, shiftLevels, sampleFrom, samples, null);
     }
 
     /**
@@ -167,7 +167,7 @@ public final class GpuChainFilter {
      *                   far) as the kernel reports them, so a long epoch is not silent
      */
     public long[] run(int minHeight, int count, int featureIndex, int baseMinY,
-            int baseMaxY, int maxBaseShift, int maxColumns, int maxSlack,
+            int baseMaxY, int maxBaseShift, int maxColumns, int maxSlack, int shiftLevels,
             long sampleFrom, long samples,
             java.util.function.LongConsumer onProgress) throws IOException,
             InterruptedException {
@@ -178,7 +178,7 @@ public final class GpuChainFilter {
                     Integer.toString(featureIndex), Integer.toString(baseMinY),
                     Integer.toString(baseMaxY), Integer.toString(maxBaseShift),
                     Integer.toString(maxColumns), Integer.toString(maxSlack),
-                    Long.toString(sampleFrom),
+                    Integer.toString(shiftLevels), Long.toString(sampleFrom),
                     Long.toString(samples), out.toString());
             pb.redirectErrorStream(false);
             pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);

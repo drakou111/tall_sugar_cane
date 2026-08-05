@@ -63,11 +63,14 @@
 #define DRAWS_PER_TRY 6
 #define DRAWS_PER_INVOCATION (3 + TRIES * DRAWS_PER_TRY)   /* 123 */
 #define MAX_COUNT 10
-#define SHIFT_COUNT 4
-#define MAX_SHIFT 6
-#define WINDOW_DRAWS (DRAWS_PER_INVOCATION + MAX_SHIFT + 2)  /* 131 */
-#define GROUPS (MAX_COUNT * SHIFT_COUNT)
-#define MAX_CANDIDATES (GROUPS * TRIES)
+/* The most levels any variant compiles. Which one RUNS is a template parameter, because
+ * the struct is sized off it and a five-level struct costs everyone occupancy: measured at
+ * 6.25e6 seeds/s against 14.2e6 for a height that only ever needs four. */
+#define MAX_SHIFT_COUNT 5
+#define MAX_SHIFT 8
+#define WINDOW_DRAWS (DRAWS_PER_INVOCATION + MAX_SHIFT + 2)  /* 133 */
+
+
 #define DOUBLED_HEIGHTMAP (63 * 2)
 #define Y_FLOOR 11
 #define Y_CEIL 64
@@ -78,9 +81,15 @@
 #define JUMP_A 0x6A8C38D11115ULL
 #define JUMP_C 0x5DB66A6C93D5ULL
 
-__constant__ int SHIFTS[SHIFT_COUNT] = {0, 2, 4, 6};
+__constant__ int SHIFTS[MAX_SHIFT_COUNT] = {0, 2, 4, 6, 8};
 
+template<int SC>
 struct Chains {
+    enum { GROUPS = MAX_COUNT * SC, MAX_CANDIDATES = GROUPS * TRIES,
+           /* best4 only exists where a fifth column can: four levels cap a chain at four
+            * columns, so carrying it there is 800 bytes per thread of local memory for a
+            * value nothing reads. That alone cost 6.67e6 seeds/s against 14.2e6. */
+           BEST4_N = (SC >= 5) ? MAX_CANDIDATES : 1 };
     unsigned int window[WINDOW_DRAWS];
     signed char x[MAX_CANDIDATES];
     signed char z[MAX_CANDIDATES];
@@ -90,9 +99,11 @@ struct Chains {
     /** Which SHIFTS index the candidate was read at: how many earlier placements it
      *  assumes. Only a chain's first column is capped on this. */
     unsigned char s[MAX_CANDIDATES];
-    /** Tallest run of at most two, and at most three, columns starting here. */
+    /** Tallest run of at most two, three, and four columns starting here. best4 exists
+     *  only so a fifth column can be reached: heights above 16 need five. */
     unsigned char best2[MAX_CANDIDATES];
     unsigned char best3[MAX_CANDIDATES];
+    unsigned char best4[BEST4_N];
     /** The group's y, so the y-buckets rebuild each step without re-reading candidates. */
     unsigned char groupY[GROUPS];
     short groupStart[GROUPS];
@@ -154,9 +165,10 @@ __device__ __forceinline__ void advanceWindow(unsigned long long &rng, unsigned 
  * only ever compares invocation numbers to each other, so absolute values order correctly
  * and -- unlike ring-relative ones -- do not all have to be rewritten on every slide.
  */
-__device__ void deriveSlot(Chains &c, int slot, int absN) {
-    for (int shiftIndex = 0; shiftIndex < SHIFT_COUNT; shiftIndex++) {
-        int group = slot * SHIFT_COUNT + shiftIndex;
+template<int SC>
+__device__ void deriveSlot(Chains<SC> &c, int slot, int absN) {
+    for (int shiftIndex = 0; shiftIndex < SC; shiftIndex++) {
+        int group = slot * SC + shiftIndex;
         int base = group * TRIES;
         int shift = SHIFTS[shiftIndex];
         c.groupN[group] = (unsigned char) absN;
@@ -198,7 +210,8 @@ __device__ void deriveSlot(Chains &c, int slot, int absN) {
  * per-seed scan had -- the DP needs a continuation's best2/best3 ready before its
  * predecessor, and a continuation always has the higher invocation number.
  */
-__device__ bool chainExists(Chains &c, int head, int count, int minHeight,
+template<int SC>
+__device__ bool chainExists(Chains<SC> &c, int head, int count, int minHeight,
                             int baseMinY, int baseMaxY, int maxBaseShift, int maxColumns,
                             int maxSlack) {
     for (int i = 0; i < Y_SLOTS; i++) {
@@ -209,8 +222,8 @@ __device__ bool chainExists(Chains &c, int head, int count, int minHeight,
         if (slot >= count) {
             slot -= count;
         }
-        for (int sh = 0; sh < SHIFT_COUNT; sh++) {
-            int g = slot * SHIFT_COUNT + sh;
+        for (int sh = 0; sh < SC; sh++) {
+            int g = slot * SC + sh;
             if (c.groupStart[g] == c.groupEnd[g]) {
                 continue;
             }
@@ -230,11 +243,11 @@ __device__ bool chainExists(Chains &c, int head, int count, int minHeight,
         if (slot >= count) {
             slot -= count;
         }
-        for (int sh = SHIFT_COUNT - 1; sh >= 0; sh--) {
-            int gi = slot * SHIFT_COUNT + sh;
+        for (int sh = SC - 1; sh >= 0; sh--) {
+            int gi = slot * SC + sh;
             for (int i = (int) c.groupEnd[gi] - 1; i >= (int) c.groupStart[gi]; i--) {
                 int h1 = c.h[i];
-                int h2 = h1, h3 = h1, h4 = h1;
+                int h2 = h1, h3 = h1, h4 = h1, h5 = h1;
                 int wantedY = (int) c.y[i] + h1;
 
                 if (wantedY >= Y_FLOOR && wantedY <= Y_CEIL) {
@@ -262,14 +275,19 @@ __device__ bool chainExists(Chains &c, int head, int count, int minHeight,
                             int two = h1 + c.h[j];
                             int three = h1 + c.best2[j];
                             int four = h1 + c.best3[j];
+                            int five = (SC >= 5) ? h1 + c.best4[j] : 0;
                             if (two > h2) h2 = two;
                             if (three > h3) h3 = three;
                             if (four > h4) h4 = four;
+                            if (five > h5) h5 = five;
                         }
                     }
                 }
                 c.best2[i] = (unsigned char) h2;
                 c.best3[i] = (unsigned char) h3;
+                if (SC >= 5) {
+                    c.best4[i] = (unsigned char) h4;
+                }
 
                 if (c.y[i] < baseMinY || c.y[i] > baseMaxY || c.s[i] > maxBaseShift) {
                     continue;
@@ -277,7 +295,8 @@ __device__ bool chainExists(Chains &c, int head, int count, int minHeight,
                 if (h1 >= minHeight
                         || (maxColumns >= 2 && h2 >= minHeight)
                         || (maxColumns >= 3 && h3 >= minHeight)
-                        || (maxColumns >= 4 && h4 >= minHeight)) {
+                        || (maxColumns >= 4 && h4 >= minHeight)
+                        || (SC >= 5 && maxColumns >= 5 && h5 >= minHeight)) {
                     return true;
                 }
             }
@@ -333,13 +352,14 @@ __device__ __forceinline__ unsigned long long sampleAt(unsigned long long i,
  * which the ballot cannot express, and at the acceptance rates a real build runs at -- q is
  * around 1e-8 at height 12 -- the contention it was avoiding does not exist.
  */
+template<int SC>
 __global__ void filterKernel(unsigned long long sampleFrom, long long total,
                              int minHeight, int count, int featureIndex,
                              int baseMinY, int baseMaxY, int maxBaseShift, int maxColumns,
                              int maxSlack,
                              unsigned long long *out, unsigned int *outCount,
                              unsigned int outCapacity) {
-    Chains c;
+    Chains<SC> c;
     long long stride = (long long) blockDim.x * gridDim.x;
     long long runs = (total + ORBIT_RUN - 1) / ORBIT_RUN;
 
@@ -387,7 +407,7 @@ __global__ void filterKernel(unsigned long long sampleFrom, long long total,
 }
 
 int main(int argc, char **argv) {
-    if (argc < 11) {
+    if (argc < 12) {
         fprintf(stderr,
                 "usage: %s <minHeight> <count> <featureIndex> <baseMinY> <baseMaxY> "
                 "<maxBaseShift> <maxColumns> <maxSlack> <sampleFrom> <samples> [outFile]\n"
@@ -409,9 +429,15 @@ int main(int argc, char **argv) {
                         "kernel does not have; rerun with --cpu\n", maxSlack);
         return 3;
     }
-    unsigned long long sampleFrom = strtoull(argv[9], NULL, 10);
-    long long samples = atoll(argv[10]);
-    const char *outFile = argc > 11 ? argv[11] : NULL;
+    int shiftLevels = atoi(argv[9]);
+    if (shiftLevels < 1 || shiftLevels > MAX_SHIFT_COUNT) {
+        fprintf(stderr, "find_targets: shiftLevels must be 1..%d, got %d\n",
+                MAX_SHIFT_COUNT, shiftLevels);
+        return 3;
+    }
+    unsigned long long sampleFrom = strtoull(argv[10], NULL, 10);
+    long long samples = atoll(argv[11]);
+    const char *outFile = argc > 12 ? argv[12] : NULL;
 
     if (count > MAX_COUNT) {
         fprintf(stderr, "count %d exceeds the compiled maximum %d\n", count, MAX_COUNT);
@@ -452,9 +478,21 @@ int main(int argc, char **argv) {
         long long thisBatch = samples - done < batch ? samples - done : batch;
         unsigned int zero = 0;
         cudaMemcpy(dCount, &zero, sizeof(unsigned int), cudaMemcpyHostToDevice);
-        filterKernel<<<blocks, threads>>>(sampleFrom + (unsigned long long) done,
-                thisBatch, minHeight, count, featureIndex, baseMinY, baseMaxY,
-                maxBaseShift, maxColumns, maxSlack, dOut, dCount, outCapacity);
+        // Four levels is its own instantiation, so the common case keeps the smaller
+        // struct. Sizing one struct for five cost 6.25e6 seeds/s against 14.2e6 at a
+        // height that only ever needs four -- the arrays are per thread and local memory
+        // traffic is what this kernel is bound by.
+        if (shiftLevels <= 4) {
+            filterKernel<4><<<blocks, threads>>>(sampleFrom + (unsigned long long) done,
+                    thisBatch, minHeight, count, featureIndex, baseMinY, baseMaxY,
+                    maxBaseShift, maxColumns, maxSlack, dOut, dCount,
+                    outCapacity);
+        } else {
+            filterKernel<5><<<blocks, threads>>>(sampleFrom + (unsigned long long) done,
+                    thisBatch, minHeight, count, featureIndex, baseMinY, baseMaxY,
+                    maxBaseShift, maxColumns, maxSlack, dOut, dCount,
+                    outCapacity);
+        }
         // The launch is checked separately from the synchronise, because a launch that never
         // happens leaves nothing to synchronise on: cudaDeviceSynchronize then returns
         // success and the run reports zero accepted seeds, exit code 0, as if the seeds had
