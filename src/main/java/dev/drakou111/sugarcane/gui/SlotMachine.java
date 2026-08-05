@@ -188,9 +188,14 @@ final class SlotMachine extends JPanel {
                 : "no textures bundled - drawn from a palette");
     }
 
+    /** Rebuilds every sprite from whatever {@link MinecraftTextures} currently answers. */
     private void reloadSprites() {
-        // Straight from the jar: no search, no wait, same art for everyone.
-        reloadSprites();
+        for (int i = 0; i < SYMBOLS.length; i++) {
+            sprites[i] = scaled(image(SYMBOLS[i]), CELL - 16);
+        }
+        caneRaw = raw(Symbol.SUGAR_CANE);
+        dirtRaw = raw(Symbol.DIRT);
+        waterRaw = raw(Symbol.WATER);
     }
 
     // ------------------------------------------------------------------ play
