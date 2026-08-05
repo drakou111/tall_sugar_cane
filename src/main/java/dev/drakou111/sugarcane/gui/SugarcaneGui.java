@@ -42,18 +42,56 @@ public final class SugarcaneGui {
     private final List<Supplier<List<String>>> argsPerTab = new ArrayList<>();
     private volatile Process running;
 
+    // A dark palette, applied through Nimbus. The system look and feel on Windows draws
+    // with native theming and ignores most colour keys, so asking it to go dark leaves
+    // white text on white panels; Nimbus honours them.
+    private static final Color BG = new Color(0x2B2D30);
+    private static final Color PANEL = new Color(0x33363B);
+    private static final Color FIELD = new Color(0x1E1F22);
+    private static final Color TEXT = new Color(0xD8D8D8);
+    private static final Color MUTED = new Color(0x9AA0A6);
+    private static final Color ACCENT = new Color(0x4A6E9C);
+
     public static void main(String[] args) {
-        try {
-            UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
-        } catch (Exception ignored) {
-            // The cross-platform look and feel is fine; this is cosmetic only.
-        }
+        dark();
         SwingUtilities.invokeLater(() -> new SugarcaneGui().show());
+    }
+
+    private static void dark() {
+        try {
+            for (UIManager.LookAndFeelInfo laf : UIManager.getInstalledLookAndFeels()) {
+                if ("Nimbus".equals(laf.getName())) {
+                    UIManager.setLookAndFeel(laf.getClassName());
+                    break;
+                }
+            }
+            UIManager.put("control", PANEL);
+            UIManager.put("info", PANEL);
+            UIManager.put("nimbusBase", new Color(0x23252A));
+            UIManager.put("nimbusBlueGrey", PANEL);
+            UIManager.put("nimbusLightBackground", FIELD);
+            UIManager.put("nimbusSelectionBackground", ACCENT);
+            UIManager.put("nimbusSelectedText", Color.WHITE);
+            UIManager.put("nimbusFocus", ACCENT);
+            UIManager.put("nimbusBorder", new Color(0x4A4D52));
+            UIManager.put("nimbusDisabledText", new Color(0x6B6F76));
+            UIManager.put("text", TEXT);
+            UIManager.put("menuText", TEXT);
+            UIManager.put("infoText", TEXT);
+            UIManager.put("controlText", TEXT);
+            UIManager.put("Panel.background", PANEL);
+            UIManager.put("TextArea.background", FIELD);
+            UIManager.put("TextArea.foreground", TEXT);
+            UIManager.put("ScrollPane.background", PANEL);
+        } catch (Exception ignored) {
+            // Cosmetic only: a look and feel that will not load is not worth failing over.
+        }
     }
 
     private void show() {
         JFrame frame = new JFrame("sugarcane");
         frame.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
+        frame.getContentPane().setBackground(BG);
 
         addTab("search", searchTab());
         addTab("reverse", reverseTab());
@@ -64,6 +102,12 @@ public final class SugarcaneGui {
         console.setEditable(false);
         console.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
         console.setLineWrap(false);
+        // Set explicitly rather than left to the theme: a console is the one component
+        // people stare at for hours, and Nimbus renders a read-only text area grey.
+        console.setBackground(FIELD);
+        console.setForeground(TEXT);
+        console.setCaretColor(TEXT);
+        console.setBorder(new EmptyBorder(6, 8, 6, 8));
 
         JPanel controls = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
         controls.add(run);
@@ -127,7 +171,7 @@ public final class SugarcaneGui {
         Form f = new Form("Scan every chunk in a box around each seed's origin. The right "
                 + "search up to height 6; from 7 up use reverse.");
         JTextField first = f.text("firstSeed", "1", "first world seed to try");
-        JTextField count = f.text("seedCount", "1000000", "how many seeds");
+        JTextField count = f.text("seedCount", "", "blank or 0 runs until you press Stop");
         JTextField radius = f.text("chunkRadius", "6", "how far from the centre a find may "
                 + "be, in chunks. Nearly free down to 6.");
         JTextField threads = f.text("threads", defaultThreads(), null);
@@ -139,7 +183,7 @@ public final class SugarcaneGui {
         JTextField update = f.text("--update (minutes)", "", null);
         return new Tab(f.panel, () -> {
             List<String> a = new ArrayList<>(List.of("search", req(first, "firstSeed"),
-                    req(count, "seedCount"), req(radius, "chunkRadius"),
+                    orZero(count), req(radius, "chunkRadius"),
                     req(threads, "threads"), req(height, "minHeight")));
             if (!probe.getText().isBlank()) {
                 a.add("probe:" + probe.getText().trim());
@@ -162,7 +206,7 @@ public final class SugarcaneGui {
         JTextField targets = f.text("targets", "20000", "size of the target set. A world "
                 + "seed reads only one bucket in 16, so 4000+ amortises setup properly.");
         JTextField first = f.text("firstSeed", "1", "counts LOW-48 seeds when sisters > 1");
-        JTextField count = f.text("seedCount", "1000000", null);
+        JTextField count = f.text("seedCount", "", "blank or 0 runs until you press Stop");
         JTextField file = f.text("--targets=<file>", "", "save and reload the target set; it "
                 + "does not depend on the world seed");
         JTextField reportH = f.text("--report=<h>", "", "report runs this tall even when the "
@@ -178,7 +222,7 @@ public final class SugarcaneGui {
         return new Tab(f.panel, () -> {
             List<String> a = new ArrayList<>(List.of("reverse", req(height, "minHeight"),
                     req(threads, "threads"), req(targets, "targets"),
-                    req(first, "firstSeed"), req(count, "seedCount")));
+                    req(first, "firstSeed"), orZero(count)));
             addIf(a, "--targets=", file);
             addIf(a, "--report=", reportH);
             addIf(a, "--sisters=", sisters);
@@ -389,6 +433,12 @@ public final class SugarcaneGui {
         return v;
     }
 
+    /** Positional, so an empty box still has to send something; 0 means no limit. */
+    private static String orZero(JTextField f) {
+        String v = f.getText().trim();
+        return v.isEmpty() ? "0" : v;
+    }
+
     private static void addIf(List<String> args, String flag, JTextField f) {
         if (!f.getText().isBlank()) {
             args.add(flag + f.getText().trim());
@@ -454,7 +504,7 @@ public final class SugarcaneGui {
 
         private static JLabel hint(String tip) {
             JLabel l = new JLabel("<html><body style='width:420px'>" + tip + "</body></html>");
-            l.setForeground(new Color(0x55, 0x55, 0x55));
+            l.setForeground(MUTED);
             return l;
         }
     }

@@ -404,7 +404,11 @@ public final class ReverseSearcher {
                 : Runtime.getRuntime().availableProcessors();
         targets = args.length > 2 ? Integer.parseInt(args[2]) : 20_000;
         long firstSeed = args.length > 3 ? Long.parseLong(args[3]) : 1L;
+        // 0 or negative means the same as leaving it off: keep going.
         long seedCount = args.length > 4 ? Long.parseLong(args[4]) : Long.MAX_VALUE;
+        if (seedCount <= 0) {
+            seedCount = Long.MAX_VALUE;
+        }
 
         if (minHeight < 5) {
             System.out.println("Note: below height 5 the chain filter accepts almost "

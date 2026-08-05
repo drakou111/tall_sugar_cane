@@ -53,7 +53,8 @@ public final class Cli {
             new Command("search",
                     "<firstSeed> <seedCount> <chunkRadius> <threads> <minHeight> "
                             + "[diag|probe:N|spots] [--spawn] [--update=<minutes>]",
-                    "Scan every chunk in a box around each seed's origin. The plain search, "
+                    "Scan every chunk in a box around each seed's origin. seedCount 0, "
+                            + "or leaving it off, runs until you stop it. The plain search, "
                             + "and the right one up to height 6; from 7 up use `reverse`, which "
                             + "is ~2,500x faster at height 8. chunkRadius bounds how far from "
                             + "the centre a find may be and is nearly free (6 runs as fast as "
@@ -71,7 +72,8 @@ public final class Cli {
                             + "[--targets=<file>] [--cpu] [--report=<h>] "
                             + "[--update=<minutes>] [--max-shift=<n>] [--max-columns=<n>] "
                             + "[--sisters=<n>]",
-                    "Pick the cane RNG first, then solve for a chunk that has it. Collects "
+                    "Pick the cane RNG first, then solve for a chunk that has it. seedCount "
+                            + "0, or leaving it off, runs until you stop it. Collects "
                             + "decoration seeds whose draws could chain a tall enough column "
                             + "with no terrain involved, then inverts setDecorationSeed by "
                             + "lattice reduction to turn each one into real coordinates inside "

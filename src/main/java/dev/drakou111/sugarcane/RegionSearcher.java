@@ -157,7 +157,11 @@ public final class RegionSearcher {
 
     public static void main(String[] args) throws InterruptedException {
         long firstSeed = args.length > 0 ? Long.parseLong(args[0]) : 1L;
-        long seeds = args.length > 1 ? Long.parseLong(args[1]) : 100L;
+        // 0, negative, or absent all mean "keep going". firstSeed + 0 would otherwise
+        // stop before the first seed, which is never what anyone means by it, and a
+        // long search is the normal case rather than the exception.
+        long seeds = args.length > 1 ? Long.parseLong(args[1]) : 0L;
+        final boolean unbounded = seeds <= 0;
         int radius = args.length > 2 ? Integer.parseInt(args[2]) : 16;
         int threads = args.length > 3 ? Integer.parseInt(args[3])
                 : Runtime.getRuntime().availableProcessors();
@@ -183,15 +187,17 @@ public final class RegionSearcher {
         // geometry can be looked at in a real world.
         final boolean printSpots = args.length > 5 && args[5].equals("spots");
 
-        System.out.printf("seeds %d..%d, chunk radius %d, %d threads, reporting height >= %d%s%s%s%n",
-                firstSeed, firstSeed + seeds - 1, radius, threads, report,
+        System.out.printf("seeds %d..%s, chunk radius %d, %d threads, reporting height >= %d%s%s%s%n",
+                firstSeed, unbounded ? "no limit" : Long.toString(firstSeed + seeds - 1),
+                radius, threads, report,
                 diagnose ? ", counting geometry" : "",
                 centreOnSpawn ? ", centred on world spawn" : "",
                 updateMs != DEFAULT_UPDATE_MS
                         ? ", progress every " + updateMs / 60_000.0 + " min" : "");
 
         AtomicLong nextSeed = new AtomicLong(firstSeed);
-        long lastSeed = firstSeed + seeds;
+        long lastSeed = unbounded || firstSeed + seeds < firstSeed
+                ? Long.MAX_VALUE : firstSeed + seeds;
         Stats stats = new Stats();
         long start = System.currentTimeMillis();
 
@@ -423,9 +429,12 @@ public final class RegionSearcher {
                 }
                 long ms = System.currentTimeMillis() - start;
                 long seedsSearched = (nextSeed.get() - firstSeed);
-                long totalSeeds = (lastSeed - firstSeed - 1);
+                // Long.MAX_VALUE is the "keep going" bound; printing a total then would be
+                // a number nobody can read and a progress fraction that never moves.
+                String totalSeeds = lastSeed == Long.MAX_VALUE
+                        ? "no limit" : Long.toString(lastSeed - firstSeed - 1);
 
-                System.out.printf("[%4.1f min] seeds done ~%d/%d, searched %d chunks (%.0f/s), "
+                System.out.printf("[%4.1f min] seeds done ~%d/%s, searched %d chunks (%.0f/s), "
                                 + "cane %d, stacked %d, tallest %d, currentSeed %d\n",
                         ms / 60000.0,
                         seedsSearched,
