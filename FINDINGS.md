@@ -2965,3 +2965,68 @@ only check that the two paths have not drifted.
 
 Both are worth doing, and the moment to do them is a rebuild that is happening anyway --
 see 6ap, where the live set turns out to be 10x smaller than it should be.
+
+## 6ap. Adopting the contiguous window, and the set size that was hiding behind it
+
+6ao measured the trade and left it off. It is on now, by default, and the same rebuild
+fixes a second problem that turned out to be costing more than the filter was.
+
+### The filter
+
+`--max-slack=<n>`, default 0. Zero is the contiguous window: a chain's columns must be
+consecutive successful placements. `--max-slack=99` restores the ascending rule of 6an.
+Values between 0 and `maxColumns` are CPU-only — the GPU DP memoises `best2`/`best3` per
+candidate, which is sound only while the rule is local, and contiguity is (`s[j] ==
+s[i] + 1`) while a budget shared along a path is not. The kernel refuses those values
+rather than quietly disagreeing with the CPU.
+
+`TargetCache` goes to **version 4**: the budget changes what membership means, so a
+version 3 file is a different set and cannot be extended into this one.
+
+Verified the way this project verifies target-set changes — a GPU-built and a CPU-built
+set of the same 300 members at height 8, byte for byte:
+
+```
+gpu 7D96F281D2DBD39EA5BF7ED08CAD44B2CF9DF964CDCB5ABFE86565FBAF733117
+cpu 7D96F281D2DBD39EA5BF7ED08CAD44B2CF9DF964CDCB5ABFE86565FBAF733117
+```
+
+`ReversePipelineTest` now pins **both directions**: the 8-tall survives the default, and
+the 5-tall does not. Every other guard there asserts that a real find is kept; this is
+the first one that asserts a real find is dropped, which is the point — the cost stays
+visible instead of being rediscovered later from a search that quietly finds nothing.
+
+### The set was 10x too small, which cost more than the filter gained
+
+The live height-12 set had **100 targets**. The version-2 files it replaced had 1,000.
+Nothing was wrong with the rebuild except its size, and the size is not a detail:
+
+```
+per candidate: lattice 0 us, biome gate 3 us, air probe 3 us, chunk 19 us
+               -> 24 us accounted of 92 thread-us actual
+64 sisters per low-48 seed, per-sister setup total 4.5 s   (of 6.4 thread-s)
+```
+
+**70% of the CPU was building biome sources.** Each sister needs its own biome map no
+matter how many targets there are, so that cost is fixed per seed and the only thing that
+dilutes it is more targets per seed. At 8 per bucket it was being diluted by nothing.
+
+`--sisters=64` is not the culprit and was measured again to be sure: 21,262 candidates/s
+at 64, 12,133 at 8, 2,564 at 1. The sweep's saving on lattice and probe still beats the
+extra prepares. The set size is the lever.
+
+Growing to 1,000 recovers about **2.7x**; the ceiling with setup fully amortised is 3.4x,
+and past roughly 5,000 the curve is flat. The build runs at 1.9 targets/s on 24 threads,
+so 1,000 is about eight minutes — once, ever, for every seed anyone searches.
+
+### The two together
+
+About **5x** on the reverse search: ~2.7x from amortising the per-sister setup, ~1.9x from
+contiguity at the three-column chains a height-12 set uses. They want the same rebuild,
+which is why they landed together.
+
+The general lesson is the one from 6an's ending, pointed the other way. That section noted
+every audit had asked whether the filter rejected real things and none had asked whether
+it accepted impossible ones. This one is worse: nobody asked whether the set was the size
+it was supposed to be. A parameter that is merely too small produces a search that works
+perfectly and slowly, and nothing in the output says so.

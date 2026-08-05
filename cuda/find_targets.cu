@@ -141,7 +141,7 @@ __device__ __forceinline__ void advanceWindow(unsigned long long &rng, unsigned 
  */
 __device__ bool accepts(Chains &c, unsigned long long decorationSeed, int featureIndex,
                         int count, int minHeight, int baseMinY, int baseMaxY,
-                        int maxBaseShift, int maxColumns) {
+                        int maxBaseShift, int maxColumns, int maxSlack) {
     unsigned long long s = decorationSeed + (unsigned long long) featureIndex + 10000ULL * 8ULL;
     unsigned long long rng = (s ^ MULTIPLIER) & MASK48;
 
@@ -228,6 +228,17 @@ __device__ bool accepts(Chains &c, unsigned long long decorationSeed, int featur
                     if (c.s[j] <= c.s[i]) {
                         continue;
                     }
+                    // The slack budget: how many foreign placements may land between the
+                    // chain's own columns. Only 0 and unbounded are implementable here.
+                    // The DP memoises best2/best3 per candidate, which is sound when the
+                    // rule is local -- contiguity (s[j] == s[i] + 1) is, because best2[j]
+                    // already forces j's own continuation to be consecutive, so the whole
+                    // chain comes out contiguous. A budget shared along a path is not
+                    // local and would need a slack dimension on the table; the host
+                    // refuses those values rather than quietly disagreeing with the CPU.
+                    if (maxSlack == 0 && c.s[j] != c.s[i] + 1) {
+                        continue;
+                    }
                     int two = h1 + c.h[j];
                     int three = h1 + c.best2[j];
                     int four = h1 + c.best3[j];
@@ -267,6 +278,7 @@ __device__ __forceinline__ unsigned long long spread(unsigned long long i) {
 __global__ void filterKernel(unsigned long long sampleFrom, long long total,
                              int minHeight, int count, int featureIndex,
                              int baseMinY, int baseMaxY, int maxBaseShift, int maxColumns,
+                             int maxSlack,
                              unsigned long long *out, unsigned int *outCount,
                              unsigned int outCapacity) {
     Chains c;
@@ -275,7 +287,7 @@ __global__ void filterKernel(unsigned long long sampleFrom, long long total,
             idx < total; idx += stride) {
         unsigned long long ds = spread(sampleFrom + (unsigned long long) idx);
         bool accept = accepts(c, ds, featureIndex, count, minHeight, baseMinY, baseMaxY,
-                              maxBaseShift, maxColumns);
+                              maxBaseShift, maxColumns, maxSlack);
 
         // One atomicAdd per warp rather than per accepting thread: the whole warp agrees
         // a base with a ballot, then each accepting lane takes its rank within the mask.
@@ -302,10 +314,10 @@ __global__ void filterKernel(unsigned long long sampleFrom, long long total,
 }
 
 int main(int argc, char **argv) {
-    if (argc < 8) {
+    if (argc < 11) {
         fprintf(stderr,
                 "usage: %s <minHeight> <count> <featureIndex> <baseMinY> <baseMaxY> "
-                "<sampleFrom> <samples> [outFile]\n"
+                "<maxBaseShift> <maxColumns> <maxSlack> <sampleFrom> <samples> [outFile]\n"
                 "  writes accepted decoration seeds as little-endian uint64\n", argv[0]);
         return 2;
     }
@@ -316,9 +328,17 @@ int main(int argc, char **argv) {
     int baseMaxY = atoi(argv[5]);
     int maxBaseShift = atoi(argv[6]);
     int maxColumns = atoi(argv[7]);
-    unsigned long long sampleFrom = strtoull(argv[8], NULL, 10);
-    long long samples = atoll(argv[9]);
-    const char *outFile = argc > 10 ? argv[10] : NULL;
+    int maxSlack = atoi(argv[8]);
+    // 0 is contiguous, anything >= maxColumns cannot bind and is the ascending rule.
+    // Values in between are path-dependent and this DP cannot express them.
+    if (maxSlack != 0 && maxSlack < maxColumns) {
+        fprintf(stderr, "find_targets: --max-slack=%d needs a slack dimension this "
+                        "kernel does not have; rerun with --cpu\n", maxSlack);
+        return 3;
+    }
+    unsigned long long sampleFrom = strtoull(argv[9], NULL, 10);
+    long long samples = atoll(argv[10]);
+    const char *outFile = argc > 11 ? argv[11] : NULL;
 
     if (count > MAX_COUNT) {
         fprintf(stderr, "count %d exceeds the compiled maximum %d\n", count, MAX_COUNT);
@@ -361,7 +381,7 @@ int main(int argc, char **argv) {
         cudaMemcpy(dCount, &zero, sizeof(unsigned int), cudaMemcpyHostToDevice);
         filterKernel<<<blocks, threads>>>(sampleFrom + (unsigned long long) done,
                 thisBatch, minHeight, count, featureIndex, baseMinY, baseMaxY,
-                maxBaseShift, maxColumns, dOut, dCount, outCapacity);
+                maxBaseShift, maxColumns, maxSlack, dOut, dCount, outCapacity);
         // The launch is checked separately from the synchronise, because a launch that never
         // happens leaves nothing to synchronise on: cudaDeviceSynchronize then returns
         // success and the run reports zero accepted seeds, exit code 0, as if the seeds had

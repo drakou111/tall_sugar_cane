@@ -1,3 +1,53 @@
+# v2.2.0 — the contiguous window, and a target set that was 10x too small
+
+**Your target files stop loading.** `TargetCache` is version 4 and a version 3 file is a
+different set, not an outdated one. Rebuild rather than delete-and-shrug — see below,
+because the size you rebuild to matters more than you would think.
+
+## Chains must be consecutive placements
+
+A collaborator's point: ascending shifts still let a chain step *past* an unrelated
+placement — a 4, some other cane elsewhere in the chunk, then the second 4. `--max-slack`
+controls it and defaults to **0**, the contiguous window.
+
+Measured, rather than argued: it keeps **40% of the target set** and **87.9% of real
+finds** — 58 of 66 over 76 finds replayed on real terrain — for a net **2.2x**, rising to
+about 1.9x at the three-column chains a height-12 set uses.
+
+This is the first filter here that costs coverage. Everything else was a necessary
+condition; this one throws away chains that are perfectly possible, and the confirmed
+5-tall is in the 12% it drops. `--max-slack=99` restores the old behaviour. The test
+suite pins both directions so the cost cannot quietly change.
+
+GPU- and CPU-built sets are byte-identical under the new rule. Slack values between 0 and
+`maxColumns` are CPU-only; the kernel refuses them rather than disagreeing silently.
+
+## Build your set bigger than you think
+
+The live height-12 set had 100 targets. **70% of the search's CPU was building biome
+sources**, because a sister needs its own biome map regardless of how many targets there
+are, and 8 per bucket amortises that over nothing.
+
+```
+java -jar sugarcane.jar targets 12 1000 targets12.bin 24
+```
+
+About eight minutes on 24 threads, and worth **~2.7x**. The ceiling is 3.4x and the curve
+flattens past ~5,000. The set never depends on the world seed, so this is paid once and
+reused by everyone, forever.
+
+Together with the filter that is roughly **5x**.
+
+## Also
+
+- `sisters` no longer prints a seed when it found nothing. `tallest 0, on seed <n>` was
+  naming whichever thread finished last, because a sister that found no cane still passed
+  the "is this the new maximum" test while the maximum was 0. It also raced. It now says
+  *which* kind of nothing it found — no sister generated the chunk, or they generated and
+  the column was empty — and points at the usual cause, which is x or z being one block
+  off. y is searched; x and z are not.
+- The slots tab no longer crashes on open (2.1.3 shipped it recursing into itself).
+
 # v2.1.3 — a filter that was accepting the impossible, and a window to drive it from
 
 ## The reverse search got faster, for free

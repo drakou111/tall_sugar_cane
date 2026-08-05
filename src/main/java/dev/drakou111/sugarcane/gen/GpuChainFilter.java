@@ -123,9 +123,13 @@ public final class GpuChainFilter {
                 // A real batch, because a binary that exists is not the same as a device
                 // that works. Height 2 accepts nearly everything, so a plausible answer
                 // here means the whole path is alive.
+                // Slack 4 rather than 0: at height 2 a single column suffices, so the
+                // slack rule never fires either way, and an unbounded probe also proves
+                // the binary is new enough to take the argument at all. An old one stops
+                // on the argument count instead of silently reading sampleFrom as slack.
                 long[] probe = candidate.run(2, SugarCaneFeature.COUNT_DEFAULT, 5,
                         ChainPrefilter.DEFAULT_BASE_MIN_Y, ChainPrefilter.DEFAULT_BASE_MAX_Y,
-                        3, 4, 0L, 4096L);
+                        3, 4, 4, 0L, 4096L);
                 if (probe.length > 0) {
                     return candidate;
                 }
@@ -151,10 +155,11 @@ public final class GpuChainFilter {
      * samples)}. These still need the soil filter applied before they are targets.
      */
     public long[] run(int minHeight, int count, int featureIndex, int baseMinY,
-            int baseMaxY, int maxBaseShift, int maxColumns, long sampleFrom, long samples)
+            int baseMaxY, int maxBaseShift, int maxColumns, int maxSlack,
+            long sampleFrom, long samples)
             throws IOException, InterruptedException {
         return run(minHeight, count, featureIndex, baseMinY, baseMaxY, maxBaseShift,
-                maxColumns, sampleFrom, samples, null);
+                maxColumns, maxSlack, sampleFrom, samples, null);
     }
 
     /**
@@ -162,7 +167,8 @@ public final class GpuChainFilter {
      *                   far) as the kernel reports them, so a long epoch is not silent
      */
     public long[] run(int minHeight, int count, int featureIndex, int baseMinY,
-            int baseMaxY, int maxBaseShift, int maxColumns, long sampleFrom, long samples,
+            int baseMaxY, int maxBaseShift, int maxColumns, int maxSlack,
+            long sampleFrom, long samples,
             java.util.function.LongConsumer onProgress) throws IOException,
             InterruptedException {
         Path out = Files.createTempFile("targets-gpu-", ".bin");
@@ -171,7 +177,8 @@ public final class GpuChainFilter {
                     Integer.toString(minHeight), Integer.toString(count),
                     Integer.toString(featureIndex), Integer.toString(baseMinY),
                     Integer.toString(baseMaxY), Integer.toString(maxBaseShift),
-                    Integer.toString(maxColumns), Long.toString(sampleFrom),
+                    Integer.toString(maxColumns), Integer.toString(maxSlack),
+                    Long.toString(sampleFrom),
                     Long.toString(samples), out.toString());
             pb.redirectErrorStream(false);
             pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);

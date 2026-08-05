@@ -36,18 +36,23 @@ public final class TargetCache {
 
     private static final int MAGIC = 0x54475431;   // "TGT1"
     /**
-     * 3: chains must have strictly increasing shifts. A version 2 file was built when a
+     * 4: chains carry a slack budget -- how many foreign placements may land between
+     * their own columns. The default is 0, the contiguous window, which keeps 40% of the
+     * set for 87.9% of real finds (FINDINGS 6ao). A version 3 file was built with no
+     * budget at all, so it is a different set and cannot be extended into this one.
+     *
+     * <p>3: chains must have strictly increasing shifts. A version 2 file was built when a
      * continuation could read the stream at the same offset as the column under it, which
      * is physically impossible, so most of its members are chains that could never be
      * placed. They are not wrong to search, only wasted, and the file no longer means what
      * its header says — so it is rejected rather than silently reused.
      */
-    private static final int VERSION = 3;
+    private static final int VERSION = 4;
 
     /** Everything that changes what membership means. Loading checks all of it. */
     public record Header(int minHeight, int count, int featureIndex,
                          int baseMinY, int baseMaxY, boolean soilFilter,
-                         int maxBaseShift, int maxColumns,
+                         int maxBaseShift, int maxColumns, int maxSlack,
                          long tested, long sampledThrough) {
     }
 
@@ -74,6 +79,7 @@ public final class TargetCache {
             out.writeBoolean(header.soilFilter());
             out.writeInt(header.maxBaseShift());
             out.writeInt(header.maxColumns());
+            out.writeInt(header.maxSlack());
             out.writeLong(header.tested());
             out.writeLong(header.sampledThrough());
             out.writeInt(targets.length);
@@ -107,7 +113,8 @@ public final class TargetCache {
             }
             Header found = new Header(in.readInt(), in.readInt(), in.readInt(),
                     in.readInt(), in.readInt(), in.readBoolean(),
-                    in.readInt(), in.readInt(), in.readLong(), in.readLong());
+                    in.readInt(), in.readInt(), in.readInt(),
+                    in.readLong(), in.readLong());
             requireSame(path, "height", wanted.minHeight(), found.minHeight());
             requireSame(path, "invocation count", wanted.count(), found.count());
             requireSame(path, "feature index", wanted.featureIndex(), found.featureIndex());
@@ -115,6 +122,7 @@ public final class TargetCache {
             requireSame(path, "band maximum y", wanted.baseMaxY(), found.baseMaxY());
             requireSame(path, "maximum base shift", wanted.maxBaseShift(), found.maxBaseShift());
             requireSame(path, "maximum columns", wanted.maxColumns(), found.maxColumns());
+            requireSame(path, "slack budget", wanted.maxSlack(), found.maxSlack());
             if (wanted.soilFilter() != found.soilFilter()) {
                 throw new IOException(path + " was built with the soil filter "
                         + (found.soilFilter() ? "on" : "off") + ", this run wants it "

@@ -71,7 +71,7 @@ public final class Cli {
                     "<minHeight> [threads] [targets] [firstSeed] [seedCount] "
                             + "[--targets=<file>] [--cpu] [--report=<h>] "
                             + "[--update=<minutes>] [--max-shift=<n>] [--max-columns=<n>] "
-                            + "[--sisters=<n>]",
+                            + "[--max-slack=<n>] [--sisters=<n>]",
                     "Pick the cane RNG first, then solve for a chunk that has it. seedCount "
                             + "0, or leaving it off, runs until you stop it. Collects "
                             + "decoration seeds whose draws could chain a tall enough column "
@@ -90,6 +90,16 @@ public final class Cli {
                             + "finds no terrain still leaves a 7, and that is worth keeping. "
                             + "--max-shift and --max-columns override the target ranking, "
                             + "which is what makes an older set reproducible. "
+                            + "--max-slack=<n> is how many OTHER cane placements may land "
+                            + "between a chain's own columns. The default 0 is the "
+                            + "contiguous window: the stack's columns must be consecutive "
+                            + "successful placements. That keeps 40% of the target set and "
+                            + "87.9% of real finds, a net 2.2x, and it is the one filter "
+                            + "here that trades coverage rather than being free -- the "
+                            + "confirmed 5-tall is in the 12% it drops, because its chunk "
+                            + "grew an unrelated column mid-stack. --max-slack=99 restores "
+                            + "the old behaviour. Values between 0 and maxColumns are "
+                            + "CPU-only; the kernel cannot express them. "
                             + "--update=<minutes> sets the progress interval, default 1. "
                             + "--sisters=<n> sweeps n values of the seed's upper 16 bits "
                             + "per low-48 seed. Those bits change only the biome map: the "
@@ -104,7 +114,7 @@ public final class Cli {
                     ReverseSearcher::main),
             new Command("targets",
                     "<minHeight> <count> <file> [threads] [--cpu] [--update=<minutes>] "
-                            + "[--max-shift=<n>] [--max-columns=<n>]",
+                            + "[--max-shift=<n>] [--max-columns=<n>] [--max-slack=<n>]",
                     "Build or extend a reverse-search target set and stop, without "
                             + "searching. The set is the expensive half and the reusable "
                             + "one: it depends on the height, the depth band and the soil "

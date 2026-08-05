@@ -103,6 +103,34 @@ class ReversePipelineTest {
                         + "and the maxAnyShift trade is worth measuring again");
     }
 
+    /**
+     * The shipped default is a contiguous window, and it is a coverage trade rather than
+     * a free tightening: it keeps 87.9% of real finds against a 2.5x smaller target set
+     * (FINDINGS 6ao). The 5-tall is in the 12% it drops, because its chunk really did grow
+     * an unrelated column between the two that make the stack.
+     *
+     * <p>Asserted in both directions on purpose. Every other guard here says a real find
+     * survives; this one also pins the find that deliberately does not, so the cost stays
+     * visible and nobody has to rediscover it from a search that quietly stops finding
+     * things. If the 5-tall ever starts passing, the rule changed and the 2.5x with it.
+     */
+    @Test
+    void theContiguousDefaultKeepsTheEightTallAndDropsTheFiveTall() {
+        assertTrue(contiguousKeeps(72846194777308L, 8),
+                "confirmed 8-tall: shifts 0 -> 1 are consecutive, so it must survive");
+        assertEquals(false, contiguousKeeps(112095894509740L, 5),
+                "confirmed 5-tall: shifts 0 -> 2 with a foreign placement between, so the "
+                        + "contiguous default is expected to drop it -- if it now passes, "
+                        + "re-measure what contiguity actually costs");
+    }
+
+    private static boolean contiguousKeeps(long decorationSeed, int height) {
+        ChainPrefilter contiguous = new ChainPrefilter(SugarCaneFeature.COUNT_DEFAULT)
+                .maxSlack(0);
+        return contiguous.collectChains(decorationSeed, OCEAN_INDEX, height) > 0
+                || contiguous.chainsOverflowed();
+    }
+
     private static boolean rankedKeeps(long decorationSeed, int height) {
         ChainPrefilter ranked = ChainPrefilter.ranked(SugarCaneFeature.COUNT_DEFAULT, height);
         return ranked.collectChains(decorationSeed, OCEAN_INDEX, height) > 0

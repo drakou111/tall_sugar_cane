@@ -284,11 +284,23 @@ public final class ReverseSearcher {
      */
     private static final String MAX_SHIFT_FLAG = "--max-shift=";
     private static final String MAX_COLUMNS_FLAG = "--max-columns=";
+    private static final String MAX_SLACK_FLAG = "--max-slack=";
     private static boolean forceCpu = false;
     private static int reportHeight = 0;
     private static java.nio.file.Path cacheOverride = null;
     private static int maxBaseShiftOverride = -1;
     private static int maxColumnsOverride = -1;
+    /**
+     * Foreign placements allowed between a chain's own columns. 0 -- the default -- is
+     * the contiguous window: the chain's columns must be consecutive successful
+     * placements, with nothing else in the chunk landing between them.
+     *
+     * <p>Measured at a net 2.20x (FINDINGS 6ao): it keeps 40% of the target set and 87.9%
+     * of real finds. It is a coverage trade rather than a free one, so it is a flag --
+     * {@code --max-slack=99} restores the plain ascending rule. The confirmed 5-tall is
+     * in the 12% it drops.
+     */
+    private static int maxSlack = 0;
 
     /**
      * Builds or extends a target set and stops, without searching anything.
@@ -330,6 +342,12 @@ public final class ReverseSearcher {
                 maxBaseShiftOverride = Integer.parseInt(arg.substring(MAX_SHIFT_FLAG.length()));
             } else if (arg.startsWith(MAX_COLUMNS_FLAG)) {
                 maxColumnsOverride = Integer.parseInt(arg.substring(MAX_COLUMNS_FLAG.length()));
+            } else if (arg.startsWith(MAX_SLACK_FLAG)) {
+                maxSlack = Integer.parseInt(arg.substring(MAX_SLACK_FLAG.length()));
+                if (maxSlack < 0) {
+                    throw new IllegalArgumentException(
+                            "--max-slack must be >= 0, got " + maxSlack);
+                }
             } else if (arg.startsWith(UPDATE_FLAG)) {
                 try {
                     updateMs = updateMillis(arg.substring(UPDATE_FLAG.length()));
@@ -418,9 +436,11 @@ public final class ReverseSearcher {
         System.out.printf("reverse search: targets for height >= %d, reporting height >= %d, "
                         + "%d threads, target set %d, seeds from %d%n",
                 minHeight, reportHeight, threads, targets, firstSeed);
-        System.out.printf("  filter: base shift <= %d, columns <= %d, depth band y %d..%d%n",
+        System.out.printf("  filter: base shift <= %d, columns <= %d, depth band y %d..%d, "
+                        + "slack <= %d (%s)%n",
                 maxBaseShift(), maxColumns(minHeight),
-                ChainPrefilter.DEFAULT_BASE_MIN_Y, ChainPrefilter.DEFAULT_BASE_MAX_Y);
+                ChainPrefilter.DEFAULT_BASE_MIN_Y, ChainPrefilter.DEFAULT_BASE_MAX_Y,
+                maxSlack, maxSlack == 0 ? "contiguous placements" : "foreign placements allowed");
         if (reportHeight < minHeight) {
             System.out.printf("  a %d-chain whose last column finds no terrain still leaves "
                     + "a shorter run, and those now count%n", minHeight);
@@ -740,12 +760,13 @@ public final class ReverseSearcher {
     private static TargetCache.Header header(int minHeight, long tested, long sampledThrough) {
         return new TargetCache.Header(minHeight, OCEAN_COUNT, OCEAN_INDEX,
                 ChainPrefilter.DEFAULT_BASE_MIN_Y, ChainPrefilter.DEFAULT_BASE_MAX_Y, true,
-                maxBaseShift(), maxColumns(minHeight), tested, sampledThrough);
+                maxBaseShift(), maxColumns(minHeight), maxSlack, tested, sampledThrough);
     }
 
     private static ChainPrefilter rankedFilter(int minHeight) {
         return new ChainPrefilter(OCEAN_COUNT, ChainPrefilter.DEFAULT_BASE_MIN_Y,
-                ChainPrefilter.DEFAULT_BASE_MAX_Y, maxBaseShift(), maxColumns(minHeight));
+                ChainPrefilter.DEFAULT_BASE_MAX_Y, maxBaseShift(), maxColumns(minHeight))
+                .maxSlack(maxSlack);
     }
 
     /**
@@ -900,7 +921,7 @@ public final class ReverseSearcher {
                 epochDone.set(0);
                 long[] chainPassed = gpu.run(minHeight, OCEAN_COUNT, OCEAN_INDEX,
                         ChainPrefilter.DEFAULT_BASE_MIN_Y, ChainPrefilter.DEFAULT_BASE_MAX_Y,
-                        maxBaseShift(), maxColumns(minHeight),
+                        maxBaseShift(), maxColumns(minHeight), maxSlack,
                         epochFrom, EPOCH_SAMPLES, epochDone::set);
                 epochDone.set(EPOCH_SAMPLES);
                 phase.set("cpu soil filter");
