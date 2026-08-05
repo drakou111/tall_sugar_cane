@@ -137,9 +137,18 @@ public final class SisterScan {
                             row[0]++;
                         }
                     }
-                    best.accumulateAndGet(height, Math::max);
-                    if (best.get() == height) {
-                        bestSeed.set(full);
+                    // Under the lock, because raising the maximum and naming the seed that
+                    // set it have to happen together. Separately, a sister that found
+                    // nothing satisfied `best.get() == height` whenever best was still 0
+                    // and overwrote the seed, so a scan that found no cane at all still
+                    // printed a seed -- and two threads could interleave between the
+                    // accumulate and the read, letting a shorter run claim a taller one's
+                    // seed.
+                    synchronized (lock) {
+                        if (height > best.get()) {
+                            best.set(height);
+                            bestSeed.set(full);
+                        }
                     }
                 }
             }, "sister-" + t);
@@ -159,7 +168,22 @@ public final class SisterScan {
                 System.out.printf("  height %2d: %d%n", h, histogram[h]);
             }
         }
-        System.out.printf("tallest %d, on seed %d%n", best.get(), bestSeed.get());
+        if (best.get() > 0) {
+            System.out.printf("tallest %d, on seed %d%n", best.get(), bestSeed.get());
+        } else if (generated.get() == 0) {
+            // Every upper-16 value put land here, so searchRegion returned before
+            // generating anything. Saying "tallest 0" for that reads like a result.
+            System.out.printf("NO SISTER GENERATED THIS CHUNK. All %d upper-16 values put "
+                    + "something other than searchable ocean at %d,%d, so nothing was "
+                    + "simulated and this says nothing about the column. Check x and z "
+                    + "against the find, or raise count to sample more of the 65,536.%n",
+                    count, tx, tz);
+        } else {
+            System.out.printf("NO CANE AT %d,%d IN ANY OF THE %d SISTERS THAT GENERATED. "
+                    + "x and z have to be the exact column of the run -- y is searched, "
+                    + "x and z are not -- so one block off reads as nothing here.%n",
+                    tx, tz, generated.get());
+        }
         if (!shapes.isEmpty()) {
             System.out.printf("%n%d DISTINCT local terrains among the hits "
                             + "(x+/-2, z+/-2, y 16..40). Sisters share their carvers, so "
