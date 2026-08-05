@@ -76,6 +76,16 @@
 #define Y_CEIL 64
 #define Y_SLOTS (Y_CEIL - Y_FLOOR + 1)
 
+/** x and z both span -4..19, so the pair packs into 0..575. */
+__device__ __forceinline__ unsigned short packXZ(int x, int z) {
+    return (unsigned short) ((x + 4) + (z + 4) * 24);
+}
+
+/** One bit of 64 for a key, by multiplicative hash. */
+__device__ __forceinline__ unsigned long long xzBit(unsigned short key) {
+    return 1ULL << ((((unsigned int) key * 2654435761u) >> 26) & 63u);
+}
+
 /* Must match OrbitSampler.RUN and its LCG^123 jump constants. */
 #define ORBIT_RUN 64
 #define JUMP_A 0x6A8C38D11115ULL
@@ -91,8 +101,10 @@ struct Chains {
             * value nothing reads. That alone cost 6.67e6 seeds/s against 14.2e6. */
            BEST4_N = (SC >= 5) ? MAX_CANDIDATES : 1 };
     unsigned int window[WINDOW_DRAWS];
-    signed char x[MAX_CANDIDATES];
-    signed char z[MAX_CANDIDATES];
+    /** x and z packed into one key. They are only ever compared as a pair -- a chain's
+     *  next column must sit at exactly the same spot -- so one load and one compare does
+     *  the work of two, in the loop that runs most. */
+    unsigned short xz[MAX_CANDIDATES];
     unsigned char y[MAX_CANDIDATES];
     unsigned char h[MAX_CANDIDATES];
     unsigned char n[MAX_CANDIDATES];
@@ -106,6 +118,11 @@ struct Chains {
     unsigned char best4[BEST4_N];
     /** The group's y, so the y-buckets rebuild each step without re-reading candidates. */
     unsigned char groupY[GROUPS];
+    /** Which xz keys the group holds, as a 64-bit Bloom filter. The inner scan looks for
+     *  one key among twenty and almost never finds it, so testing one bit first skips the
+     *  scan outright most of the time. False positives cost a scan that would have
+     *  happened anyway; there are no false negatives, so the answer cannot change. */
+    unsigned long long groupMask[GROUPS];
     short groupStart[GROUPS];
     short groupEnd[GROUPS];
     unsigned char groupN[GROUPS];
@@ -184,20 +201,23 @@ __device__ void deriveSlot(Chains<SC> &c, int slot, int absN) {
 
         int originX = bounded(c.window[shift], 16);
         int originZ = bounded(c.window[shift + 1], 16);
+        unsigned long long mask = 0ULL;
         for (int t = 0; t < TRIES; t++) {
             int off = shift + 3 + t * DRAWS_PER_TRY;
             int after = off + DRAWS_PER_TRY;
             int k = base + t;
-            c.x[k] = (signed char) (originX + bounded(c.window[off], 5)
-                    - bounded(c.window[off + 1], 5));
-            c.z[k] = (signed char) (originZ + bounded(c.window[off + 4], 5)
-                    - bounded(c.window[off + 5], 5));
+            c.xz[k] = packXZ(originX + bounded(c.window[off], 5)
+                            - bounded(c.window[off + 1], 5),
+                    originZ + bounded(c.window[off + 4], 5)
+                            - bounded(c.window[off + 5], 5));
+            mask |= xzBit(c.xz[k]);
             c.y[k] = (unsigned char) y;
             c.h[k] = (unsigned char) (2 + bounded(c.window[after + 1],
                     bounded(c.window[after], 3) + 1));
             c.n[k] = (unsigned char) absN;
             c.s[k] = (unsigned char) shiftIndex;
         }
+        c.groupMask[group] = mask;
     }
 }
 
@@ -241,6 +261,51 @@ __device__ void rebuildYIndex(Chains<SC> &c, int head, int count) {
 }
 
 /**
+ * Take a slot's groups out of the y-index, and put a slot's groups in.
+ *
+ * <p>Two halves rather than one call, because the slot is reused: the outgoing invocation
+ * has to leave the index while its groups still describe it, and the incoming one can only
+ * join after {@code deriveSlot} has overwritten them. Doing both after the derive would
+ * remove entries using the new invocation's y values and quietly corrupt the lists.
+ *
+ * <p>Both are O(SC) against a rebuild's 54 slot clears and 40 relinks. The lists are in
+ * ascending invocation order, so the departing groups are at the head and the arriving
+ * ones belong at the tail. Departures go in shift order, the order they were appended, so
+ * each is at the head when its turn comes.
+ */
+template<int SC>
+__device__ void removeSlotFromIndex(Chains<SC> &c, int slot) {
+    for (int sh = 0; sh < SC; sh++) {
+        int g = slot * SC + sh;
+        if (c.groupStart[g] == c.groupEnd[g]) {
+            continue;
+        }
+        int ys = (int) c.groupY[g] - Y_FLOOR;
+        if (c.yHead[ys] == (short) g) {
+            c.yHead[ys] = c.groupNext[g];
+        }
+    }
+}
+
+template<int SC>
+__device__ void addSlotToIndex(Chains<SC> &c, int slot) {
+    for (int sh = 0; sh < SC; sh++) {
+        int g = slot * SC + sh;
+        if (c.groupStart[g] == c.groupEnd[g]) {
+            continue;
+        }
+        int ys = (int) c.groupY[g] - Y_FLOOR;
+        c.groupNext[g] = -1;
+        if (c.yHead[ys] == -1) {
+            c.yHead[ys] = (short) g;
+        } else {
+            c.groupNext[c.yTail[ys]] = (short) g;
+        }
+        c.yTail[ys] = (short) g;
+    }
+}
+
+/**
  * Whether the {@code count} invocations currently in the ring could chain a run of
  * {@code minHeight} starting inside the depth band.
  *
@@ -266,12 +331,17 @@ __device__ bool chainExists(Chains<SC> &c, int head, int count, int minHeight,
                 int wantedY = (int) c.y[i] + h1;
 
                 if (wantedY >= Y_FLOOR && wantedY <= Y_CEIL) {
+                    unsigned short key = c.xz[i];
+                    unsigned long long bit = xzBit(key);
                     for (int g = c.yHead[wantedY - Y_FLOOR]; g != -1; g = c.groupNext[g]) {
                         if (c.groupN[g] <= c.n[i]) {
                             continue;
                         }
+                        if ((c.groupMask[g] & bit) == 0ULL) {
+                            continue;   // nothing in this group can be at that spot
+                        }
                         for (int j = c.groupStart[g]; j < c.groupEnd[g]; j++) {
-                            if (c.x[j] != c.x[i] || c.z[j] != c.z[i]) {
+                            if (c.xz[j] != key) {
                                 continue;
                             }
                             // Placements only accumulate, so a continuation cannot read
@@ -435,15 +505,20 @@ __device__ bool chainEndingInNewest(Chains<SC> &c, int newestSlot, int minHeight
             if (py < Y_FLOOR || py > Y_CEIL) {
                 continue;
             }
+            unsigned short key = c.xz[cur];
+            unsigned long long bit = xzBit(key);
             for (int g = c.yHead[py - Y_FLOOR]; g != -1; g = c.groupNext[g]) {
                 if (c.groupN[g] >= c.n[cur]) {
                     continue;       // a predecessor is strictly earlier
+                }
+                if ((c.groupMask[g] & bit) == 0ULL) {
+                    continue;
                 }
                 for (int i = (int) c.groupStart[g]; i < (int) c.groupEnd[g]; i++) {
                     if (c.h[i] != dh) {
                         continue;   // its top has to land exactly on this column's base
                     }
-                    if (c.x[i] != c.x[cur] || c.z[i] != c.z[cur]) {
+                    if (c.xz[i] != key) {
                         continue;
                     }
                     if (c.s[i] >= c.s[cur]) {
@@ -506,8 +581,8 @@ __global__ void filterKernel(unsigned long long sampleFrom, long long total,
         // Absolute invocation number of the oldest invocation in the window.
         int windowStart = 0;
 
+        rebuildYIndex(c, head, count);
         for (long long step = 0; step < steps; step++) {
-            rebuildYIndex(c, head, count);
             bool accept;
             int baseN = -1;
             if (step == 0) {
@@ -549,7 +624,9 @@ __global__ void filterKernel(unsigned long long sampleFrom, long long total,
             if (step + 1 < steps) {
                 // One new invocation replaces the oldest; the other count-1 stay put.
                 advanceWindow(rng, c.window);
+                removeSlotFromIndex(c, head);
                 deriveSlot(c, head, absNext++);
+                addSlotToIndex(c, head);
                 head++;
                 if (head >= count) {
                     head = 0;
