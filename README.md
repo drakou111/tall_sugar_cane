@@ -33,6 +33,15 @@ mvn package
 java -jar target/sugarcane.jar
 ```
 
+There is a window too, with a tab per command and a shared console:
+
+```
+java -jar target/sugarcaneGUI.jar
+```
+
+It runs each command as a fresh process and echoes the command line it used, so
+anything you set up in the window can be pasted into a terminal.
+
 That prints the commands. The two worth knowing:
 
 ```
