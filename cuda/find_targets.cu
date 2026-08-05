@@ -217,6 +217,17 @@ __device__ bool accepts(Chains &c, unsigned long long decorationSeed, int featur
                     if (c.x[j] != c.x[i] || c.z[j] != c.z[i]) {
                         continue;
                     }
+                    // The shift index counts successful placements before an invocation,
+                    // and placements only accumulate -- so a continuation cannot read the
+                    // stream at the same offset as the column it sits on, and that column
+                    // is itself a placement. Without this the filter accepts chains that
+                    // would have to be built out of order, which is most of them.
+                    //
+                    // Only the i -> j step needs checking: best2[j] and best3[j] are
+                    // properties of j alone and already enforce it further up.
+                    if (c.s[j] <= c.s[i]) {
+                        continue;
+                    }
                     int two = h1 + c.h[j];
                     int three = h1 + c.best2[j];
                     int four = h1 + c.best3[j];

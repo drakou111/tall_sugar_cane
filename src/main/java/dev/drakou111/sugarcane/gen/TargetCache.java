@@ -35,7 +35,14 @@ import java.nio.file.Path;
 public final class TargetCache {
 
     private static final int MAGIC = 0x54475431;   // "TGT1"
-    private static final int VERSION = 2;
+    /**
+     * 3: chains must have strictly increasing shifts. A version 2 file was built when a
+     * continuation could read the stream at the same offset as the column under it, which
+     * is physically impossible, so most of its members are chains that could never be
+     * placed. They are not wrong to search, only wasted, and the file no longer means what
+     * its header says — so it is rejected rather than silently reused.
+     */
+    private static final int VERSION = 3;
 
     /** Everything that changes what membership means. Loading checks all of it. */
     public record Header(int minHeight, int count, int featureIndex,

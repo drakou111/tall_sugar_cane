@@ -178,18 +178,21 @@ public final class ChainPrefilter {
      *                    measured base shift 1 at 0.11x the population rate against shift
      *                    0's 1.55x.
      *
-     *                    <p><b>And that reasoning is wrong, which is why this defaults to
-     *                    unrestricted.</b> It looks like a free 4.3x at height 8 and 22x at
-     *                    height 9. It is not free: both confirmed finds need an interleaved
-     *                    placement. The 8-tall's only chain is baseShift 0, maxShift 1; the
-     *                    5-tall's two chains are baseShift 0, maxShift 2. Gating at 0
-     *                    rejects them both. So the population argument — an extra success
-     *                    is rare, therefore chains assuming one are worthless — is exactly
-     *                    inverted by the only evidence there is, and a filter built on it
-     *                    would have discarded every find this project has ever confirmed.
+     *                    <p><b>Read this with the monotonic-shift rule in mind.</b> A
+     *                    chain's own placements consume the shift levels: column two of
+     *                    any chain sits at shift >= 1 because column one placing is itself
+     *                    a placement. So a cap of 0 forbids stacking outright rather than
+     *                    forbidding interleaved foreign placements, which is why it
+     *                    rejects every real find. That is not evidence that foreign
+     *                    placements are needed.
      *
-     *                    <p>Kept as a parameter so the trade can be measured again if more
-     *                    real finds ever exist, not because it should be turned on.
+     *                    <p>Of the two confirmed finds, the 8-tall's shift 1 is entirely
+     *                    its own first column and assumes nothing foreign; only the
+     *                    5-tall's shift 2 implies one unrelated placement, which is the
+     *                    neighbouring column its chunk also grew. An earlier note here
+     *                    claimed both needed a foreign placement, and that was a misreading
+     *                    of what the shift counts.
+     *
      */
     public ChainPrefilter(int count, int baseMinY, int baseMaxY, int maxBaseShift,
             int maxColumns, int maxAnyShift) {
@@ -361,6 +364,9 @@ public final class ChainPrefilter {
                 if (cs[j] > maxAnyShift) {
                     continue;   // an interleaved placement, same implausibility as a prior one
                 }
+                if (cs[j] <= cs[i]) {
+                    continue;   // see chainFrom: shifts must strictly increase up a chain
+                }
                 collect(j, depth + 1, newTotal);
                 if (chainOverflow) {
                     return;
@@ -464,6 +470,14 @@ public final class ChainPrefilter {
                 }
                 if (cs[j] > maxAnyShift) {
                     continue;   // interleaved placement; see maxAnyShift
+                }
+                if (cs[j] <= cs[i]) {
+                    // The shift index counts successful placements before an invocation,
+                    // and placements only accumulate -- so a later column cannot read the
+                    // stream at the same offset as an earlier one, and the chain's own
+                    // previous column is itself a placement. Without this the filter
+                    // accepts chains that would have to be built out of order.
+                    continue;
                 }
                 extra = Math.max(extra, chainFrom(j, depth + 1));
             }

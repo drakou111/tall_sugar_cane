@@ -2795,3 +2795,76 @@ The same run also produced an apparent proof that FMA contraction changes the te
 bounds, and two separately linked binaries corrupting different stack bytes. With the bug
 fixed both builds agree exactly. Neither the FMA claim nor the "GPU is not faster" claim
 survived contact with a clean measurement.
+
+## 6an. Most of the target set was chains that could not be placed
+
+A collaborator asked whether `ChainPrefilter` ever checks that a continuation reads the
+RNG at a later shift than the column beneath it, and guessed that if it does not, most of
+the set is physically impossible. It does not, and it was.
+
+### The rule that was missing
+
+`cs[i]` is the shift index of a candidate: how many successful placements the chunk is
+assumed to have made *before* that invocation, at two draws each. Placements only ever
+accumulate, and a chain's own column is a placement. So for consecutive columns of a
+chain at invocations n1 < n2:
+
+```
+cs(column 2)  >=  cs(column 1) + 1
+```
+
+strictly greater, always, because column one placing is itself the thing that shifts the
+stream for everything after it.
+
+`collect` and `chainFrom` checked three things — later invocation, same (x, z), shift
+within the cap — and never that one. A chain could therefore be built where a later
+column read the stream at the *same or an earlier* offset than the column it stands on,
+which would require the chunk to have placed the cane out of order.
+
+The kernel had it too, in the same shape: `find_targets.cu` checked `groupN[g] <= n[i]`
+and the position, and nothing about `s`.
+
+### What it was worth
+
+Both are one line. Measured over 200,000 decoration seeds, band 11..64:
+
+| height | q before | q after | tighter |
+|---|---|---|---|
+| 7 | 1.571e-1 | 6.163e-2 | 2.5x |
+| 8 | 3.379e-2 | 1.109e-2 | 3.0x |
+| 9 | 2.210e-3 | 1.200e-4 | **18x** |
+| 10 | 7.433e-4 | 5.000e-5 | **15x** |
+| 11 | 1.500e-4 | 0 in 200,000 | — |
+
+The find rate goes as `rate_chunk / q`, so that is the speedup: **3x at height 8, ~18x at
+9 and 10**, and it costs nothing, because everything it removes is a chain no chunk could
+have produced. Both confirmed finds pass unchanged — their shifts already increase, 0 -> 1
+for the 8-tall and 0 -> 2 for the 5-tall.
+
+Target set build gets proportionally more expensive per member, since q is what it divides
+by. The set is seed-independent and cached, so that amortises; the search does not pay it.
+
+`TargetCache` goes to version 3. A version 2 file was built when the rule did not exist
+and is mostly impossible chains — harmless to search, but no longer what its header says.
+
+### It also corrects 6am's reading of maxAnyShift
+
+That section recorded both confirmed finds as *needing an interleaved foreign placement*,
+on the strength of the 8-tall having base shift 0 and max shift 1. That was a misreading:
+with the monotonic rule stated plainly, shift 1 on a two-column chain is **its own first
+column** and assumes nothing foreign at all. Only the 5-tall's shift 2 implies one
+unrelated placement, and that one is visible — its chunk grew a second column one block
+over, which is the other chain the filter reports at x=12.
+
+The conclusion there still holds, for a better reason. Capping the chain-wide shift at 0
+does not forbid foreign placements, it forbids *stacking*: column two of anything sits at
+shift >= 1 by construction. That is why it rejected 47 of 47 reported finds and both
+confirmed ones, and why 1.09% of three-column chains survived it rather than none — those
+are the ones whose base sits high enough that the cap is not binding.
+
+### Why this was worth a collaborator noticing
+
+The filter is meant to over-accept, and every previous audit of it asked whether it might
+be rejecting something real. Nobody asked the cheaper question: whether the things it
+accepts are possible. A soundness argument in one direction had been checked repeatedly;
+the arithmetic in the other direction had not been checked at all.
