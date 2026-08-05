@@ -2719,10 +2719,11 @@ Four low-48 seeds across eight threads leaves half the threads idle while the re
 And `LayerCaches.enlarge` costs 301 us against 38 us for the biome source it enlarges,
 which is worth knowing but was not the bottleneck it looked like.
 
-## 6am. A double-precision terrain kernel is not worth building, measured
+## 6am. A double-precision terrain kernel: measured twice, because the first time was wrong
 
 Terrain noise is the biggest single cost left, so it is the obvious thing to put on the
-GPU. It should not be, and the reason is specific to what kind of arithmetic it is.
+GPU. The first measurement said it was pointless. That measurement was taken on a card a
+Steam game and Wallpaper Engine were holding at 99% and 300 W, and it was wrong by 3.4x.
 
 ### Where the time is
 
@@ -2736,59 +2737,61 @@ world writes       109 us    2%
 decorate+feature    42 us    1%
 ```
 
-Chunk generation is 83% of the per-candidate cost, so noise alone is ~45% of the whole
-search. Amdahl therefore caps a perfect noise kernel at **1.8x**, and noise plus carvers
-at **3.1x**. Those are ceilings, not estimates.
+Chunk generation is 83% of the per-candidate cost, so noise alone is ~45% of the search.
 
-### Why the existing kernel is fast and this one would not be
+### Measured, on an idle card
 
-`find_targets.cu` reaches 8,047k seeds/s because it is integer LCG work — one `double` in
-the whole file — and integer throughput on a consumer card is full rate. Minecraft's noise
-is `double` throughout and bit-exactness leaves no choice, and **Ada consumer parts run
-FP64 at 1/64 of FP32**: an RTX 4080 is ~48.7 TFLOPS FP32 against ~0.76 TFLOPS FP64. That
-0.76 is about the same as this 24-thread CPU's FP64 peak, so there is no headroom to win.
-
-Measured with matching implementations of `PerlinNoiseSampler.sample`, 16 octaves:
+Matching implementations of `PerlinNoiseSampler.sample`, 16 octaves, `tools/perlin_bench`:
 
 ```
-GPU  RTX 4080, -fmad=false, best of 12 runs      750 M octave-evals/s
-CPU  24 threads                                  865 M octave-evals/s
+                                    contended        idle
+GPU  RTX 4080, -fmad=false          750 M/s      2553 M/s     (median of 8, 1.13x spread)
+CPU  24 threads                     865 M/s      1106 M/s     (3 runs within 0.6%)
+                                    0.87x          2.31x
 ```
 
-Both land at 7-9% of their respective FP64 peaks — the workload is gradient-lookup bound,
-not FLOP bound, on either device. **The GPU is not faster.** An opportunistic earlier
-reading of 932 M/s, taken when the card happened to be idle, is 1.03x; the honest summary
-is a tie either way.
+**The GPU is 2.3x the CPU**, not the tie first reported. Both figures moved: the card was
+being time-shared and power-limited, and the CPU baseline was also taken while a game ran.
 
-The measurement was taken on a busy machine — the GPU sat at 99% utilisation and 304 W
-from a game, Wallpaper Engine, Minecraft and browsers throughout, and three consecutive
-identical runs spanned 84 to 344 M octave-evals/s. Best-of-12 is therefore a lower bound
-on the uncontended rate. It does not change the conclusion: to be worth the second
-implementation the kernel would need ~2x, which is more than double the best figure ever
-observed and above what the FP64 rate allows.
+**And the port is bit-exact.** Identical bit patterns, `bfe03707aa000000`, from both
+devices — the 17th-digit disagreement in the printed decimals is C's `%.17g` against
+Java's, nothing more. Building with and without `-fmad=false` also gives identical bits
+here, so this kernel has no contraction the default build would change. That does not
+retire the hazard in general and `build.bat` should keep the flag, but it is not the
+obstacle it looked like.
 
-### What that leaves
+### What 2.3x is worth
 
-The only GPU route with real headroom is to stop trying to be exact. FP32 runs at 64x the
-FP64 rate, so a **permissive FP32 prefilter** — reject a candidate only when the single
-precision result plus its error bound says the base is unambiguously water, and hand
-survivors to the exact CPU path — sidesteps both the rate problem and the exactness
-problem at once. Same argument that lets `AirCarveProbe` run against a permissive stub: a
-filter needs soundness, not exactness.
+Amdahl, against the 45% share:
 
-### Two things this exercise got wrong first
+```
+noise offloaded at 2.3x         45% -> 19.6%     total 74.6%   ->  1.34x
+whole chunk build at 2.3x       83% -> 36.1%     total 53.1%   ->  1.88x
+```
 
-Worth recording because both produced confident wrong output.
+So a noise-only kernel is ~1.34x end to end, before any PCIe cost for moving terrain back
+— which is real, at ~590 KB per candidate. The number that justifies the work is the whole
+per-candidate pipeline on the device returning only hits, as `find_targets` already does
+for target building: no transfer, no Amdahl ceiling from the parts left behind, ~1.9x from
+the noise alone and more once the biome gate and the probes follow it over.
 
-**A claimed FMA demonstration that was not one.** Building the same kernel with and without
-`-fmad=false` appeared to give −2.0620 against −2.0464, which reads as a dramatic
-confirmation that nvcc's default contraction changes the terrain. It was not: the host-side
-permutation shuffle had `(int)` binding to the shift instead of the modulo, so a negative
-index wrote out of bounds, and two separately linked binaries corrupted different stack
-bytes. With the bug fixed both builds agree exactly. The FMA hazard is still real in
-principle and `build.bat` still carries the flag — but it has not been demonstrated here,
-and the earlier claim in this file's history should not be relied on.
+The cost is the one this project has already paid once: a second implementation of the
+validated generation core, which can drift from the first. `BundledKernelTest` exists
+because a stale exe once shipped. Anything built here needs the same guard, plus a
+chunk-for-chunk diff against the CPU path.
 
-**A GPU number taken on a contended card.** The first reading of 932 M/s was not
-reproducible and neither was anything else until the contention was noticed. A benchmark
-that swings 4x between identical runs is reporting the rest of the desktop, not the kernel.
+### The lesson, which is the reason this section exists twice
+
+A benchmark on a contended machine does not return a noisy version of the right answer, it
+returns a confident wrong one. Three consecutive identical runs spanned 84 to 344 M
+octave-evals/s — a 4x spread that best-of-N could not correct, because contention is a
+systematic steal and not noise. The tell was there and I did not act on it: the first
+reading was 932 M/s and the second 157 M/s from a *host-side* change that could not
+possibly have mattered. When a number moves for a reason that cannot explain it, stop and
+check the environment before drawing anything from it.
+
+The same run also produced an apparent proof that FMA contraction changes the terrain,
+-2.0620 against -2.0464. That was a negative array index in the host shuffle writing out of
+bounds, and two separately linked binaries corrupting different stack bytes. With the bug
+fixed both builds agree exactly. Neither the FMA claim nor the "GPU is not faster" claim
+survived contact with a clean measurement.

@@ -1,4 +1,4 @@
-// Is a double-precision Perlin kernel actually faster than the CPU on a consumer card?
+﻿// Is a double-precision Perlin kernel actually faster than the CPU on a consumer card?
 //
 // The existing find_targets kernel is integer LCG work, which runs at full rate. Minecraft's
 // terrain noise is double throughout and bit-exactness leaves no choice, and an Ada consumer
@@ -123,7 +123,7 @@ int main(int argc, char** argv) {
     // One value, printed exactly, so the Java side can be diffed against it bit for bit.
     double first;
     cudaMemcpy(&first, dout, sizeof(double), cudaMemcpyDeviceToHost);
-    printf("GPU: out[0] = %.17g\n", first);
+    printf("GPU: out[0] = %.17g  bits=%016llx\n", first, *(unsigned long long*)&first);
     printf("GPU: perm[0..7] = %d %d %d %d %d %d %d %d\n",
            h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
     return 0;

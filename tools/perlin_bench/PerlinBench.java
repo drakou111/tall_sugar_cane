@@ -79,7 +79,7 @@ public final class PerlinBench {
         for (long s = 0; s < n; s += stride) {
             acc += octaves(s);
         }
-        System.out.printf("CPU: out[0] = %.17g%n", acc);
+        System.out.printf("CPU: out[0] = %.17g  bits=%016x%n", acc, Double.doubleToRawLongBits(acc));
         System.out.printf("CPU: perm[0..7] = %d %d %d %d %d %d %d %d%n",
                 P[0], P[1], P[2], P[3], P[4], P[5], P[6], P[7]);
 
