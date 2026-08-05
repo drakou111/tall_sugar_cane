@@ -423,6 +423,14 @@ public final class SugarcaneGui {
                 + "default 64, measured 4.2x. 1 restores the old loop.");
         JTextField maxShift = f.text("--max-shift=<n>", "", null);
         JTextField maxCols = f.text("--max-columns=<n>", "", null);
+        JTextField maxSlack = f.text("--max-slack=<n>", "", "other cane allowed between the "
+                + "stack's own columns. Default 0, the contiguous window: 2.2x, and it "
+                + "keeps 87.9% of real finds. 99 restores the old rule.");
+        JTextField levels = f.text("--shift-levels=<n>", "", "how many RNG shift levels, "
+                + "which is the most columns a chain can have. Derived from the height "
+                + "(4 up to height 16, 5 above); set it only to experiment.");
+        JTextField sampleFrom = f.text("--sample-from=<n>", "", "start decoration sampling "
+                + "at this index, so two machines cover different ground");
         JTextField update = f.text("--update (minutes)", "", null);
         JCheckBox cpu = f.check("--cpu", "force the CPU chain filter instead of CUDA");
         JCheckBox water = f.check("--water-probe", "require a chain's water to come from a "
@@ -436,6 +444,9 @@ public final class SugarcaneGui {
             addIf(a, "--sisters=", sisters);
             addIf(a, "--max-shift=", maxShift);
             addIf(a, "--max-columns=", maxCols);
+            addIf(a, "--max-slack=", maxSlack);
+            addIf(a, "--shift-levels=", levels);
+            addIf(a, "--sample-from=", sampleFrom);
             addIf(a, "--update=", update);
             if (cpu.isSelected()) {
                 a.add("--cpu");
@@ -454,11 +465,26 @@ public final class SugarcaneGui {
         JTextField count = f.text("count", "20000", null);
         JTextField file = f.text("file", "targets8.bin", "where to save it");
         JTextField threads = f.text("threads", defaultThreads(), null);
+        JTextField maxShift = f.text("--max-shift=<n>", "", null);
+        JTextField maxCols = f.text("--max-columns=<n>", "", null);
+        JTextField maxSlack = f.text("--max-slack=<n>", "", "default 0, the contiguous "
+                + "window. A set built under one budget is not interchangeable with a set "
+                + "built under another, so this is part of what the file records.");
+        JTextField levels = f.text("--shift-levels=<n>", "", "derived from the height; "
+                + "4 up to 16, 5 above. Set it only to experiment.");
+        JTextField sampleFrom = f.text("--sample-from=<n>", "", "start sampling at this "
+                + "index. Two machines with different values build disjoint halves of the "
+                + "same set, which is worth doing since the set is seed-independent.");
         JCheckBox cpu = f.check("--cpu", "force the CPU filter; the GPU one is ~4.7x");
         JTextField update = f.text("--update (minutes)", "", null);
         return new Tab(f.panel, () -> {
             List<String> a = new ArrayList<>(List.of("targets", req(height, "minHeight"),
                     req(count, "count"), req(file, "file"), req(threads, "threads")));
+            addIf(a, "--max-shift=", maxShift);
+            addIf(a, "--max-columns=", maxCols);
+            addIf(a, "--max-slack=", maxSlack);
+            addIf(a, "--shift-levels=", levels);
+            addIf(a, "--sample-from=", sampleFrom);
             if (cpu.isSelected()) {
                 a.add("--cpu");
             }
