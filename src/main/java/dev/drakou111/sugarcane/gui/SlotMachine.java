@@ -77,19 +77,23 @@ final class SlotMachine extends JPanel {
 
     private final Image[] sprites = new Image[SYMBOLS.length];
     private final BufferedImage caneRaw;
+    private final BufferedImage dirtRaw;
+    private final BufferedImage waterRaw;
     private final Symbol[] shown = {Symbol.DIRT, Symbol.SAND, Symbol.WATER};
     private final long[] stopAt = new long[3];
     private final Random random = new Random();
 
-    private final JLabel caption = new JLabel("spin to place the first column",
+    private final JLabel caption = new JLabel("spin to place a column",
             SwingConstants.CENTER);
     private final JLabel status = new JLabel("", SwingConstants.CENTER);
     private final JLabel origin = new JLabel("", SwingConstants.CENTER);
     private final JButton spin = new JButton("SPIN");
     private final JButton cash = new JButton("cash out");
+    private final JButton refill = new JButton("+25 credits");
     private final Board board = new Board();
     private final Timer timer;
 
+    private final java.util.List<Integer> columnHeights = new java.util.ArrayList<>();
     private int credits = 50;
     private int height;
     private int columns;
@@ -103,10 +107,11 @@ final class SlotMachine extends JPanel {
         for (int i = 0; i < SYMBOLS.length; i++) {
             sprites[i] = scaled(image(SYMBOLS[i]), CELL - 16);
         }
-        Image cane = image(Symbol.SUGAR_CANE);
-        caneRaw = cane instanceof BufferedImage b ? b : drawn(Symbol.SUGAR_CANE);
+        caneRaw = raw(Symbol.SUGAR_CANE);
+        dirtRaw = raw(Symbol.DIRT);
+        waterRaw = raw(Symbol.WATER);
 
-        JLabel title = new JLabel("SUGAR CANE — stack it", SwingConstants.CENTER);
+        JLabel title = new JLabel("stack a column", SwingConstants.CENTER);
         title.setFont(new Font(Font.MONOSPACED, Font.BOLD, 17));
         title.setForeground(TEXT);
 
@@ -121,7 +126,6 @@ final class SlotMachine extends JPanel {
         buttons.setOpaque(false);
         buttons.add(spin);
         buttons.add(cash);
-        JButton refill = new JButton("+25 credits");
         refill.addActionListener(e -> {
             credits += 25;
             status();
@@ -156,13 +160,12 @@ final class SlotMachine extends JPanel {
             return;
         }
         if (!running && credits <= 0) {
-            caption.setText("out of credits.");
+            caption.setText("out of credits");
             return;
         }
         if (!running) {
             credits--;
-            height = 0;
-            columns = 0;
+            reset();
         }
         spinning = true;
         spin.setEnabled(false);
@@ -193,37 +196,36 @@ final class SlotMachine extends JPanel {
         }
     }
 
-    /** A spin lands a column if any reel shows cane; otherwise the run is over. */
+    /** The number of canes is the column: 1 -> 2 tall, 2 -> 3, 3 -> 4. None ends the run. */
     private void resolve() {
-        boolean cane = false;
-        for (Symbol s : shown) {
-            if (s == Symbol.SUGAR_CANE) {
-                cane = true;
+        int canes = 0;
+        for (Symbol sym : shown) {
+            if (sym == Symbol.SUGAR_CANE) {
+                canes++;
             }
         }
-        if (cane) {
-            // ColumnPlacer.place: 2 + nextInt(nextInt(3) + 1). 2, 3, 4 at 11/18, 5/18, 2/18.
-            int drawn = 2 + random.nextInt(random.nextInt(3) + 1);
+        if (canes > 0) {
+            int drawn = canes + 1;      // 1 -> 2, 2 -> 3, 3 -> 4, the same range a column has
             height += drawn;
+            columnHeights.add(drawn);
             columns++;
             running = true;
             spin.setEnabled(true);
             cash.setEnabled(true);
-            caption.setText("column " + columns + " is " + drawn + " tall — "
-                    + height + " so far. press again, or cash out.");
+            caption.setText("column " + columns + ": " + drawn + " tall. "
+                    + height + " so far.");
         } else {
             int banked = height;
             running = false;
             spin.setEnabled(true);
             cash.setEnabled(false);
             if (banked == 0) {
-                caption.setText("no cane, no column. that is most chunks.");
+                caption.setText("No cane...");
             } else {
-                caption.setText("the terrain refused — " + banked + " tall, nothing paid. "
+                caption.setText("the terrain refused... " + banked + " tall, nothing paid. "
                         + "cash out next time.");
             }
-            height = 0;
-            columns = 0;
+            reset();
             board.repaint();
         }
         status();
@@ -237,13 +239,18 @@ final class SlotMachine extends JPanel {
         credits += payout;
         best = Math.max(best, height);
         caption.setText(height + " tall — " + flavour(height)
-                + (payout > 0 ? "   +" + payout : "   pays nothing"));
+                + "   +" + payout);
         running = false;
-        height = 0;
-        columns = 0;
+        reset();
         cash.setEnabled(false);
         board.repaint();
         status();
+    }
+
+    private void reset() {
+        height = 0;
+        columns = 0;
+        columnHeights.clear();
     }
 
     private Symbol roll() {
@@ -258,9 +265,10 @@ final class SlotMachine extends JPanel {
     }
 
     private void status() {
-        status.setText("credits " + credits + "    tallest banked "
-                + (best == 0 ? "-" : best + "")
-                + "    |    a spin costs 1, cash out to keep the height");
+        status.setText("credits " + credits + "    best " + (best == 0 ? "-" : best + "")
+                + "    spin costs 1");
+        // Only offered when actually stuck, so it is a way out rather than a shortcut.
+        refill.setEnabled(credits <= 0 && !running);
     }
 
     /** Steep, because the real rates are: 4 is free, 8 is rare, 12 is a story. */
@@ -280,26 +288,41 @@ final class SlotMachine extends JPanel {
         };
     }
 
+    /**
+     * What a run of this height actually costs to find, from the table in FINDINGS 6ak.
+     * A real number is more interesting than a caption, and it makes the payout curve
+     * legible: each step up is roughly an order of magnitude more chunks.
+     */
     private static String flavour(int h) {
-        if (h >= 20) {
-            return "TWENTY. nothing that tall is known to exist";
-        }
         return switch (h) {
-            case 2, 3 -> "growth stops here";
-            case 4 -> "the natural ceiling — worldgen does this every day";
-            case 5 -> "the one that was actually confirmed, at 91,16,65";
-            case 6 -> "past everything the game does on purpose";
-            case 7 -> "about 4 hours of reverse search";
-            case 8 -> "someone else found this one first";
-            case 9, 10 -> "days of searching";
-            case 11 -> "reported three times, never verified in game";
-            case 12 -> "the simulator says 12, the game said 8";
-            case 13, 14, 15 -> "beyond anything reported";
-            default -> "past the point the maths says should exist";
+            case 0, 1 -> "";
+            case 2, 3 -> "growth caps here";
+            case 4 -> "worldgen caps here";
+            case 5 -> "1 in 1.4e8 chunks";
+            case 6 -> "1 in 1e9 chunks";
+            case 7 -> "1 in 4.9e9 chunks";
+            case 8 -> "1 in 5.3e10 chunks";
+            case 9 -> "1 in 4.5e12 chunks";
+            case 10 -> "1 in 2.1e13 chunks";
+            case 11 -> "1 in 1.6e14 chunks";
+            case 12 -> "1 in 1.7e15 chunks";
+            case 13 -> "1 in 8.3e16 chunks";
+            case 14 -> "1 in 4.4e17 chunks";
+            case 15 -> "1 in 4.3e18 chunks";
+            case 16 -> "1 in 6.3e19 chunks";
+            case 17 -> "1 in 2.6e21 chunks";
+            case 18 -> "1 in 1.6e22 chunks";
+            case 19 -> "1 in 1.7e23 chunks";
+            default -> "1 in 3.7e24 chunks";
         };
     }
 
     // ------------------------------------------------------------------ art
+
+    private static BufferedImage raw(Symbol s) {
+        Image img = image(s);
+        return img instanceof BufferedImage b ? b : drawn(s);
+    }
 
     private static Image image(Symbol s) {
         BufferedImage real = MinecraftTextures.block(s.texture);
@@ -379,39 +402,67 @@ final class SlotMachine extends JPanel {
                 g2.drawImage(sprites[shown[i].ordinal()], x + 8, y0 + 8, null);
             }
 
-            // The stack, one cane block per unit of height, growing upward from the soil.
-            // The tile shrinks as the run gets tall so the whole thing always fits: the
-            // point of the panel is watching it grow, which a clipped stack does not show.
+            // The find as it would actually look: soil at the bottom, a water column
+            // beside it -- needWater is checked under every base -- and the cane above.
+            // Column boundaries are drawn, so a 9 reads as 4+3+2 rather than as nine
+            // identical blocks.
             int sx = x0 + reelsWidth + 34;
-            int floor = getHeight() - 18;
+            int floor = getHeight() - 16;
             int room = floor - y0 - 4;
-            // Shrink to fit whatever room the split pane leaves, down to 3px, then clamp
-            // the count as well: a 20-stack must never spill out of its box, and the
-            // divider is the user's to drag wherever they like.
-            int tile = height <= 0 ? 20 : Math.max(3, Math.min(20, room / height));
-            int boxW = 46;
+            int blocks = Math.max(1, height + 1);          // + the soil it stands on
+            int tile = Math.max(4, Math.min(22, room / blocks));
+            int fits = Math.min(height, Math.max(0, room / tile - 1));
+
+            int caneX = sx + tile;
+            int waterX = sx;
             g2.setColor(BG);
-            g2.fillRoundRect(sx - 8, y0, boxW, floor - y0, 8, 8);
+            g2.fillRoundRect(sx - 6, y0, tile * 2 + 12, floor - y0 + 6, 8, 8);
             g2.setColor(EDGE);
-            g2.drawRoundRect(sx - 8, y0, boxW, floor - y0, 8, 8);
-            Image scaledCane = scaled(caneRaw, tile);
-            int fits = Math.min(height, Math.max(1, room / tile));
+            g2.drawRoundRect(sx - 6, y0, tile * 2 + 12, floor - y0 + 6, 8, 8);
+
+            Image soil = scaled(dirtRaw, tile);
+            Image water = scaled(waterRaw, tile);
+            Image cane = scaled(caneRaw, tile);
+
+            g2.drawImage(soil, caneX, floor - tile, null);
+            // Water runs from the soil up past the top of the stack, which is what a
+            // chain needs at every junction.
+            for (int i = 0; i <= fits; i++) {
+                g2.drawImage(water, waterX, floor - (i + 1) * tile, null);
+            }
             for (int i = 0; i < fits; i++) {
-                g2.drawImage(scaledCane, sx - 8 + (boxW - tile) / 2, floor - (i + 1) * tile,
-                        null);
+                g2.drawImage(cane, caneX, floor - (i + 2) * tile, null);
             }
 
-            int tx = sx + boxW + 4;
+            // A rule between columns.
+            g2.setColor(GOLD);
+            int upto = 0;
+            for (int i = 0; i < columnHeights.size() - 1; i++) {
+                upto += columnHeights.get(i);
+                if (upto <= fits) {
+                    int y = floor - (upto + 1) * tile;
+                    g2.drawLine(caneX, y, caneX + tile, y);
+                }
+            }
+
+            int tx = sx + tile * 2 + 16;
             g2.setFont(new Font(Font.MONOSPACED, Font.BOLD, 22));
             g2.setColor(height >= 8 ? GOLD : TEXT);
-            g2.drawString(height + " tall", tx, y0 + 28);
+            g2.drawString(height + " tall", tx, y0 + 26);
             g2.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
             g2.setColor(MUTED);
-            g2.drawString(columns + (columns == 1 ? " column" : " columns"), tx, y0 + 48);
             if (height > 0) {
-                g2.drawString("cash out: " + payout(height), tx, y0 + 64);
+                StringBuilder mix = new StringBuilder();
+                for (int i = 0; i < columnHeights.size(); i++) {
+                    mix.append(i == 0 ? "" : "+").append(columnHeights.get(i));
+                }
+                g2.drawString(mix + "  (" + columns
+                        + (columns == 1 ? " column)" : " columns)"), tx, y0 + 44);
+                g2.drawString("worth " + payout(height), tx, y0 + 60);
                 g2.setColor(height >= 8 ? GOLD : MUTED);
-                g2.drawString(flavour(height), tx, y0 + 84);
+                g2.drawString(flavour(height), tx, y0 + 76);
+            } else {
+                g2.drawString("no column yet", tx, y0 + 44);
             }
             g2.dispose();
         }
