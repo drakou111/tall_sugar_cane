@@ -88,6 +88,21 @@ public final class ChainPrefilter {
     private final int maxBaseShift;
     private final int maxAnyShift;
     private final int maxColumns;
+    /**
+     * How many <em>foreign</em> placements the chain may assume between its own columns,
+     * summed over the chain. A step from shift {@code a} to shift {@code b} spends
+     * {@code b - a - 1} of the budget, since one of those levels is the chain's own
+     * column placing.
+     *
+     * <p>{@link Integer#MAX_VALUE} — the default — is the plain ascending rule. Zero is
+     * the contiguous-window rule: consecutive placements, nothing else interleaved.
+     *
+     * <p>Zero is <b>not sound</b>. The confirmed 5-tall on seed 1500050556 runs shift
+     * 0 -> 2, because its chunk grew an unrelated column between the two that make the
+     * stack, and a budget of zero throws it away. The confirmed 8-tall runs 0 -> 1 and
+     * survives either way. A budget of one keeps both. FINDINGS 6ao has what each buys.
+     */
+    private int maxSlack = Integer.MAX_VALUE;
     private final int capacity;
     private final int[] draws;
 
@@ -220,6 +235,17 @@ public final class ChainPrefilter {
         this.yTail = new int[Y_CEIL - Y_FLOOR + 1];
     }
 
+    /**
+     * Budget of foreign placements between the chain's own columns. Lossy below 1;
+     * see {@link #maxSlack}.
+     *
+     * @return this, so it can be set at the construction site
+     */
+    public ChainPrefilter maxSlack(int slack) {
+        this.maxSlack = slack;
+        return this;
+    }
+
     /** @return the tallest run this seed's draws could chain together, ignoring terrain */
     public int tallestPossible(long decorationSeed, int featureIndex) {
         buildCandidates(decorationSeed, featureIndex);
@@ -230,7 +256,7 @@ public final class ChainPrefilter {
             if (cy[i] < baseMinY || cy[i] > baseMaxY || cs[i] > maxBaseShift) {
                 continue;
             }
-            best = Math.max(best, chainFrom(i, 0));
+            best = Math.max(best, chainFrom(i, 0, maxSlack));
         }
         return best;
     }
@@ -322,7 +348,7 @@ public final class ChainPrefilter {
             if (cy[i] < baseMinY || cy[i] > baseMaxY || cs[i] > maxBaseShift) {
                 continue;
             }
-            collect(i, 0, 0);
+            collect(i, 0, 0, maxSlack);
         }
         return chainCount;
     }
@@ -336,7 +362,7 @@ public final class ChainPrefilter {
         return chains[index];
     }
 
-    private void collect(int i, int depth, int total) {
+    private void collect(int i, int depth, int total, int slackLeft) {
         path[depth] = i;
         int newTotal = total + ch[i];
         if (newTotal >= wantedHeight) {
@@ -367,7 +393,11 @@ public final class ChainPrefilter {
                 if (cs[j] <= cs[i]) {
                     continue;   // see chainFrom: shifts must strictly increase up a chain
                 }
-                collect(j, depth + 1, newTotal);
+                int spent = cs[j] - cs[i] - 1;
+                if (spent > slackLeft) {
+                    continue;   // more foreign placements than the budget allows
+                }
+                collect(j, depth + 1, newTotal, slackLeft - spent);
                 if (chainOverflow) {
                     return;
                 }
@@ -447,7 +477,7 @@ public final class ChainPrefilter {
      * Tallest run starting at candidate {@code i}. Depth-limited: four columns of
      * the minimum height 2 already reach 8, and nothing here needs more.
      */
-    private int chainFrom(int i, int depth) {
+    private int chainFrom(int i, int depth, int slackLeft) {
         int height = ch[i];
         if (depth + 1 >= maxColumns) {
             return height;
@@ -479,7 +509,11 @@ public final class ChainPrefilter {
                     // accepts chains that would have to be built out of order.
                     continue;
                 }
-                extra = Math.max(extra, chainFrom(j, depth + 1));
+                int spent = cs[j] - cs[i] - 1;
+                if (spent > slackLeft) {
+                    continue;   // more foreign placements than the budget allows
+                }
+                extra = Math.max(extra, chainFrom(j, depth + 1, slackLeft - spent));
             }
         }
         return height + extra;

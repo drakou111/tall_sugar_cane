@@ -2868,3 +2868,64 @@ The filter is meant to over-accept, and every previous audit of it asked whether
 be rejecting something real. Nobody asked the cheaper question: whether the things it
 accepts are possible. A soundness argument in one direction had been checked repeatedly;
 the arithmetic in the other direction had not been checked at all.
+
+## 6ao. The contiguous-window rule: 2.5x, and it costs a confirmed find
+
+A collaborator's follow-up to 6an: ascending shifts are not the whole rule, because a
+chain can still ascend *past* a foreign placement. Concretely, the filter accepts an
+8-tall built as 4, then some unrelated cane placed elsewhere in the chunk, then the
+second 4 — shifts 0 -> 2. Contiguity would forbid it: consecutive placements only.
+
+The observation is correct. `ChainPrefilter.maxSlack` now expresses the whole family —
+a budget of foreign placements between the chain's own columns, where a step from shift
+`a` to `b` spends `b - a - 1`. Unrestricted is the ascending rule of 6an, 0 is the
+contiguous rule.
+
+### What each costs and buys
+
+Measured on `target/targets12_3.bin`, the live set: height 12, `maxBaseShift` 0,
+`maxColumns` 3, q = 4.5e-8.
+
+| budget | targets surviving | search |
+|---|---|---|
+| unrestricted | 100 of 100 | 1.00x |
+| slack <= 1 | 100 of 100 | 1.00x |
+| slack = 0 | **40 of 100** | **2.50x** |
+
+Slack 1 is free here because it is already implied: reaching 12 in 3 columns from base
+shift 0 uses shifts {0,1,2}, {0,1,3} or {0,2,3}, none of which spends more than one.
+Over random decoration seeds in the default band the same rules give 1.2x / 2.0x at
+height 7 and 1.0x / 1.6x at height 9.
+
+### Why it is not adopted
+
+Contiguity **rejects the confirmed 5-tall** on seed 1500050556. That chain runs shift
+0 -> 2 because the chunk really did grow an unrelated column between the two that make
+the stack, and it is visible in game. The confirmed 8-tall runs 0 -> 1 and survives
+either way.
+
+```
+confirmed 8-tall  ascending ACCEPTED   slack<=1 ACCEPTED   slack=0 ACCEPTED
+confirmed 5-tall  ascending ACCEPTED   slack<=1 ACCEPTED   slack=0 REJECTED
+```
+
+So this is not 6an. That fix was free: everything it removed was physically impossible,
+and q fell 3x at height 8 with no coverage lost at all. Contiguity removes chains that
+are perfectly possible, and is the same kind of trade as narrowing the base band —
+judged on cost per find, not on coverage.
+
+At break-even it needs contiguous chains to hold 40% of real finds, since it keeps 40%
+of the set. The only direct evidence is the two confirmed finds, which split 1-1. That
+is 50% on a sample of two: nominally ahead, and nowhere near enough to act on.
+
+### What would settle it
+
+The shift structure of a real find is recoverable from its decoration seed, so a box
+scan collecting every run of 6 or more and recording whether its chain was contiguous
+would measure the 40% directly. Sixes are common enough to gather a real sample in
+hours. Until then `maxSlack` stays unrestricted, and is a knob rather than a default.
+
+Note it is not wired to the CLI or the cache header on purpose: a set built under a
+slack budget is not interchangeable with one built without it, so exposing it means a
+`TargetCache` version bump, and that invalidates every target file anyone is holding.
+Worth doing once the measurement says it is worth doing.
