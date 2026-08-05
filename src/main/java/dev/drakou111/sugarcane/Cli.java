@@ -109,6 +109,18 @@ public final class Cli {
                             + "it says why, because the fallback is 4.5x slower and used "
                             + "to be silent.",
                     ReverseSearcher::targetsMain),
+            new Command("sisters",
+                    "<seed> <x> <y> <z> [count] [threads] [minHeight]",
+                    "Re-roll the terrain under a known chain by sweeping the seed's upper "
+                            + "16 bits. Seeds sharing their low 48 bits have the same "
+                            + "decoration seed at the same chunk, the same lattice solution "
+                            + "and the same carver walks, so the chain sits at the same "
+                            + "block with the same column bases in all 65,536 of them - only "
+                            + "the biome map changes, and with it the sea floor. That is what "
+                            + "to run on a find the game truncates: a simulated 12 standing 8 "
+                            + "in game lost its upper columns to terrain, which is exactly "
+                            + "what a sister re-rolls while leaving the RNG alone.",
+                    SisterScan::main),
             new Command("inspect",
                     "<seed> <x> <y> <z> [searchRadius]",
                     "Regenerate the region around one position and dump what the simulator "

@@ -13,12 +13,22 @@ setlocal
 call "%ProgramFiles%\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
 if errorlevel 1 call "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
 
-nvcc -O3 -fmad=false -Wno-deprecated-gpu-targets ^
-  -gencode arch=compute_75,code=sm_75 ^
-  -gencode arch=compute_86,code=sm_86 ^
-  -gencode arch=compute_89,code=sm_89 ^
-  -gencode arch=compute_89,code=compute_89 ^
+set ARCHS=-gencode arch=compute_75,code=sm_75 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 -gencode arch=compute_89,code=compute_89
+
+nvcc -O3 -fmad=false -Wno-deprecated-gpu-targets %ARCHS% ^
   -o "%~dp0find_targets.exe" "%~dp0find_targets.cu"
+
+if errorlevel 1 (
+  echo build failed
+  exit /b 1
+)
+
+REM -fmad=false is not optional here. nvcc contracts a*b+c into an FMA by default, which is
+REM MORE accurate than Java's separate multiply and add and therefore a different double.
+REM The noise kernel is required to be bit-for-bit identical to ColumnPerlin, so a build
+REM without this flag is wrong even though it looks fine.
+nvcc -O3 -fmad=false -Wno-deprecated-gpu-targets %ARCHS% ^
+  -o "%~dp0noise_column.exe" "%~dp0noise_column.cu"
 
 if errorlevel 1 (
   echo build failed
