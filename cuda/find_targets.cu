@@ -202,18 +202,19 @@ __device__ void deriveSlot(Chains<SC> &c, int slot, int absN) {
 }
 
 /**
- * Whether the {@code count} invocations currently in the ring could chain a run of
- * {@code minHeight} starting inside the depth band.
+ * Rebuild the y-index over the invocations currently in the ring.
  *
- * <p>Logical invocation L lives in slot {@code (head + L) % count}. The y-buckets are
- * rebuilt ascending and the DP runs descending, which is the same relative order the flat
- * per-seed scan had -- the DP needs a continuation's best2/best3 ready before its
- * predecessor, and a continuation always has the higher invocation number.
+ * <p>Per window, not per run: which groups are in the window changes on every slide, and
+ * both searches walk this index. It used to live inside the DP, which was fine while the
+ * DP ran every window -- once one window could be answered without it, the index silently
+ * described an older window and the two paths stopped agreeing. The byte-identical set
+ * check caught that; nothing else would have.
+ *
+ * <p>Ascending order, because the DP wants a continuation's values ready before its
+ * predecessor's and the backward walk wants predecessors in invocation order.
  */
 template<int SC>
-__device__ bool chainExists(Chains<SC> &c, int head, int count, int minHeight,
-                            int baseMinY, int baseMaxY, int maxBaseShift, int maxColumns,
-                            int maxSlack) {
+__device__ void rebuildYIndex(Chains<SC> &c, int head, int count) {
     for (int i = 0; i < Y_SLOTS; i++) {
         c.yHead[i] = -1;
     }
@@ -237,7 +238,21 @@ __device__ bool chainExists(Chains<SC> &c, int head, int count, int minHeight,
             c.yTail[ys] = (short) g;
         }
     }
+}
 
+/**
+ * Whether the {@code count} invocations currently in the ring could chain a run of
+ * {@code minHeight} starting inside the depth band.
+ *
+ * <p>Logical invocation L lives in slot {@code (head + L) % count}. The y-buckets are
+ * rebuilt ascending and the DP runs descending, which is the same relative order the flat
+ * per-seed scan had -- the DP needs a continuation's best2/best3 ready before its
+ * predecessor, and a continuation always has the higher invocation number.
+ */
+template<int SC>
+__device__ bool chainExists(Chains<SC> &c, int head, int count, int minHeight,
+                            int baseMinY, int baseMaxY, int maxBaseShift, int maxColumns,
+                            int maxSlack, int *baseNOut) {
     for (int L = count - 1; L >= 0; L--) {
         int slot = head + L;
         if (slot >= count) {
@@ -297,6 +312,7 @@ __device__ bool chainExists(Chains<SC> &c, int head, int count, int minHeight,
                         || (maxColumns >= 3 && h3 >= minHeight)
                         || (maxColumns >= 4 && h4 >= minHeight)
                         || (SC >= 5 && maxColumns >= 5 && h5 >= minHeight)) {
+                    *baseNOut = (int) c.n[i];
                     return true;
                 }
             }
@@ -352,6 +368,102 @@ __device__ __forceinline__ unsigned long long sampleAt(unsigned long long i,
  * which the ballot cannot express, and at the acceptance rates a real build runs at -- q is
  * around 1e-8 at height 12 -- the contention it was avoiding does not exist.
  */
+/**
+ * Whether a chain ending in the newest invocation reaches the height.
+ *
+ * <p>Only sound to ask when the PREVIOUS window rejected, and that is the whole trick. A
+ * window covers invocations [k, k+9]; the next covers [k+1, k+10]. Any chain in the next
+ * one that does not use invocation k+10 lies inside [k+1, k+9], which is a subset of the
+ * previous window -- so the previous window would have found it. If it did not, the new
+ * invocation must be the chain's last column.
+ *
+ * <p>That turns a search over every candidate in the window into a backward walk from the
+ * eighty in one invocation, which matters because the DP is 92% of this kernel: derivation
+ * is 0.4s of 5.5s over 100M seeds, so the ring that made derivation cheap left almost all
+ * of the cost untouched.
+ *
+ * <p>Predecessors need no new index. A column sits on one whose top is at its base, and a
+ * column at y is 2, 3 or 4 tall, so the candidates that could carry a column at y are in
+ * the groups at y-2, y-3 and y-4 -- three lookups in the y-index that already exists.
+ *
+ * <p>An explicit stack rather than recursion: the struct is ~6.6 KB and an earlier version
+ * of this kernel overflowed the 1 KB thread stack by recursing with it in scope. On
+ * overflow this returns false and the caller falls back to the full DP, so the bound is a
+ * performance limit and never a correctness one.
+ */
+template<int SC>
+__device__ bool chainEndingInNewest(Chains<SC> &c, int newestSlot, int minHeight,
+                                    int baseMinY, int baseMaxY, int maxBaseShift,
+                                    int maxColumns, int maxSlack, int *baseNOut,
+                                    bool *overflowed) {
+    struct Step { short cand; unsigned char acc; unsigned char col; };
+    Step stack[64];
+    int top = 0;
+    *overflowed = false;
+
+    for (int sh = 0; sh < SC; sh++) {
+        int g = newestSlot * SC + sh;
+        for (int j = (int) c.groupStart[g]; j < (int) c.groupEnd[g]; j++) {
+            if (top == 64) { *overflowed = true; return false; }
+            stack[top].cand = (short) j;
+            stack[top].acc = c.h[j];
+            stack[top].col = 1;
+            top++;
+        }
+    }
+
+    while (top > 0) {
+        top--;
+        int cur = stack[top].cand;
+        int acc = stack[top].acc;
+        int col = stack[top].col;
+
+        // The chain's base is its earliest column, and the band and shift cap apply there.
+        if (acc >= minHeight
+                && c.y[cur] >= baseMinY && c.y[cur] <= baseMaxY
+                && c.s[cur] <= maxBaseShift) {
+            *baseNOut = (int) c.n[cur];
+            return true;
+        }
+        if (col >= maxColumns) {
+            continue;
+        }
+
+        int wantTop = (int) c.y[cur];
+        for (int dh = 2; dh <= 4; dh++) {
+            int py = wantTop - dh;
+            if (py < Y_FLOOR || py > Y_CEIL) {
+                continue;
+            }
+            for (int g = c.yHead[py - Y_FLOOR]; g != -1; g = c.groupNext[g]) {
+                if (c.groupN[g] >= c.n[cur]) {
+                    continue;       // a predecessor is strictly earlier
+                }
+                for (int i = (int) c.groupStart[g]; i < (int) c.groupEnd[g]; i++) {
+                    if (c.h[i] != dh) {
+                        continue;   // its top has to land exactly on this column's base
+                    }
+                    if (c.x[i] != c.x[cur] || c.z[i] != c.z[cur]) {
+                        continue;
+                    }
+                    if (c.s[i] >= c.s[cur]) {
+                        continue;   // shifts strictly increase up a chain
+                    }
+                    if (maxSlack == 0 && c.s[cur] != c.s[i] + 1) {
+                        continue;
+                    }
+                    if (top == 64) { *overflowed = true; return false; }
+                    stack[top].cand = (short) i;
+                    stack[top].acc = (unsigned char) (acc + dh);
+                    stack[top].col = (unsigned char) (col + 1);
+                    top++;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 template<int SC>
 __global__ void filterKernel(unsigned long long sampleFrom, long long total,
                              int minHeight, int count, int featureIndex,
@@ -384,9 +496,51 @@ __global__ void filterKernel(unsigned long long sampleFrom, long long total,
         if (steps > ORBIT_RUN) {
             steps = ORBIT_RUN;
         }
+        // What the previous window concluded, and where its chain started. A rejection is
+        // what licenses the cheap search; an acceptance whose chain survives the slide is
+        // still an acceptance, and one whose chain slid off the front needs the full DP
+        // again because a different chain may remain. Acceptance is around 1e-8, so the
+        // expensive branches are taken essentially never.
+        bool prevAccepted = false;
+        int prevBaseN = -1;
+        // Absolute invocation number of the oldest invocation in the window.
+        int windowStart = 0;
+
         for (long long step = 0; step < steps; step++) {
-            if (chainExists(c, head, count, minHeight, baseMinY, baseMaxY,
-                            maxBaseShift, maxColumns, maxSlack)) {
+            rebuildYIndex(c, head, count);
+            bool accept;
+            int baseN = -1;
+            if (step == 0) {
+                accept = chainExists(c, head, count, minHeight, baseMinY, baseMaxY,
+                                     maxBaseShift, maxColumns, maxSlack, &baseN);
+            } else if (prevAccepted && prevBaseN >= windowStart) {
+                accept = true;              // the same chain is still inside the window
+                baseN = prevBaseN;
+            } else {
+                int newestSlot = head - 1;
+                if (newestSlot < 0) {
+                    newestSlot += count;
+                }
+                bool overflowed = false;
+                if (prevAccepted) {
+                    // Its chain slid off the front; another may be left, and only the full
+                    // DP can say.
+                    accept = chainExists(c, head, count, minHeight, baseMinY, baseMaxY,
+                                         maxBaseShift, maxColumns, maxSlack, &baseN);
+                } else {
+                    accept = chainEndingInNewest(c, newestSlot, minHeight, baseMinY,
+                                                 baseMaxY, maxBaseShift, maxColumns,
+                                                 maxSlack, &baseN, &overflowed);
+                    if (overflowed) {
+                        accept = chainExists(c, head, count, minHeight, baseMinY, baseMaxY,
+                                             maxBaseShift, maxColumns, maxSlack, &baseN);
+                    }
+                }
+            }
+            prevAccepted = accept;
+            prevBaseN = baseN;
+
+            if (accept) {
                 unsigned int slot = atomicAdd(outCount, 1u);
                 if (slot < outCapacity) {
                     out[slot] = ds;
@@ -400,6 +554,7 @@ __global__ void filterKernel(unsigned long long sampleFrom, long long total,
                 if (head >= count) {
                     head = 0;
                 }
+                windowStart++;
                 ds = orbitShift(ds, featureIndex);
             }
         }
