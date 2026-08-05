@@ -257,6 +257,7 @@ public final class SugarcaneGui {
         }
         List<String> cmd = new ArrayList<>();
         cmd.add(Path.of(System.getProperty("java.home"), "bin", "java").toString());
+        cmd.addAll(finalFieldFlag());
         cmd.add("-cp");
         cmd.add(classpath());
         cmd.add("dev.drakou111.sugarcane.Cli");
@@ -299,6 +300,42 @@ public final class SugarcaneGui {
         worker.setDaemon(true);
         worker.start();
     }
+
+    /**
+     * {@code --enable-final-field-mutation=ALL-UNNAMED}, when this JVM understands it.
+     *
+     * <p>{@code LayerCaches} swaps the biome layers' 1024-entry cache for a 4096-entry one
+     * by setting a final field reflectively, which is worth a measured 1.07x. Newer JDKs
+     * warn about that on every run and will eventually block it. Blocking is survivable —
+     * {@code enlarge} catches and leaves the stock caches, costing speed and not
+     * correctness — but the warning is three alarming lines in front of every search.
+     *
+     * <p>Probed rather than version-checked: an unrecognised {@code --enable-*} stops the
+     * JVM from starting at all, so guessing which release introduced it would turn a
+     * cosmetic problem into a broken Run button. One {@code -version} launch, cached.
+     */
+    private static synchronized List<String> finalFieldFlag() {
+        if (finalFieldFlag == null) {
+            finalFieldFlag = List.of();
+            String flag = "--enable-final-field-mutation=ALL-UNNAMED";
+            try {
+                Process p = new ProcessBuilder(
+                        Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                        flag, "-version")
+                        .redirectErrorStream(true)
+                        .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                        .start();
+                if (p.waitFor() == 0) {
+                    finalFieldFlag = List.of(flag);
+                }
+            } catch (IOException | InterruptedException e) {
+                // Leave it off; the warning is noise, not a failure.
+            }
+        }
+        return finalFieldFlag;
+    }
+
+    private static List<String> finalFieldFlag;
 
     /**
      * Where to find the classes to launch. {@code java.class.path} is just the jar name

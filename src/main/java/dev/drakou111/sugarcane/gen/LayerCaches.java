@@ -51,7 +51,26 @@ public final class LayerCaches {
     private LayerCaches() {
     }
 
-    /** Best-effort: if the library's internals have moved, leave the caches alone. */
+    /**
+     * Best-effort: if the library's internals have moved, leave the caches alone.
+     *
+     * <p>The same applies to the JDK moving. {@code layerCache} is final, and newer
+     * releases warn that mutating a final field reflectively will eventually be blocked:
+     *
+     * <pre>
+     * WARNING: Final field layerCache in class ...IntBiomeLayer has been mutated
+     *          reflectively by class ...LayerCaches
+     * </pre>
+     *
+     * <p>When that day comes the {@code set} throws and this catch swallows it, so the
+     * search keeps working on the library's stock 1024-entry caches and gives up the
+     * 1.07x. Nothing here is load-bearing for correctness — the caches only decide how
+     * often a value is recomputed, never what it is.
+     *
+     * <p>To silence the warning now, run with
+     * {@code --enable-final-field-mutation=ALL-UNNAMED}. The GUI adds it automatically
+     * when the JVM understands it.
+     */
     public static void enlarge(OverworldBiomeSource source) {
         enlarge(source, CAPACITY);
     }
