@@ -71,7 +71,7 @@ public final class Cli {
                     "<minHeight> [threads] [targets] [firstSeed] [seedCount] "
                             + "[--targets=<file>] [--cpu] [--report=<h>] "
                             + "[--update=<minutes>] [--max-shift=<n>] [--max-columns=<n>] "
-                            + "[--max-slack=<n>] [--sisters=<n>]",
+                            + "[--max-slack=<n>] [--sample-from=<n>] [--sisters=<n>]",
                     "Pick the cane RNG first, then solve for a chunk that has it. seedCount "
                             + "0, or leaving it off, runs until you stop it. Collects "
                             + "decoration seeds whose draws could chain a tall enough column "
@@ -100,6 +100,11 @@ public final class Cli {
                             + "grew an unrelated column mid-stack. --max-slack=99 restores "
                             + "the old behaviour. Values between 0 and maxColumns are "
                             + "CPU-only; the kernel cannot express them. "
+                            + "--sample-from=<n> starts decoration-seed sampling at that "
+                            + "sample index instead of 0, so two machines building the same "
+                            + "set can cover disjoint ground rather than duplicating each "
+                            + "other. Rounded down to a run boundary. A resumed cache still "
+                            + "wins, since its own cursor is what knows what was tested. "
                             + "--update=<minutes> sets the progress interval, default 1. "
                             + "--sisters=<n> sweeps n values of the seed's upper 16 bits "
                             + "per low-48 seed. Those bits change only the biome map: the "
@@ -114,7 +119,8 @@ public final class Cli {
                     ReverseSearcher::main),
             new Command("targets",
                     "<minHeight> <count> <file> [threads] [--cpu] [--update=<minutes>] "
-                            + "[--max-shift=<n>] [--max-columns=<n>] [--max-slack=<n>]",
+                            + "[--max-shift=<n>] [--max-columns=<n>] [--max-slack=<n>] "
+                            + "[--sample-from=<n>]",
                     "Build or extend a reverse-search target set and stop, without "
                             + "searching. The set is the expensive half and the reusable "
                             + "one: it depends on the height, the depth band and the soil "

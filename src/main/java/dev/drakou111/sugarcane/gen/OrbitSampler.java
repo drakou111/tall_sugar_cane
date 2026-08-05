@@ -92,6 +92,38 @@ public final class OrbitSampler {
         return seedOf((JUMP_A * state + JUMP_C) & MASK, featureIndex, step);
     }
 
+    /**
+     * The other direction: the seed whose stream, advanced one invocation, becomes this
+     * one's. Invocation n of the result is invocation n-1 of the input, so it
+     * <em>prepends</em> an invocation rather than dropping one.
+     *
+     * <p>Which is the direction that keeps a chain. {@link #shift} eats invocations off
+     * the front, so a chain occupying invocations [a..b] survives only a of them; going
+     * backwards slides the chain later and it survives until b runs past the last
+     * invocation. A seed carrying a chain therefore sits in a family of
+     * {@code count - (b - a)} seeds that all carry the same one, and every one of them is
+     * a target the build gets without sampling for it.
+     *
+     * <p>The jump is invertible because {@code JUMP_A} is odd:
+     * {@code state = (state' - JUMP_C) * JUMP_A^-1 mod 2^48}.
+     */
+    public static long unshift(long decorationSeed, int featureIndex, int step) {
+        long state = stateOf(decorationSeed, featureIndex, step);
+        long prev = ((state - JUMP_C) * JUMP_A_INVERSE) & MASK;
+        return seedOf(prev, featureIndex, step);
+    }
+
+    /** Inverse of JUMP_A mod 2^48, by Newton iteration -- it doubles correct bits each pass. */
+    private static final long JUMP_A_INVERSE;
+
+    static {
+        long x = 1;
+        for (int i = 0; i < 6; i++) {
+            x = x * (2 - JUMP_A * x);
+        }
+        JUMP_A_INVERSE = x & MASK;
+    }
+
     /** Where run {@code r} starts: splitmix64, the scattering the old sampler used. */
     public static long runStart(long r) {
         long z = r * 0x9E3779B97F4A7C15L + 0x632BE59BD9B4E019L;

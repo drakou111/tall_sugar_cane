@@ -287,6 +287,7 @@ public final class ReverseSearcher {
     private static final String MAX_COLUMNS_FLAG = "--max-columns=";
     private static final String MAX_SLACK_FLAG = "--max-slack=";
     private static final String SHIFT_LEVELS_FLAG = "--shift-levels=";
+    private static final String SAMPLE_FROM_FLAG = "--sample-from=";
     private static boolean forceCpu = false;
     private static int reportHeight = 0;
     private static java.nio.file.Path cacheOverride = null;
@@ -304,6 +305,13 @@ public final class ReverseSearcher {
      */
     private static int maxSlack = 0;
     private static int shiftLevelsOverride = -1;
+    /**
+     * Where decoration-seed sampling starts, as a sample index. Advance it between runs on
+     * different machines and they cover disjoint ground instead of duplicating each other;
+     * a resumed cache still wins, since its own cursor is the one thing that knows what has
+     * actually been tested.
+     */
+    private static long sampleFromOverride = -1L;
 
     /**
      * Builds or extends a target set and stops, without searching anything.
@@ -345,6 +353,12 @@ public final class ReverseSearcher {
                 maxBaseShiftOverride = Integer.parseInt(arg.substring(MAX_SHIFT_FLAG.length()));
             } else if (arg.startsWith(MAX_COLUMNS_FLAG)) {
                 maxColumnsOverride = Integer.parseInt(arg.substring(MAX_COLUMNS_FLAG.length()));
+            } else if (arg.startsWith(SAMPLE_FROM_FLAG)) {
+                sampleFromOverride = Long.parseLong(arg.substring(SAMPLE_FROM_FLAG.length()));
+                if (sampleFromOverride < 0) {
+                    throw new IllegalArgumentException(
+                            "--sample-from must be >= 0, got " + sampleFromOverride);
+                }
             } else if (arg.startsWith(SHIFT_LEVELS_FLAG)) {
                 shiftLevelsOverride =
                         Integer.parseInt(arg.substring(SHIFT_LEVELS_FLAG.length()));
@@ -765,6 +779,52 @@ public final class ReverseSearcher {
                 : ChainPrefilter.shiftLevelsFor(minHeight);
     }
 
+    /**
+     * Every seed that carries this one's chain, itself included.
+     *
+     * <p>A chain lives in some window of invocations. Sliding the whole stream by an
+     * invocation moves the chain within that window without touching its geometry -- same
+     * x, z, base y, heights and shifts -- so it stays a chain until it slides off one end.
+     * Those seeds are targets the build never had to sample for, which matters because
+     * the size of the set is the search's real bottleneck.
+     *
+     * <p>Going backwards is the productive direction: {@link OrbitSampler#shift} eats
+     * invocations off the front, so a chain at invocations [a..b] survives only a of those,
+     * while {@link OrbitSampler#unshift} prepends and it survives until b runs off the end.
+     * A chain spanning w invocations therefore has {@code count - w} relatives.
+     *
+     * <p>Each is re-tested rather than assumed. The argument says the geometry survives,
+     * but membership also turns on the depth band and the soil filter, and re-testing costs
+     * a few microseconds on a seed that only turns up once in millions.
+     *
+     * @return how many were written into {@code buf}
+     */
+    private static int family(long z, ChainPrefilter filter, DirtBlobFilter dirt,
+            int minHeight, long[] buf) {
+        int n = 0;
+        buf[n++] = z;
+        // Both directions, and without stopping at the first miss: a seed can carry more
+        // than one chain, and the one that slides off first need not be the only one.
+        for (int dir = 0; dir < 2; dir++) {
+            long s = z;
+            for (int j = 1; j < OCEAN_COUNT; j++) {
+                s = dir == 0
+                        ? OrbitSampler.unshift(s, OCEAN_INDEX,
+                                SugarCaneFeature.VEGETAL_DECORATION)
+                        : OrbitSampler.shift(s, OCEAN_INDEX,
+                                SugarCaneFeature.VEGETAL_DECORATION);
+                int chains = filter.collectChains(s, OCEAN_INDEX, minHeight);
+                if (chains == 0 && !filter.chainsOverflowed()) {
+                    continue;
+                }
+                if (soilPossible(filter, dirt, s, chains)) {
+                    buf[n++] = s;
+                }
+            }
+        }
+        return n;
+    }
+
     private static int maxColumns(int minHeight) {
         return maxColumnsOverride >= 0 ? maxColumnsOverride
                 : ChainPrefilter.minimumColumns(minHeight);
@@ -834,14 +894,22 @@ public final class ReverseSearcher {
         TargetCache.Header wanted = header(minHeight, 0L, 0L);
 
         long[] all = new long[0];
-        long sampleAt = 0L;
+        // Rounded down to a run boundary: the kernel processes whole runs of orbit
+        // neighbours, so a cursor landing mid-run would have it start a run early and
+        // re-test the seeds before the cursor.
+        long sampleAt = sampleFromOverride < 0 ? 0L
+                : sampleFromOverride - Math.floorMod(sampleFromOverride, (long) OrbitSampler.RUN);
         long totalTested = 0L;
+        if (sampleFromOverride >= 0) {
+            System.out.printf("target set: sampling decoration seeds from index %d%n",
+                    sampleAt);
+        }
         if (cache != null) {
             TargetCache.Loaded loaded = TargetCache.load(cache, wanted);
             if (loaded != null) {
                 all = loaded.targets();
                 totalTested = loaded.header().tested();
-                sampleAt = loaded.header().sampledThrough();
+                sampleAt = Math.max(sampleAt, loaded.header().sampledThrough());
                 System.out.printf("target set: loaded %d from %s (%.1f%% of the %d wanted)%n",
                         all.length, cache, 100.0 * all.length / targets, targets);
                 if (all.length >= targets) {
@@ -955,6 +1023,7 @@ public final class ReverseSearcher {
                         ChainPrefilter filter = rankedFilter(minHeight);
                         DirtBlobFilter dirt = new DirtBlobFilter();
                         long[] mine = new long[64];
+                        long[] kin = new long[2 * OCEAN_COUNT];
                         int n = 0;
                         while (true) {
                             int k = cursor.getAndIncrement();
@@ -969,10 +1038,12 @@ public final class ReverseSearcher {
                             if (!soilPossible(filter, dirt, z, chains)) {
                                 continue;
                             }
-                            if (n == mine.length) {
-                                mine = Arrays.copyOf(mine, n * 2);
+                            int got = family(z, filter, dirt, minHeight, kin);
+                            while (n + got > mine.length) {
+                                mine = Arrays.copyOf(mine, mine.length * 2);
                             }
-                            mine[n++] = z;
+                            System.arraycopy(kin, 0, mine, n, got);
+                            n += got;
                             foundNow.incrementAndGet();
                         }
                         synchronized (collected) {
@@ -992,6 +1063,7 @@ public final class ReverseSearcher {
                     ChainPrefilter filter = rankedFilter(minHeight);
                     DirtBlobFilter dirt = new DirtBlobFilter();
                     long[] mine = new long[64];
+                    long[] kin = new long[2 * OCEAN_COUNT];
                     int n = 0;
                     while (true) {
                         long from = next.getAndAdd(chunk);
@@ -1016,10 +1088,12 @@ public final class ReverseSearcher {
                             if (!soilPossible(filter, dirt, z, chains)) {
                                 continue;
                             }
-                            if (n == mine.length) {
-                                mine = Arrays.copyOf(mine, n * 2);
+                            int got = family(z, filter, dirt, minHeight, kin);
+                            while (n + got > mine.length) {
+                                mine = Arrays.copyOf(mine, mine.length * 2);
                             }
-                            mine[n++] = z;
+                            System.arraycopy(kin, 0, mine, n, got);
+                            n += got;
                             foundNow.incrementAndGet();
                         }
                     }
@@ -1050,6 +1124,19 @@ public final class ReverseSearcher {
             // array, and truncating an over-full final epoch then keeps a different
             // subset on each -- the filters agree, but the caches would not.
             java.util.Arrays.sort(merged);
+            // Families overlap. Sampling walks runs of orbit neighbours, so two accepted
+            // seeds in the same run are often relatives of each other and their families
+            // coincide -- a duplicate target is a wasted slot in every search that loads
+            // the file, so they are dropped here rather than counted as coverage.
+            int unique = 0;
+            for (int i = 0; i < merged.length; i++) {
+                if (i == 0 || merged[i] != merged[i - 1]) {
+                    merged[unique++] = merged[i];
+                }
+            }
+            if (unique != merged.length) {
+                merged = java.util.Arrays.copyOf(merged, unique);
+            }
             all = merged;
             totalTested += EPOCH_SAMPLES;
             testedBase.set(totalTested);
