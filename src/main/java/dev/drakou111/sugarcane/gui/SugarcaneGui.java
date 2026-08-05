@@ -90,7 +90,20 @@ public final class SugarcaneGui {
 
     private void show() {
         JFrame frame = new JFrame("sugarcane");
-        frame.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
+        // Not DISPOSE_ON_CLOSE: a child process outlives the JVM that started it on
+        // Windows, so closing the window would leave a search running on every core with
+        // no window to stop it from. Kill it first, then go.
+        frame.setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
+        frame.addWindowListener(new java.awt.event.WindowAdapter() {
+            @Override
+            public void windowClosing(java.awt.event.WindowEvent e) {
+                stopRunning();
+                frame.dispose();
+            }
+        });
+        // A backstop for every other way this JVM can end -- killed from an IDE, logged
+        // out, Stop pressed in a terminal. The hook runs on all of them.
+        Runtime.getRuntime().addShutdownHook(new Thread(this::stopRunning, "sugarcane-cleanup"));
         frame.getContentPane().setBackground(BG);
 
         addTab("search", searchTab());
@@ -98,6 +111,13 @@ public final class SugarcaneGui {
         addTab("targets", targetsTab());
         addTab("sisters", sistersTab());
         addTab("inspect", inspectTab());
+        // Not a command, so it contributes no arguments and Run does not apply to it.
+        tabs.addTab("slots", new SlotMachine());
+        argsPerTab.add(null);
+        tabs.addChangeListener(e -> {
+            boolean runnable = argsPerTab.get(tabs.getSelectedIndex()) != null;
+            run.setEnabled(runnable && running == null);
+        });
 
         console.setEditable(false);
         console.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
@@ -291,9 +311,13 @@ public final class SugarcaneGui {
     // ---------------------------------------------------------------- running
 
     private void start() {
+        Supplier<List<String>> supplier = argsPerTab.get(tabs.getSelectedIndex());
+        if (supplier == null) {
+            return;     // the slots tab; nothing to run
+        }
         List<String> args;
         try {
-            args = argsPerTab.get(tabs.getSelectedIndex()).get();
+            args = supplier.get();
         } catch (IllegalArgumentException e) {
             JOptionPane.showMessageDialog(null, e.getMessage(), "missing value",
                     JOptionPane.WARNING_MESSAGE);
@@ -335,7 +359,7 @@ public final class SugarcaneGui {
                 running = null;
                 int code = exit;
                 SwingUtilities.invokeLater(() -> {
-                    run.setEnabled(true);
+                    run.setEnabled(argsPerTab.get(tabs.getSelectedIndex()) != null);
                     stop.setEnabled(false);
                     append("[exit " + code + "]\n\n");
                 });
@@ -401,6 +425,30 @@ public final class SugarcaneGui {
             // Fall through: an unusual classloader is not worth failing over.
         }
         return System.getProperty("java.class.path");
+    }
+
+    /**
+     * Ends the child if there is one, and waits briefly for it to actually go.
+     *
+     * <p>{@code destroy} only asks; without the wait a shutdown hook can return and let
+     * the JVM exit while the search is still winding down, which is the same orphan by a
+     * slower route.
+     */
+    private boolean stopRunning() {
+        Process p = running;
+        if (p == null || !p.isAlive()) {
+            return false;
+        }
+        p.destroy();
+        try {
+            if (!p.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+            }
+        } catch (InterruptedException e) {
+            p.destroyForcibly();
+            Thread.currentThread().interrupt();
+        }
+        return true;
     }
 
     private void append(String text) {
