@@ -765,8 +765,9 @@ public final class ReverseSearcher {
     }
 
     private static ChainPrefilter rankedFilter(int minHeight) {
-        return new ChainPrefilter(OCEAN_COUNT, ChainPrefilter.DEFAULT_BASE_MIN_Y,
-                ChainPrefilter.DEFAULT_BASE_MAX_Y, maxBaseShift(), maxColumns(minHeight))
+        return ChainPrefilter.forHeight(OCEAN_COUNT, ChainPrefilter.DEFAULT_BASE_MIN_Y,
+                ChainPrefilter.DEFAULT_BASE_MAX_Y, maxBaseShift(), maxColumns(minHeight),
+                minHeight)
                 .maxSlack(maxSlack);
     }
 
@@ -843,7 +844,19 @@ public final class ReverseSearcher {
         // the same as a device that works, and every way of not having one -- no CUDA, no
         // driver, wrong toolkit, missing file -- should fall back quietly rather than
         // fail the run.
-        GpuChainFilter gpu = forceCpu ? null : GpuChainFilter.detect();
+        // The kernel is built for four shift levels. A height needing five is not
+        // something it can express, and a set it built would be silently short of every
+        // five-column chain -- so refuse rather than produce one.
+        GpuChainFilter gpu = forceCpu || ChainPrefilter.shiftLevelsFor(minHeight)
+                > ChainPrefilter.DEFAULT_SHIFT_LEVELS ? null : GpuChainFilter.detect();
+        if (gpu == null && !forceCpu
+                && ChainPrefilter.shiftLevelsFor(minHeight)
+                        > ChainPrefilter.DEFAULT_SHIFT_LEVELS) {
+            System.out.printf("height %d needs %d shift levels and the kernel has %d, "
+                            + "so this build runs on the CPU%n",
+                    minHeight, ChainPrefilter.shiftLevelsFor(minHeight),
+                    ChainPrefilter.DEFAULT_SHIFT_LEVELS);
+        }
         if (forceCpu) {
             System.out.println("target set: --cpu given, using the CPU chain filter");
         } else if (gpu != null) {

@@ -66,11 +66,36 @@ public final class ChainPrefilter {
     public static final int DEFAULT_BASE_MAX_Y = 35;
 
     /**
-     * Shifts enumerated per column, in draws. Each earlier successful placement
-     * costs two. Four values covers the confirmed find on seed 1500050556, which
-     * needs base shift 0 with top shift 4.
+     * Shifts enumerated per column, in draws. Each earlier successful placement costs two.
+     *
+     * <p>Five values are defined but {@link #DEFAULT_SHIFT_LEVELS} are used, because how
+     * many levels exist is exactly how many columns a chain can have: shifts must strictly
+     * increase up a chain, so C columns need C distinct levels. Four levels cap a chain at
+     * four columns and therefore at height 16, and asking for 17 with four levels does not
+     * fail -- it silently accepts nothing, and a target build runs forever finding none.
+     *
+     * <p>Levels are not free. Every one adds a whole shift-view of every invocation to the
+     * candidate set, so q rises and the search slows, for chains longer than almost any
+     * real find needs. 6ah measured four-column chains at 0 of 256 real finds. So the count
+     * is raised only when the height demands it, by {@link #shiftLevelsFor}.
      */
-    private static final int[] SHIFTS = {0, 2, 4, 6};
+    private static final int[] SHIFTS = {0, 2, 4, 6, 8};
+
+    /** What every search up to height 16 uses, and what every existing target set was
+     *  built with. Changing this would silently redefine those sets. */
+    public static final int DEFAULT_SHIFT_LEVELS = 4;
+
+    /**
+     * How many shift levels a height needs: enough for the columns it takes to reach it.
+     *
+     * <p>A pure function of {@code minHeight}, deliberately. It could have been a
+     * {@code TargetCache} header field, but the header already records the height, and
+     * deriving it means every set built before five levels existed stays valid rather than
+     * being invalidated by a format bump nobody needed.
+     */
+    public static int shiftLevelsFor(int minHeight) {
+        return Math.max(DEFAULT_SHIFT_LEVELS, minimumColumns(minHeight));
+    }
 
     private final int count;
     private final int baseMinY;
@@ -103,6 +128,8 @@ public final class ChainPrefilter {
      * survives either way. A budget of one keeps both. FINDINGS 6ao has what each buys.
      */
     private int maxSlack = Integer.MAX_VALUE;
+    /** How many of {@link #SHIFTS} this filter reads. See the field's note on cost. */
+    private final int shiftLevels;
     private final int capacity;
     private final int[] draws;
 
@@ -149,6 +176,7 @@ public final class ChainPrefilter {
     private int chainCount;
     private boolean chainOverflow;
     private final int[] path = new int[8];
+    private final int[] packY = new int[8];
     private int wantedHeight;
 
     public ChainPrefilter(int count) {
@@ -160,7 +188,8 @@ public final class ChainPrefilter {
         // maxAnyShift deliberately left unrestricted. See its javadoc: gating it at 0
         // rejects both confirmed finds.
         return new ChainPrefilter(count, DEFAULT_BASE_MIN_Y, DEFAULT_BASE_MAX_Y, 0,
-                minimumColumns(minHeight), SHIFTS.length - 1);
+                minimumColumns(minHeight), shiftLevelsFor(minHeight) - 1,
+                shiftLevelsFor(minHeight));
     }
 
     /** A column is at most 4 tall, so this is the fewest that can reach the height. */
@@ -179,7 +208,16 @@ public final class ChainPrefilter {
 
     public ChainPrefilter(int count, int baseMinY, int baseMaxY, int maxBaseShift,
             int maxColumns) {
-        this(count, baseMinY, baseMaxY, maxBaseShift, maxColumns, SHIFTS.length - 1);
+        this(count, baseMinY, baseMaxY, maxBaseShift, maxColumns,
+                DEFAULT_SHIFT_LEVELS - 1);
+    }
+
+    /** With the shift levels a height needs, which is what a tall search wants. */
+    public static ChainPrefilter forHeight(int count, int baseMinY, int baseMaxY,
+            int maxBaseShift, int maxColumns, int minHeight) {
+        int levels = shiftLevelsFor(minHeight);
+        return new ChainPrefilter(count, baseMinY, baseMaxY, maxBaseShift, maxColumns,
+                levels - 1, levels);
     }
 
     /**
@@ -211,22 +249,33 @@ public final class ChainPrefilter {
      */
     public ChainPrefilter(int count, int baseMinY, int baseMaxY, int maxBaseShift,
             int maxColumns, int maxAnyShift) {
+        this(count, baseMinY, baseMaxY, maxBaseShift, maxColumns, maxAnyShift,
+                DEFAULT_SHIFT_LEVELS);
+    }
+
+    public ChainPrefilter(int count, int baseMinY, int baseMaxY, int maxBaseShift,
+            int maxColumns, int maxAnyShift, int shiftLevels) {
+        if (shiftLevels < 1 || shiftLevels > SHIFTS.length) {
+            throw new IllegalArgumentException("shiftLevels must be 1.." + SHIFTS.length
+                    + ", got " + shiftLevels);
+        }
+        this.shiftLevels = shiftLevels;
         this.maxAnyShift = maxAnyShift;
         this.count = count;
         this.baseMinY = baseMinY;
         this.baseMaxY = baseMaxY;
         this.maxBaseShift = maxBaseShift;
         this.maxColumns = maxColumns;
-        this.capacity = count * DRAWS_PER_INVOCATION + SHIFTS[SHIFTS.length - 1] + 16;
+        this.capacity = count * DRAWS_PER_INVOCATION + SHIFTS[shiftLevels - 1] + 16;
         this.draws = new int[capacity];
-        int max = count * SHIFTS.length * TRIES;
+        int max = count * shiftLevels * TRIES;
         this.cx = new int[max];
         this.cz = new int[max];
         this.cy = new int[max];
         this.ch = new int[max];
         this.cn = new int[max];
         this.cs = new int[max];
-        int groups = count * SHIFTS.length;
+        int groups = count * shiftLevels;
         this.groupStart = new int[groups];
         this.groupEnd = new int[groups];
         this.groupN = new int[groups];
@@ -273,7 +322,7 @@ public final class ChainPrefilter {
         groupCount = 0;
         java.util.Arrays.fill(yHead, -1);
         for (int n = 0; n < count; n++) {
-            for (int shiftIndex = 0; shiftIndex < SHIFTS.length; shiftIndex++) {
+            for (int shiftIndex = 0; shiftIndex < shiftLevels; shiftIndex++) {
                 int shift = SHIFTS[shiftIndex];
                 int base = n * DRAWS_PER_INVOCATION + shift;
                 if (base + 2 >= capacity) {
@@ -422,22 +471,51 @@ public final class ChainPrefilter {
 
     /**
      * x and z are chunk-relative and span -4..19, since an origin in 0..15 is offset
-     * by up to 4 either way. y is 11..64. Five, five, three and four sevens.
+     * by up to 4 either way. y is 11..64. Five, five, three, then five sevens.
+     *
+     * <pre>
+     *   0..4   x + 4
+     *   5..9   z + 4
+     *   10..12 columns
+     *   13..47 base y of each column, seven bits each, up to five of them
+     *   48..50 the base column's shift
+     *   51..53 the chain's largest shift
+     * </pre>
+     *
+     * <p>The shift fields used to sit at 41..44, immediately after four y slots. A fifth
+     * column's y lands exactly there, so a five-column chain would have overwritten its own
+     * shift fields -- silently, since nothing reads a chain back to check it. Moving them
+     * to 48 and widening them to three bits (five levels no longer fit in two) leaves this
+     * at 54 bits of a long.
+     *
+     * <p>Only ever held in memory, so widening it is not a format change and no target file
+     * is affected.
      */
     private long pack(int x, int z, int columns) {
-        long packed = (long) (x + 4) | (long) (z + 4) << 5 | (long) columns << 10;
         int maxShift = 0;
         for (int i = 0; i < columns; i++) {
-            packed |= (long) cy[path[i]] << (13 + 7 * i);
+            packY[i] = cy[path[i]];
             if (cs[path[i]] > maxShift) {
                 maxShift = cs[path[i]];
             }
         }
-        // Bits 41..44: how many earlier placements this chain assumes. The base's own
-        // assumption is the interesting one - a chain needing three prior successes in
-        // the same chunk is far less likely to be real than one needing none.
-        packed |= (long) cs[path[0]] << 41;
-        packed |= (long) maxShift << 43;
+        return pack(x, z, columns, packY, cs[path[0]], maxShift);
+    }
+
+    /**
+     * The layout itself, taking its inputs explicitly so it can be tested.
+     *
+     * <p>Five-column chains are far too rare to reach by sampling -- four-column ones were
+     * 0 of 256 real finds -- so the fifth y slot cannot be exercised by generating chains
+     * and hoping. It is checked directly instead.
+     */
+    static long pack(int x, int z, int columns, int[] ys, int baseShift, int maxShift) {
+        long packed = (long) (x + 4) | (long) (z + 4) << 5 | (long) columns << 10;
+        for (int i = 0; i < columns; i++) {
+            packed |= (long) ys[i] << (13 + 7 * i);
+        }
+        packed |= (long) baseShift << 48;
+        packed |= (long) maxShift << 51;
         return packed;
     }
 
@@ -465,12 +543,12 @@ public final class ChainPrefilter {
      * unlikely ever to cash in.
      */
     public static int chainBaseShift(long chain) {
-        return (int) (chain >>> 41 & 3);
+        return (int) (chain >>> 48 & 7);
     }
 
     /** The largest such assumption across the chain's columns. */
     public static int chainMaxShift(long chain) {
-        return (int) (chain >>> 43 & 3);
+        return (int) (chain >>> 51 & 7);
     }
 
     /**
