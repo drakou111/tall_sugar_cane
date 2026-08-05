@@ -1,3 +1,58 @@
+# v2.1.3 — a filter that was accepting the impossible, and a window to drive it from
+
+## The reverse search got faster, for free
+
+A collaborator asked whether `ChainPrefilter` checks that a continuation reads the RNG at
+a later shift than the column beneath it. It did not, and that turned out to be most of
+the target set.
+
+The shift index counts how many successful placements a chunk is assumed to have made
+before an invocation. Placements only accumulate, and a chain's own column is one of them,
+so consecutive columns must have strictly increasing shifts. Without that check a chain
+could be built with a later column reading the stream at the *same* offset as the column
+it stands on — which would require placing the cane out of order.
+
+```
+height    q before     q after    tighter
+7         1.571e-1     6.163e-2     2.5x
+8         3.379e-2     1.109e-2     3.0x
+9         2.210e-3     1.200e-4      18x
+10        7.433e-4     5.000e-5      15x
+```
+
+Find rate goes as `rate / q`, so that is the speedup, and it **costs no coverage**:
+everything removed is a chain no chunk could produce. Both confirmed finds pass unchanged.
+
+Fixed in the CUDA kernel too, and a CPU-built and GPU-built target set are byte-identical
+afterwards, which is how you know they have not drifted. **Target files are now version 3**
+— a version 2 file is mostly impossible chains and will be rejected, so rebuild it.
+
+## sugarcaneGUI.jar
+
+```
+java -jar sugarcaneGUI.jar
+```
+
+A tab per command — `search`, `reverse`, `targets`, `sisters`, `inspect` — over a shared
+console, dark, with Run/Stop. Every run is a fresh process, which is not only so Stop works:
+`sisters` and `inspect` set static filters that nothing resets, so running one and then a
+search in the same JVM would silently give you a search with its filters relaxed.
+
+Closing the window stops the search. A child process outlives its parent on Windows, so
+this used to leave a search running on every core with no window to stop it from.
+
+Block textures ship in the jar now rather than being hunted for on your machine.
+
+## Also
+
+- `seedCount` **0, or left off, runs until you stop it**. `search 1 0 ...` previously
+  searched nothing at all.
+- `--user=<name>` sets the name finds are reported under and remembers it. `--yes-report`
+  never prompts, so anyone who had not done an interactive first run was Anonymous forever.
+- Threads are clamped to the machine's count, out loud.
+- `--sisters` and the water probe from 2.1.0 are unchanged; `--water-probe` is still opt-in
+  until its retention is measured on real finds.
+
 # v2.1.0 — the upper 16 bits, and what to do with a find the game refuses
 
 The reverse search is about **4.7x faster**, and there is a new command for the case
