@@ -116,15 +116,8 @@ final class SlotMachine extends JPanel {
         this.grow = grow;
         setLayout(new BorderLayout(0, 8));
         setOpaque(false);
-        // Drawn art first, so the window opens now. Hunting a Minecraft install means
-        // walking launcher directories, which measured 1.4 seconds on a cold cache -- on
-        // the event thread that is the window hanging before it appears.
-        for (int i = 0; i < SYMBOLS.length; i++) {
-            sprites[i] = scaled(drawn(SYMBOLS[i]), CELL - 16);
-        }
-        caneRaw = drawn(Symbol.SUGAR_CANE);
-        dirtRaw = drawn(Symbol.DIRT);
-        waterRaw = drawn(Symbol.WATER);
+        // Straight from the jar: no search, no wait, same art for everyone.
+        reloadSprites();
 
         JLabel title = new JLabel("stack a column", SwingConstants.CENTER);
         title.setFont(new Font(Font.MONOSPACED, Font.BOLD, 17));
@@ -148,7 +141,7 @@ final class SlotMachine extends JPanel {
         buttons.add(refill);
         // Only offered when the search came up empty, which is the only time it helps.
         pick = new JButton("find Minecraft jar...");
-        pick.setVisible(false);          // shown by the scan below if it comes up empty
+        pick.setVisible(!MinecraftTextures.bundledPresent());
         pick.addActionListener(e -> {
             JFileChooser chooser = new JFileChooser();
             chooser.setDialogTitle("pick a Minecraft client jar");
@@ -182,20 +175,6 @@ final class SlotMachine extends JPanel {
         add(board, BorderLayout.CENTER);
         add(south, BorderLayout.SOUTH);
 
-        Thread loader = new Thread(() -> {
-            MinecraftTextures.source();     // the expensive part, off the event thread
-            SwingUtilities.invokeLater(() -> {
-                if (MinecraftTextures.source() != null) {
-                    reloadSprites();
-                }
-                showTextureSource();
-                pick.setVisible(MinecraftTextures.source() == null);
-                board.repaint();
-            });
-        }, "texture-scan");
-        loader.setDaemon(true);
-        loader.start();
-
         spin.addActionListener(e -> pull());
         cash.addActionListener(e -> cashOut());
         cash.setEnabled(false);
@@ -204,22 +183,14 @@ final class SlotMachine extends JPanel {
     }
 
     private void showTextureSource() {
-        Path jar = MinecraftTextures.source();
-        origin.setText(jar == null
-                ? "no Minecraft install found - textures drawn from a palette"
-                : "textures: " + jar.getFileName() + " (" + shorten(jar) + ")");
+        origin.setText(MinecraftTextures.bundledPresent()
+                ? "textures: Minecraft 1.16.1, bundled"
+                : "no textures bundled - drawn from a palette");
     }
 
     private void reloadSprites() {
-        // Drawn art first, so the window opens now. Hunting a Minecraft install means
-        // walking launcher directories, which measured 1.4 seconds on a cold cache -- on
-        // the event thread that is the window hanging before it appears.
-        for (int i = 0; i < SYMBOLS.length; i++) {
-            sprites[i] = scaled(drawn(SYMBOLS[i]), CELL - 16);
-        }
-        caneRaw = drawn(Symbol.SUGAR_CANE);
-        dirtRaw = drawn(Symbol.DIRT);
-        waterRaw = drawn(Symbol.WATER);
+        // Straight from the jar: no search, no wait, same art for everyone.
+        reloadSprites();
     }
 
     // ------------------------------------------------------------------ play

@@ -14,18 +14,18 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 /**
- * Block textures read out of a Minecraft client jar already on this machine.
+ * Block textures, from the jar first and a local Minecraft install second.
  *
- * <p>They are not shipped with this project. The jar is public and Mojang's texture files
- * are theirs, so the alternative — copying the PNGs into {@code src/main/resources} — would
- * be redistributing their assets to everyone who downloads a release. Reading them at
- * runtime from an install the user already has does not.
+ * <p>The six 16x16 PNGs the slot machine needs ship in {@code /textures/block}, taken from
+ * 1.16.1 — the version this whole project simulates. That is Mojang's artwork rather than
+ * this project's; {@code src/main/resources/textures/block/README.txt} says so and says
+ * what to delete if it should not be there. Bundling them is what makes the art the same
+ * for everyone, which searching a machine for an install demonstrably was not.
  *
- * <p>Nothing depends on finding one. {@link #block} returns null when there is no install,
- * and the caller draws its own approximation instead.
- *
- * <p>1.16.1 is preferred, since that is the version this whole project is about, but any
- * client jar carrying the textures will do.
+ * <p>The search is kept as a fallback, so a copy deleted from the jar still finds an
+ * install, and {@code -Dsugarcane.mcjar=<path>} still overrides both. If everything comes
+ * up empty {@link #block} returns null and the caller draws its own approximation, so the
+ * game works with no textures at all.
  */
 final class MinecraftTextures {
 
@@ -55,6 +55,33 @@ final class MinecraftTextures {
         if (CACHE.containsKey(name)) {
             return CACHE.get(name);
         }
+        BufferedImage img = bundled(name);
+        if (img == null) {
+            img = fromInstall(name);
+        }
+        if (img != null && img.getHeight() > img.getWidth()) {
+            img = img.getSubimage(0, 0, img.getWidth(), img.getWidth());
+        }
+        CACHE.put(name, img);
+        return img;
+    }
+
+    /** Whether the jar carries its own textures, which decides what the UI should say. */
+    static boolean bundledPresent() {
+        return MinecraftTextures.class.getResource("/textures/block/sugar_cane.png") != null;
+    }
+
+    /** The copies inside the jar, so no install is needed and everyone sees the same art. */
+    private static BufferedImage bundled(String name) {
+        try (InputStream in = MinecraftTextures.class
+                .getResourceAsStream("/textures/block/" + name + ".png")) {
+            return in == null ? null : ImageIO.read(in);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static BufferedImage fromInstall(String name) {
         BufferedImage img = null;
         find();
         if (jar != null) {
@@ -68,11 +95,7 @@ final class MinecraftTextures {
             } catch (Exception e) {
                 img = null;
             }
-            if (img != null && img.getHeight() > img.getWidth()) {
-                img = img.getSubimage(0, 0, img.getWidth(), img.getWidth());
-            }
         }
-        CACHE.put(name, img);
         return img;
     }
 
