@@ -69,6 +69,14 @@ final class SlotMachine extends JPanel {
     }
 
     private static final int CELL = 84;
+    /**
+     * Block size in the showcase, deliberately fixed. Shrinking the blocks to fit would be
+     * the sensible thing; instead the panel grows and the window grows with it, so a tall
+     * run is tall on the screen too.
+     */
+    private static final int TILE = 22;
+    /** Everything in the board that is not stack: the reels and their margins. */
+    private static final int BOARD_CHROME = 130;
     private static final Color BG = new Color(0x1E1F22);
     private static final Color EDGE = new Color(0x4A4D52);
     private static final Color TEXT = new Color(0xD8D8D8);
@@ -92,6 +100,8 @@ final class SlotMachine extends JPanel {
     private final JButton refill = new JButton("+25 credits");
     private final Board board = new Board();
     private final Timer timer;
+    /** Told how many pixels of stack there are, so the window can make room. */
+    private final java.util.function.IntConsumer grow;
 
     private final java.util.List<Integer> columnHeights = new java.util.ArrayList<>();
     private int credits = 50;
@@ -101,7 +111,8 @@ final class SlotMachine extends JPanel {
     private boolean spinning;
     private boolean running;
 
-    SlotMachine() {
+    SlotMachine(java.util.function.IntConsumer grow) {
+        this.grow = grow;
         setLayout(new BorderLayout(0, 8));
         setOpaque(false);
         for (int i = 0; i < SYMBOLS.length; i++) {
@@ -210,6 +221,7 @@ final class SlotMachine extends JPanel {
             columnHeights.add(drawn);
             columns++;
             running = true;
+            resize();
             spin.setEnabled(true);
             cash.setEnabled(true);
             caption.setText("column " + columns + ": " + drawn + " tall. "
@@ -251,6 +263,15 @@ final class SlotMachine extends JPanel {
         height = 0;
         columns = 0;
         columnHeights.clear();
+        resize();
+    }
+
+    /** Ask the board for more room, and the window for more room than that. */
+    private void resize() {
+        int stack = (height + 1) * TILE;
+        board.setPreferredSize(new Dimension(3 * CELL + 330, BOARD_CHROME + stack));
+        board.revalidate();
+        grow.accept(stack);
     }
 
     private Symbol roll() {
@@ -383,7 +404,7 @@ final class SlotMachine extends JPanel {
         Board() {
             setOpaque(false);
             // Tall enough that a 20-block stack is a stack and not a hint of one.
-            setPreferredSize(new Dimension(3 * CELL + 230, 300));
+            setPreferredSize(new Dimension(3 * CELL + 330, BOARD_CHROME + TILE));
         }
 
         @Override
@@ -408,17 +429,16 @@ final class SlotMachine extends JPanel {
             // identical blocks.
             int sx = x0 + reelsWidth + 34;
             int floor = getHeight() - 16;
-            int room = floor - y0 - 4;
-            int blocks = Math.max(1, height + 1);          // + the soil it stands on
-            int tile = Math.max(4, Math.min(22, room / blocks));
-            int fits = Math.min(height, Math.max(0, room / tile - 1));
+            int tile = TILE;                               // fixed on purpose; see TILE
+            int fits = height;
 
             int caneX = sx + tile;
             int waterX = sx;
             g2.setColor(BG);
-            g2.fillRoundRect(sx - 6, y0, tile * 2 + 12, floor - y0 + 6, 8, 8);
+            int boxTop = Math.max(y0, floor - (height + 2) * tile);
+            g2.fillRoundRect(sx - 6, boxTop, tile * 2 + 12, floor - boxTop + 6, 8, 8);
             g2.setColor(EDGE);
-            g2.drawRoundRect(sx - 6, y0, tile * 2 + 12, floor - y0 + 6, 8, 8);
+            g2.drawRoundRect(sx - 6, boxTop, tile * 2 + 12, floor - boxTop + 6, 8, 8);
 
             Image soil = scaled(dirtRaw, tile);
             Image water = scaled(waterRaw, tile);

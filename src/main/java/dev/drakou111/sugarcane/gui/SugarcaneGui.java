@@ -89,7 +89,7 @@ public final class SugarcaneGui {
     }
 
     private void show() {
-        JFrame frame = new JFrame("sugarcane");
+        frame = new JFrame("sugarcane");
         // Not DISPOSE_ON_CLOSE: a child process outlives the JVM that started it on
         // Windows, so closing the window would leave a search running on every core with
         // no window to stop it from. Kill it first, then go.
@@ -112,7 +112,7 @@ public final class SugarcaneGui {
         addTab("sisters", sistersTab());
         addTab("inspect", inspectTab());
         // Not a command, so it contributes no arguments and Run does not apply to it.
-        tabs.addTab("slots", new SlotMachine());
+        tabs.addTab("slots", new SlotMachine(this::makeRoomForStack));
         argsPerTab.add(null);
         tabs.addChangeListener(e -> {
             boolean runnable = argsPerTab.get(tabs.getSelectedIndex()) != null;
@@ -161,17 +161,44 @@ public final class SugarcaneGui {
         top.add(tabs, BorderLayout.CENTER);
         top.add(controls, BorderLayout.SOUTH);
 
-        JSplitPane split = new JSplitPane(JSplitPane.VERTICAL_SPLIT, top,
+        split = new JSplitPane(JSplitPane.VERTICAL_SPLIT, top,
                 new JScrollPane(console));
         split.setResizeWeight(0.0);
         frame.add(split);
         frame.setSize(940, 720);
         frame.setLocationRelativeTo(null);
         frame.setVisible(true);
-        SwingUtilities.invokeLater(() -> split.setDividerLocation(300));
+        baseHeight = frame.getHeight();
+        baseDivider = 300;
+        SwingUtilities.invokeLater(() -> split.setDividerLocation(baseDivider));
 
         append("Each run starts a fresh process; the command line is echoed so it can be "
                 + "pasted into a terminal.\nReporting is off unless the box is ticked.\n\n");
+    }
+
+    private JFrame frame;
+    private JSplitPane split;
+    private int baseHeight;
+    private int baseDivider;
+
+    /**
+     * Give the slots tab the room its stack wants, by growing the window.
+     *
+     * <p>The showcase could shrink its blocks to fit and never disturb anything. It does
+     * not, so a twelve is twelve blocks tall on the screen and the window has to get out
+     * of its own way. Capped at the usable screen height, after which it simply stops.
+     */
+    private void makeRoomForStack(int stackPixels) {
+        if (frame == null || split == null) {
+            return;
+        }
+        int max = GraphicsEnvironment.getLocalGraphicsEnvironment()
+                .getMaximumWindowBounds().height;
+        int want = Math.min(baseHeight + Math.max(0, stackPixels - 40), max);
+        if (frame.getHeight() != want) {
+            frame.setSize(frame.getWidth(), want);
+        }
+        split.setDividerLocation(baseDivider + Math.max(0, stackPixels - 40));
     }
 
     private void addTab(String name, Tab tab) {
