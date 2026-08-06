@@ -127,6 +127,22 @@ public final class Cli {
                             + "seedCount count low-48 seeds, and each is searched at n "
                             + "different upper-16 values rather than consecutively.",
                     ReverseSearcher::main),
+            new Command("crosschunk",
+                    "[seeds] [threads] [minPerSide]",
+                    "Measure whether two neighbouring chunks can build one stack between "
+                            + "them. A placement lands at chunk-relative x -4..19, so a chunk "
+                            + "can put cane four blocks over its border; if one stacks into "
+                            + "the neighbour and the neighbour stacks on top, the run is the "
+                            + "sum, and the RNG requirement is two ordinary chains instead of "
+                            + "one extraordinary one. Measures rather than searches: it is "
+                            + "worth a pipeline only if it reaches a height meaningfully more "
+                            + "often than one chunk does, which is a number. Note the shared "
+                            + "block must be in the eight-wide strip both chunks can reach, "
+                            + "and the second chain must start exactly where the first stops. "
+                            + "Placement order is assumed, not checked -- the first chunk has "
+                            + "to have decorated first, which depends on how the world was "
+                            + "explored, so a cross-chunk result is a lead and not a find.",
+                    CrossChunk::main),
             new Command("merge",
                     "<out> <in...>",
                     "Pool target sets built on different machines into one. A set never "

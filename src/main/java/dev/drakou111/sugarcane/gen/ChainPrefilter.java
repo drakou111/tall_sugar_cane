@@ -177,6 +177,7 @@ public final class ChainPrefilter {
     private boolean chainOverflow;
     private final int[] path = new int[8];
     private final int[] packY = new int[8];
+    private final int[] packH = new int[8];
     /** 576 bits: which (x, z) an invocation's earlier tries already claimed. */
     private final long[] seenXZ = new long[9];
     private int wantedHeight;
@@ -577,11 +578,12 @@ public final class ChainPrefilter {
         int maxShift = 0;
         for (int i = 0; i < columns; i++) {
             packY[i] = cy[path[i]];
+            packH[i] = ch[path[i]];
             if (cs[path[i]] > maxShift) {
                 maxShift = cs[path[i]];
             }
         }
-        return pack(x, z, columns, packY, cs[path[0]], maxShift);
+        return pack(x, z, columns, packY, cs[path[0]], maxShift, packH);
     }
 
     /**
@@ -592,13 +594,41 @@ public final class ChainPrefilter {
      * and hoping. It is checked directly instead.
      */
     static long pack(int x, int z, int columns, int[] ys, int baseShift, int maxShift) {
+        return pack(x, z, columns, ys, baseShift, maxShift, null);
+    }
+
+    /**
+     * @param heights per-column heights, 2..4, or null to leave them out. Two bits each at
+     *                bits 54..63, which is the last of the long. Without them a chain says
+     *                where it starts but not where it ends, and the cross-chunk search needs
+     *                the top: a stack continuing in the neighbouring chunk has to begin
+     *                exactly where this one stops.
+     */
+    static long pack(int x, int z, int columns, int[] ys, int baseShift, int maxShift,
+            int[] heights) {
         long packed = (long) (x + 4) | (long) (z + 4) << 5 | (long) columns << 10;
         for (int i = 0; i < columns; i++) {
             packed |= (long) ys[i] << (13 + 7 * i);
         }
         packed |= (long) baseShift << 48;
         packed |= (long) maxShift << 51;
+        if (heights != null) {
+            for (int i = 0; i < columns && i < 5; i++) {
+                packed |= (long) ((heights[i] - 2) & 3) << (54 + 2 * i);
+            }
+        }
         return packed;
+    }
+
+    /** Height of column {@code i}, 2..4. Only meaningful on a chain packed with them. */
+    public static int chainHeight(long chain, int i) {
+        return (int) (chain >>> (54 + 2 * i) & 3) + 2;
+    }
+
+    /** One past the top block of the chain: where a continuation would have to start. */
+    public static int chainTop(long chain) {
+        int columns = chainColumns(chain);
+        return chainBaseY(chain, columns - 1) + chainHeight(chain, columns - 1);
     }
 
     public static int chainX(long chain) {

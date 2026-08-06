@@ -3304,3 +3304,46 @@ on another needs no vertical extent, and the confirmed 5-tall is cave-carved.
 `--all-carvers` forces caves back at any height and `--ravines-only` forces them out below 8,
 so both directions are reachable. `ReversePipelineTest` pins the confirmed 8-tall against the
 ravine-only path.
+
+## 6aw. Cross-chunk stacking: 1.25x at height 8-11, nothing at 12 and above
+
+A placement lands at chunk-relative x -4..19, so a chunk can put cane four blocks over its
+own border. If one chunk stacks into its neighbour's territory and the neighbour then stacks
+on top, the run is the sum -- two ordinary chains instead of one extraordinary one. Worth
+measuring, because that is a much weaker RNG demand than a single chunk doing all of it.
+
+`crosschunk` measures it. Over 20M chunk pairs:
+
+| height | one chunk | two chunks |
+|---|---|---|
+| >= 14 | 5.000e-08 | 5.000e-08 |
+| >= 13 | 1.000e-07 | 1.000e-07 |
+| >= 12 | 8.000e-07 | 8.000e-07 |
+| >= 11 | 5.450e-06 | 7.000e-06 |
+| >= 10 | 2.855e-05 | 3.660e-05 |
+| >= 9 | 9.530e-05 | 1.182e-04 |
+| >= 8 | 7.882e-03 | 9.505e-03 |
+
+About **1.25x at heights 8 to 11, and exactly nothing at 12 and above**. The tallest
+combination seen in 20M pairs was 11.
+
+### Why it stops helping exactly where it would matter
+
+Combining costs an alignment. The two chains must share x, share z, and the second must start
+at precisely the block the first stops on -- roughly 1 in 24 x 24 x 54, about 3e-5. So joining
+two 6s into a 12 costs P(6)^2 x 3e-5 = 6.5e-7, against P(12) = 8e-7 for one chunk doing it
+alone. A wash at 12, and worse above, because a single chunk can already use four or five
+columns and pays no alignment penalty at all.
+
+The gain at 8-11 is real but it is the region where single-chunk chains are already common.
+
+### Caveats, both of which make it look better than it is
+
+Only one neighbour is sampled (cx+1); a real chunk has four, so the rate could be a few times
+higher -- but the 12+ column stays empty either way, since the alignment penalty is structural
+rather than a constant. And placement order is assumed: the first chunk has to have decorated
+before the second, which depends on how the world was explored. Only one of the two orders
+works, so halve whatever the four-neighbour figure turns out to be.
+
+That is also why `SisterScan` calls these "not verifiable" -- a cross-chunk result is a lead,
+not a find.
