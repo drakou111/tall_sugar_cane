@@ -202,18 +202,34 @@ __device__ void deriveSlot(Chains<SC> &c, int slot, int absN) {
         int originX = bounded(c.window[shift], 16);
         int originZ = bounded(c.window[shift + 1], 16);
         unsigned long long mask = 0ULL;
+        // Only the FIRST try landing on a position can be the column there. All twenty
+        // tries share a y, so a repeat is the same block; a chain needs terrain to permit
+        // placement at that block, so the earlier try placed and the later one finds cane
+        // instead of air. Later duplicates are made inert rather than skipped, because the
+        // slots are fixed -- an unmatched key and a zero height keep them out of every
+        // chain without moving anything after them.
+        unsigned long long seen[9];
+        for (int w = 0; w < 9; w++) {
+            seen[w] = 0ULL;
+        }
         for (int t = 0; t < TRIES; t++) {
             int off = shift + 3 + t * DRAWS_PER_TRY;
             int after = off + DRAWS_PER_TRY;
             int k = base + t;
-            c.xz[k] = packXZ(originX + bounded(c.window[off], 5)
+            unsigned short key = packXZ(originX + bounded(c.window[off], 5)
                             - bounded(c.window[off + 1], 5),
                     originZ + bounded(c.window[off + 4], 5)
                             - bounded(c.window[off + 5], 5));
-            mask |= xzBit(c.xz[k]);
+            bool repeat = (seen[key >> 6] & (1ULL << (key & 63))) != 0ULL;
+            seen[key >> 6] |= 1ULL << (key & 63);
+            c.xz[k] = repeat ? (unsigned short) 0xFFFFu : key;
+            if (!repeat) {
+                mask |= xzBit(key);
+            }
             c.y[k] = (unsigned char) y;
-            c.h[k] = (unsigned char) (2 + bounded(c.window[after + 1],
-                    bounded(c.window[after], 3) + 1));
+            c.h[k] = repeat ? (unsigned char) 0
+                    : (unsigned char) (2 + bounded(c.window[after + 1],
+                            bounded(c.window[after], 3) + 1));
             c.n[k] = (unsigned char) absN;
             c.s[k] = (unsigned char) shiftIndex;
         }

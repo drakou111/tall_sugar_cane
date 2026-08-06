@@ -233,9 +233,14 @@ class ReversePipelineTest {
 
     /**
      * The chain filter must not be so loose that it accepts everything, or the reverse
-     * search degenerates into the box scan with extra steps. q at height 8 is 3.4%
-     * over the whole column and 1.57% with the default depth band, whose whole purpose
-     * is to halve it — the search's gain is 1/q, so a drift here is a silent slowdown.
+     * search degenerates into the box scan with extra steps. The search's gain is 1/q, so
+     * a drift here is a silent slowdown.
+     *
+     * <p>q(>=8) is 0.41% with the default depth band. It was 1.57% until the filter learned
+     * that only the first try landing on a position can be the column there -- a 3.8x
+     * tightening that costs no coverage, since the chains it removed needed a placement the
+     * game would already have made. Both confirmed finds still pass, which is what the
+     * guards above check; this one only watches the rate.
      */
     @Test
     void heightEightIsSelective() {
@@ -253,8 +258,8 @@ class ReversePipelineTest {
         }
         double q = (double) accepted / trials;
         System.out.printf("ChainPrefilter q(>=8) = %.4f over %d seeds%n", q, trials);
-        assertTrue(q > 0.005 && q < 0.05,
-                "q(>=8) drifted to " + q + "; the measured value is 0.0157 with the "
+        assertTrue(q > 0.002 && q < 0.02,
+                "q(>=8) drifted to " + q + "; the measured value is 0.0041 with the "
                         + "default depth band and the reverse search's whole gain is 1/q");
     }
 }

@@ -36,7 +36,13 @@ public final class TargetCache {
 
     private static final int MAGIC = 0x54475431;   // "TGT1"
     /**
-     * 4: chains carry a slack budget -- how many foreign placements may land between
+     * 5: within an invocation, only the first try landing on a position can be the column
+     * there. A version 4 file was built when any of the twenty could be, which accepts
+     * chains a real chunk would have preempted -- 26% of the set at height 8, measured
+     * against an independent scanner (FINDINGS 6aq). Not a coverage trade, so the older
+     * file is not a wider set, just a wrong one.
+     *
+     * <p>4: chains carry a slack budget -- how many foreign placements may land between
      * their own columns. The default is 0, the contiguous window, which keeps 40% of the
      * set for 87.9% of real finds (FINDINGS 6ao). A version 3 file was built with no
      * budget at all, so it is a different set and cannot be extended into this one.
@@ -47,7 +53,7 @@ public final class TargetCache {
      * placed. They are not wrong to search, only wasted, and the file no longer means what
      * its header says — so it is rejected rather than silently reused.
      */
-    private static final int VERSION = 4;
+    private static final int VERSION = 5;
 
     /** Everything that changes what membership means. Loading checks all of it. */
     public record Header(int minHeight, int count, int featureIndex,
