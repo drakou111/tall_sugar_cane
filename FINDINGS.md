@@ -3725,3 +3725,59 @@ property of how the world was explored rather than of the seed. Everything else 
 verified: both chains exist, they meet at one block, the world seed places both chunks, both are
 cane-bearing ocean, every column base of both is inside an air carve, and chunk A has soil under
 its bottom column. These are leads, and they want confirming in game before they are finds.
+
+## 6bf: the cross-chunk "finds" were prefilter survivors, and the terrain never supported them
+
+6be reported 41 sixteens and a seventeen from 1e8 seeds. **None of them were real.** Generating
+the terrain for all 41: 8 chunks were never built, and of the 33 that were, the tallest cane
+actually grown at the join column was **0**. Same at height 10 over 4M seeds: 184 candidates,
+154 generated, 0 cane.
+
+### The mistake
+
+`ReverseSearcher` uses `AirCarveProbe` as a cheap gate and then calls `searchOneChunk` -- full
+generation -- and only that is a hit. `crossfind` printed FIND for anything that passed the
+probe and never generated anything. The probe was answering its own question correctly; it was
+being asked to be the last word instead of the first.
+
+The control matters here, because a verifier that has only ever said "no" is indistinguishable
+from a broken one: run against the in-game-confirmed 8-tall, the same calls return 8.
+
+### Why it fails systematically rather than occasionally
+
+Probe against generated world, same column, y=10..69:
+
+```
+failing candidate : probe says carved 31, actually air  7, overlap 0
+confirmed 8-tall  : probe says carved 10, actually air 10, overlap 3 (the rest is cane)
+```
+
+Zero overlap. The probe's carver stub replaces anything, but the real `canReplaceBlock` will not
+replace water, so above the ocean floor the genuine carve does nothing at all while the probe
+happily carves the whole water column. `ReverseSearcher` never sees this because its chains are
+depth-banded to the floor. **A cross-chunk join is high by construction** -- chunk A's cane has
+to reach up before chunk B can stand on it -- so cross-chunk candidates land precisely in the
+region where the probe is wrong.
+
+`crossfind` also skipped the soil check on exactly the wrong chains. Soil is only tested for
+relative x in 0..15, and the join geometry forces one of the two chains to sit at relative x
+12..19 or -4..3, i.e. outside its own chunk. So the chain that most needed checking was the one
+waved through.
+
+### What this does to 6be's claim
+
+The 1,400x stands for the **RNG** and nothing else. Cross-chunk buys two ordinary chains instead
+of one extraordinary one, and that part is real and verified. It buys nothing on terrain: the
+base of every column still has to be AIR (`canReplace` is false for this feature, so water will
+not do), which means the whole run -- both chunks' worth -- must sit inside one tall carved air
+pocket under the ocean. That is the same air pocket a single-chunk 16 would need.
+
+So the binding constraint was never the RNG. Making the RNG 1,400x cheaper moved the bottleneck
+entirely onto terrain, and left it exactly where it was.
+
+### Now
+
+`crossfind` generates the terrain for every candidate and reports only what actually grew.
+Candidates are counted separately from confirmations, and chunks that were never built are
+counted separately again -- "grew no cane" and "was never generated" look identical if you only
+count cane, and the difference is whether the candidate is wrong or the check is.

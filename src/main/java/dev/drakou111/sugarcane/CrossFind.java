@@ -104,6 +104,21 @@ public final class CrossFind {
         return new ChainPrefilter(SugarCaneFeature.COUNT_DEFAULT, 11, 64, 3, 4);
     }
 
+    /**
+     * A pair that survived the RNG and the carve probe, awaiting real terrain.
+     *
+     * <p>Kept rather than printed. The probe answers "did a carver's walk reach this block",
+     * which every stack needs and no stack is proved by: the first batch this command printed
+     * as finds turned out to be solid stone at the base, with no ravine and no water anywhere
+     * near. Only generating the chunks settles it.
+     */
+    private record Candidate(long ws, int cxa, int cza, int cxb, int czb, int px, int pz,
+            int baseY, int joinY, int runA, int runB, int predicted) {
+    }
+
+    private static final java.util.List<Candidate> CANDIDATES =
+            java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+
     /** Growable (key, seed) pairs, per thread, so collection never synchronises. */
     private static final class Hits {
         int[] keys = new int[1024];
@@ -369,11 +384,11 @@ public final class CrossFind {
                 long ms = System.currentTimeMillis() - pass2Start;
                 System.out.printf("[%4.1f min] %d seeds streamed (%.0f/s), joins %d, "
                                 + "world seeds solved %d, in border %d, ocean %d, "
-                                + "past carve %d, FINDS %d%n",
+                                + "past carve %d (candidates, terrain not generated yet)%n",
                         ms / 60000.0, streamed.get(),
                         streamed.get() * 1000.0 / Math.max(1, ms), joins.get(),
                         solvedSeeds.get(), inBorder.get(), oceanPairs.get(),
-                        carved.get(), found.get());
+                        carved.get());
                 System.out.flush();
             }
         }, "crossfind-progress");
@@ -385,6 +400,8 @@ public final class CrossFind {
         }
         progress.interrupt();
 
+        verify(found);
+
         double secs = (System.currentTimeMillis() - start) / 1000.0;
         System.out.printf("%ndone in %.1f s%n", secs);
         System.out.printf("  chains stored           : %d%n", total);
@@ -392,12 +409,101 @@ public final class CrossFind {
         System.out.printf("  world seeds solved      : %d%n", solvedSeeds.get());
         System.out.printf("  pairs inside the border : %d%n", inBorder.get());
         System.out.printf("  both chunks cane ocean  : %d%n", oceanPairs.get());
-        System.out.printf("  every base carved       : %d%n", carved.get());
-        System.out.printf("  FINDS                   : %d%n", found.get());
+        System.out.printf("  past the carve probe    : %d%n", carved.get());
+        System.out.printf("  CONFIRMED IN TERRAIN    : %d%n", found.get());
         if (joins.get() == 0) {
             System.out.println("  no pair of chains ever met at a block -- more seeds, or a "
                     + "split whose two halves are both reachable");
         }
+    }
+
+    /**
+     * Generate the terrain for each candidate and see what actually grows.
+     *
+     * <p>This is the step {@code ReverseSearcher} has always had and this command shipped
+     * without: there, the carve probe is a cheap gate and {@code searchOneChunk} decides. Here
+     * everything that passed the probe was printed as a find, and the first four checked were
+     * solid stone at the base -- no ravine, no water, no cane. The probe was doing its job; it
+     * was being asked the wrong question.
+     *
+     * <p>{@code searchOneChunk} builds the 3x3 around chunk A, which contains chunk B, and
+     * decorates every searchable chunk in it. So the world it leaves behind already models
+     * whatever cross-chunk stacking the simulator believes in, and the honest measurement is
+     * simply the tallest cane run standing at the join column afterwards.
+     *
+     * <p>Serial, because the region searcher keeps state in statics and because a candidate
+     * that survives the probe is rare enough that generating a few thousand regions costs less
+     * than the scan that produced them.
+     */
+    private static void verify(AtomicLong found) {
+        java.util.List<Candidate> pending;
+        synchronized (CANDIDATES) {
+            pending = new java.util.ArrayList<>(CANDIDATES);
+        }
+        if (pending.isEmpty()) {
+            return;
+        }
+        System.out.printf("%ngenerating terrain for %d candidates...%n", pending.size());
+
+        int best = 0;
+        int ungenerated = 0;
+        for (Candidate c : pending) {
+            RegionSearcher.Stats stats = new RegionSearcher.Stats();
+            RegionSearcher.Worker worker =
+                    new RegionSearcher.Worker(999, false, 0, stats, 0);
+            int grown;
+            try {
+                worker.prepare(c.ws);
+                worker.searchOneChunk(c.cxa, c.cza);
+                // y=200 is air in every chunk that was actually built, so SOLID there means
+                // nothing was generated -- a filter skipped the chunk, or it fell outside the
+                // window. That is indistinguishable from "grew no cane" if you only count
+                // cane, and it is the difference between a candidate being wrong and the
+                // check being wrong.
+                if (worker.world.getBlock(c.px, 200, c.pz)
+                        == dev.drakou111.sugarcane.world.Blocks.SOLID) {
+                    ungenerated++;
+                    continue;
+                }
+                grown = tallestAt(worker.world, c.px, c.pz);
+            } catch (RuntimeException e) {
+                System.out.printf("  seed %d at %d,%d: generation failed (%s)%n",
+                        c.ws, c.px, c.pz, e);
+                continue;
+            }
+            best = Math.max(best, grown);
+            if (grown < c.predicted) {
+                continue;       // the RNG wanted it; the world did not provide
+            }
+            found.incrementAndGet();
+            System.out.printf("%nCONFIRMED height %d at %d,%d,%d%n",
+                    grown, c.px, c.baseY, c.pz);
+            System.out.printf("  world seed %d%n", c.ws);
+            System.out.printf("  chunk A %d,%d gives %d, chunk B %d,%d adds %d from y=%d%n",
+                    c.cxa, c.cza, c.runA, c.cxb, c.czb, c.runB, c.joinY);
+            System.out.println("  the simulator grew this from generated terrain, so the only "
+                    + "thing left unchecked is decoration order in your world");
+            System.out.flush();
+        }
+        if (ungenerated > 0) {
+            System.out.printf("  %d of %d were never generated at all (a filter skipped the "
+                    + "chunk), so they were neither confirmed nor refuted%n",
+                    ungenerated, pending.size());
+        }
+        if (found.get() == 0) {
+            System.out.printf("  none survived generation; of the %d that DID generate, the "
+                    + "tallest cane actually grown was %d%n",
+                    pending.size() - ungenerated, best);
+        }
+    }
+
+    /** The tallest contiguous cane run standing anywhere in this column. */
+    private static int tallestAt(dev.drakou111.sugarcane.world.ArrayWorld world, int x, int z) {
+        int best = 0;
+        for (int y = 1; y < Y; y++) {
+            best = Math.max(best, world.caneHeightAt(x, y, z));
+        }
+        return best;
     }
 
     /**
@@ -479,19 +585,15 @@ public final class CrossFind {
                         continue;
                     }
                     carved.incrementAndGet();
-                    found.incrementAndGet();
                     int height = runOf(ca) + runOf(cb);
-                    synchronized (CrossFind.class) {
-                        System.out.printf("%nFIND height %d at %d,%d,%d%n",
-                                height, px, ChainPrefilter.chainBaseY(ca, 0), pz);
-                        System.out.printf("  world seed %d (low 48 bits; the top 16 do not "
-                                + "affect decoration and only shift the biome map)%n", ws);
-                        System.out.printf("  chunk A %d,%d gives %d, chunk B %d,%d adds %d "
-                                        + "starting at y=%d%n",
-                                cxa, cza, runOf(ca), cxb, czb, runOf(cb), top);
-                        System.out.println("  decoration order is assumed, not checked: A has "
-                                + "to have decorated before B");
-                        System.out.flush();
+                    // NOT a find. The carve probe only says a carver's walk reached these
+                    // blocks, which is a necessary condition and nothing more -- the finished
+                    // world can still be solid stone there, and was for the first batch this
+                    // command printed. Real terrain decides, in verify() below.
+                    synchronized (CANDIDATES) {
+                        CANDIDATES.add(new Candidate(ws, cxa, cza, cxb, czb, px, pz,
+                                ChainPrefilter.chainBaseY(ca, 0), top, runOf(ca), runOf(cb),
+                                height));
                     }
                 }
             }
