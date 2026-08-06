@@ -60,8 +60,10 @@ public final class SpotSearch {
             return;
         }
 
+        // Named, not positional: the command takes relX relZ baseY but a bare "3,21,10"
+        // reads as x,z,y to anyone who has just typed it in that order.
         System.out.printf("decoration seeds growing a %d-tall stack at chunk-relative "
-                + "%d,%d,%d%n", height, wantX, wantY, wantZ);
+                + "x=%d z=%d baseY=%d%n", height, wantX, wantZ, wantY);
         System.out.printf("  %d threads, %s seeds%n", threads,
                 seeds == Long.MAX_VALUE ? "no limit" : Long.toString(seeds));
         // The band is what makes the ordinary search selective, and it would reject the
@@ -69,6 +71,7 @@ public final class SpotSearch {
         // position, so the band has nothing left to decide.
         System.out.println("  depth band ignored -- you named the y, so it is the band");
 
+        final java.util.Set<Long> seen = java.util.concurrent.ConcurrentHashMap.newKeySet();
         AtomicLong tested = new AtomicLong();
         AtomicLong found = new AtomicLong();
         AtomicLong next = new AtomicLong();
@@ -82,6 +85,8 @@ public final class SpotSearch {
                 // narrowing anything else would only lose seeds that would have worked.
                 ChainPrefilter filter = new ChainPrefilter(SugarCaneFeature.COUNT_DEFAULT,
                         11, 64, 3, 4);
+                // Shared, because the scan walks orbit neighbours: without it every member
+                // of a family would print the whole family again as the walk reaches it.
                 for (long run = next.getAndIncrement(); run * OrbitSampler.RUN < limit;
                         run = next.getAndIncrement()) {
                     long ds = OrbitSampler.runStart(run);
@@ -97,8 +102,8 @@ public final class SpotSearch {
                                     || ChainPrefilter.chainBaseY(chain, 0) != wantY) {
                                 continue;
                             }
-                            report(ds, chain);
-                            found.incrementAndGet();
+                            found.addAndGet(reportFamily(filter, ds, chain,
+                                    wantX, wantZ, wantY, height, seen));
                             break;
                         }
                         tested.incrementAndGet();
@@ -135,6 +140,92 @@ public final class SpotSearch {
         System.out.printf("%n%d seeds tested in %.1f s, %d found (%.3e)%n",
                 tested.get(), secs, found.get(),
                 found.get() / (double) Math.max(1, tested.get()));
+    }
+
+    /**
+     * A hit and its orbit family, together.
+     *
+     * <p>Sliding a stream by whole invocations moves a chain's invocation indices without
+     * touching its geometry, so a brother builds at the <em>same block</em> -- same x, same z,
+     * same base y, same heights. For a spot query that makes every brother an answer to the
+     * same question, and each is a different decoration seed, so each is a separate chance for
+     * the lattice to land it somewhere real.
+     *
+     * <p>The scan already walks orbit neighbours, so it was finding these and printing them as
+     * if unrelated. Grouping them says what they are, and expanding explicitly also catches the
+     * ones that fall across a run boundary and would otherwise be missed.
+     *
+     * <p>Both directions: {@code shift} drops the earliest invocation and {@code unshift}
+     * prepends one, so a chain occupying invocations [a..b] survives a of the first and
+     * count-1-b of the second. Which direction pays depends on where in the stream the chain
+     * happens to sit.
+     *
+     * @return how many were reported, or 0 if this family has already been printed
+     */
+    private static int reportFamily(ChainPrefilter filter, long ds, long chain,
+            int wantX, int wantZ, int wantY, int height,
+            java.util.Set<Long> seen) {
+        if (!seen.add(ds)) {
+            return 0;
+        }
+        java.util.List<long[]> family = new java.util.ArrayList<>();
+        family.add(new long[]{0, ds, chain});
+        for (int dir = 0; dir < 2; dir++) {
+            long s = ds;
+            for (int j = 1; j < SugarCaneFeature.COUNT_DEFAULT; j++) {
+                s = dir == 0
+                        ? OrbitSampler.unshift(s, OCEAN_INDEX, SugarCaneFeature.VEGETAL_DECORATION)
+                        : OrbitSampler.shift(s, OCEAN_INDEX, SugarCaneFeature.VEGETAL_DECORATION);
+                long match = chainAt(filter, s, wantX, wantZ, wantY, height);
+                if (match == 0) {
+                    break;      // the chain has slid off this end; it will not come back
+                }
+                seen.add(s);
+                family.add(new long[]{dir == 0 ? -j : j, s, match});
+            }
+        }
+        family.sort((p, q) -> Long.compare(p[0], q[0]));
+        printFamily(family);
+        return family.size();
+    }
+
+    /** The chain at exactly this spot, or 0. */
+    private static long chainAt(ChainPrefilter filter, long ds, int wantX, int wantZ,
+            int wantY, int height) {
+        int chains = filter.collectChains(ds, OCEAN_INDEX, height);
+        if (filter.chainsOverflowed()) {
+            return 0;
+        }
+        for (int i = 0; i < chains; i++) {
+            long c = filter.chain(i);
+            if (ChainPrefilter.chainX(c) == wantX && ChainPrefilter.chainZ(c) == wantZ
+                    && ChainPrefilter.chainBaseY(c, 0) == wantY) {
+                return c;
+            }
+        }
+        return 0;
+    }
+
+    private static synchronized void printFamily(java.util.List<long[]> family) {
+        long[] first = family.get(0);
+        System.out.printf("FAMILY of %d, all building the same block:%n", family.size());
+        for (long[] member : family) {
+            System.out.printf("  %+3d  SEED %-18d %s%n",
+                    (int) member[0], member[1], describe(member[2]));
+        }
+        System.out.flush();
+    }
+
+    private static String describe(long chain) {
+        int columns = ChainPrefilter.chainColumns(chain);
+        StringBuilder sb = new StringBuilder();
+        int total = 0;
+        for (int i = 0; i < columns; i++) {
+            sb.append(ChainPrefilter.chainBaseY(chain, i))
+                    .append('+').append(ChainPrefilter.chainHeight(chain, i)).append(' ');
+            total += ChainPrefilter.chainHeight(chain, i);
+        }
+        return String.format("height %d, %d columns, bases %s", total, columns, sb);
     }
 
     private static synchronized void report(long decorationSeed, long chain) {

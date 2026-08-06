@@ -1,4 +1,4 @@
-# v2.3.0 — the filter was accepting the impossible, and the kernel was starving
+# v2.3.0
 
 **Your target files stop loading again.** `TargetCache` is version 5. A version 4 file is not
 outdated, it is wrong: three quarters of it is chains no chunk could ever place. Rebuild.
@@ -84,7 +84,10 @@ scaling     3.0x   -> 8.8x
 ## New commands
 
 - **`spot <relX> <relZ> <baseY> <height>`** — decoration seeds that grow a stack at one *named*
-  block instead of anywhere. For when you already have a block you like and want the seeds that
+  block instead of anywhere. Hits come out as **orbit families**: sliding a stream by whole
+  invocations moves a chain's indices without touching its geometry, so a brother builds at the
+  same block, and each is a separate decoration seed for the lattice to place. Families of 4 and
+  7 are typical. For when you already have a block you like and want the seeds that
   build there, rather than a seed that builds somewhere and a hunt for terrain to suit it. No
   world seed and no lattice; turning a decoration seed into coordinates is what `reverse`
   already does. Roughly 1,300x rarer than the ordinary question, and every hit is already
