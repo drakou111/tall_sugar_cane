@@ -126,7 +126,26 @@ public final class CrossFind {
         }
     }
 
-    public static void main(String[] args) throws Exception {
+    /**
+     * The arguments that are not flags, in order.
+     *
+     * <p>Positionals are read by index, so a flag sitting among them shifts everything after
+     * it. The GUI always passes {@code --dx} and {@code --dz}, which put {@code --dx=1} exactly
+     * where {@code minA} is read — every GUI run died on it while every command line that
+     * omitted the flags worked, which is why the smoke tests never saw it.
+     */
+    static String[] positional(String[] args) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        for (String arg : args) {
+            if (!arg.startsWith("--")) {
+                out.add(arg);
+            }
+        }
+        return out.toArray(new String[0]);
+    }
+
+    public static void main(String[] rawArgs) throws Exception {
+        String[] args = positional(rawArgs);
         long seeds = args.length > 0 ? Long.parseLong(args[0]) : 1_000_000_000L;
         int threads = Cli.clampThreads(args.length > 1 ? Integer.parseInt(args[1])
                 : Runtime.getRuntime().availableProcessors());
@@ -143,7 +162,7 @@ public final class CrossFind {
         }
         int dx = 1, dz = 0, maxStore = DEFAULT_MAX_STORE;
         boolean water = false;
-        for (String arg : args) {
+        for (String arg : rawArgs) {
             if (arg.startsWith("--dx=")) {
                 dx = Integer.parseInt(arg.substring(5));
             } else if (arg.startsWith("--dz=")) {

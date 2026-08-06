@@ -113,6 +113,30 @@ class CrossFindTest {
                 + "cross-chunk find at all");
     }
 
+    /**
+     * Flags must not shift the positional arguments. The GUI always passes --dx and --dz, so
+     * before this every GUI run died with NumberFormatException on "--dx=1" being read as minA,
+     * while every command line that left the flags off worked -- which is exactly why the smoke
+     * tests missed it.
+     */
+    @Test
+    void flagsDoNotDisplaceThePositionalArguments() {
+        String[] fromTheGui = {"10000000000", "12", "20", "--dx=1", "--dz=0"};
+        String[] positional = CrossFind.positional(fromTheGui);
+        assertEquals(3, positional.length,
+                "flags leaked into the positionals: " + String.join(" ", positional));
+        assertEquals("10000000000", positional[0]);
+        assertEquals("12", positional[1]);
+        assertEquals("20", positional[2]);
+
+        // With minA and minB given as well, they must still land in slots 3 and 4.
+        String[] withSplit = {"1000", "4", "20", "8", "12", "--dx=1", "--dz=0", "--water-probe"};
+        String[] both = CrossFind.positional(withSplit);
+        assertEquals(5, both.length);
+        assertEquals("8", both[3]);
+        assertEquals("12", both[4]);
+    }
+
     /** {@code bestSplit} has to prefer the cliff-aligned split, which is the tuning that matters. */
     @Test
     void twentySplitsTwelveAndEight() {
