@@ -95,8 +95,11 @@ scaling     3.0x   -> 8.8x
 - **`merge <out> <in...>`** pools target sets built on different machines. Deduplicates, refuses
   sets that answer different questions, and reports the per-bucket spread.
 - **`crosschunk`** measures whether two neighbouring chunks can build one stack between them.
-  They can: about **1.25x at heights 8 to 11 and nothing at 12 and above**, because joining
-  costs an exact alignment. Measured so nobody has to spend an afternoon finding out.
+  They can, and it reaches heights one chunk cannot: over 100M pairs it produced a **14** in a
+  sample where a single chunk produced neither 13 nor 14. The structural point needs no
+  statistics — shifts must strictly increase, so one chunk is capped at four columns of 4 (16),
+  or five with a fifth shift level (20). **Above 20 a single chunk cannot do it at all**, and
+  two is the only route. Placement order is still assumed, so these are leads, not finds.
 
 ## Also
 

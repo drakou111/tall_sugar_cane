@@ -2,7 +2,6 @@ package dev.drakou111.sugarcane;
 
 import dev.drakou111.sugarcane.gen.ChainPrefilter;
 import dev.drakou111.sugarcane.gen.SugarCaneFeature;
-import dev.drakou111.sugarcane.rng.DecorationLattice;
 
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
@@ -61,40 +60,83 @@ public final class CrossChunk {
         long start = System.currentTimeMillis();
         for (int t = 0; t < threads; t++) {
             pool[t] = new Thread(() -> {
+                // A's chain stands on real soil, so the depth band applies to it.
                 ChainPrefilter a = new ChainPrefilter(SugarCaneFeature.COUNT_DEFAULT);
-                ChainPrefilter b = new ChainPrefilter(SugarCaneFeature.COUNT_DEFAULT);
+                // B's stands on A's CANE. The band exists because a base needs soil the
+                // terrain actually put there; a column landing on cane needs nothing of the
+                // sort, so B gets the whole legal column. Enumerating B with the band was
+                // the flaw in the first version of this measurement: a join above y=35 was
+                // invisible, and for tall combinations the join is necessarily high -- an
+                // 8-tall A from y=25 tops out at 33, a 12-tall from 25 at 37. It excluded
+                // exactly the case worth asking about.
+                ChainPrefilter b = new ChainPrefilter(SugarCaneFeature.COUNT_DEFAULT,
+                        11, 64, 3, 4);
                 for (long i = next.getAndIncrement(); i < seeds; i = next.getAndIncrement()) {
-                    long worldSeed = mix(i);
-                    DecorationLattice lattice = new DecorationLattice(worldSeed);
-                    int cx = (int) (mix(i ^ 0x9E37L) % 1000) - 500;
-                    int cz = (int) (mix(i ^ 0x1234L) % 1000) - 500;
-                    long dsA = lattice.decorationSeedOf(cx, cz);
-                    long dsB = lattice.decorationSeedOf(cx + 1, cz);
-
+                    // Decoration seeds sampled directly rather than through a world seed
+                    // and a lattice. Two adjacent chunks have decoration seeds related by
+                    // D' = ((D ^ ws) + 16a) ^ ws, which for a random world seed is no more
+                    // predictable from D than an independent draw -- and this is a rate
+                    // measurement, so what matters is the joint distribution, not that a
+                    // particular pair is genuinely adjacent. Building a lattice per pair was
+                    // most of the run time and bought nothing.
+                    long dsA = mix(i) & ((1L << 48) - 1);
                     int soloA = a.tallestPossible(dsA, OCEAN_INDEX);
-                    int soloB = b.tallestPossible(dsB, OCEAN_INDEX);
-                    int solo = Math.max(soloA, soloB);
+                    int solo = soloA;
+                    int best = soloA;
                     single.incrementAndGet(Math.min(solo, 63));
 
-                    int best = solo;
+                    // minPart is what each side must contribute, and it matters more than it
+                    // looks: collectChains records the SHORTEST chain reaching it, so
+                    // minPart=4 makes every chain a single column and no combination can
+                    // exceed 8. Asking about 16 means asking each side for 8.
                     int na = a.collectChains(dsA, OCEAN_INDEX, minPart);
-                    int nb = b.collectChains(dsB, OCEAN_INDEX, minPart);
-                    if (!a.chainsOverflowed() && !b.chainsOverflowed()) {
+                    boolean aOk = !a.chainsOverflowed();
+
+                    // Nothing of A's reaches a strip a neighbour could continue from, so no
+                    // neighbour can help. Skipping here is most of the run time, since the
+                    // four neighbours are eight more filter evaluations and this is false
+                    // almost always.
+                    boolean anyInStrip = false;
+                    for (int ia = 0; ia < na && aOk && !anyInStrip; ia++) {
+                        int ax = ChainPrefilter.chainX(a.chain(ia));
+                        int az = ChainPrefilter.chainZ(a.chain(ia));
+                        anyInStrip = ax >= 12 || ax <= 3 || az >= 12 || az <= 3;
+                    }
+                    if (!anyInStrip) {
+                        joined.incrementAndGet(Math.min(best, 63));
+                        pairs.incrementAndGet();
+                        continue;
+                    }
+
+                    // All four orthogonal neighbours. The overhang is four blocks in every
+                    // direction, so each shares an eight-wide strip with this chunk, and a
+                    // chain can be continued from any of them.
+                    for (int dir = 0; dir < 4; dir++) {
+                        int nx = dir == 0 ? 1 : dir == 1 ? -1 : 0;
+                        int nz = dir == 2 ? 1 : dir == 3 ? -1 : 0;
+                        long dsB = mix(i ^ (0x9E3779B9L * (dir + 1))) & ((1L << 48) - 1);
+                        int nb = b.collectChains(dsB, OCEAN_INDEX, minPart);
+                        if (b.chainsOverflowed()) {
+                            continue;
+                        }
+                        int shiftX = nx * 16;
+                        int shiftZ = nz * 16;
                         for (int ia = 0; ia < na; ia++) {
                             long ca = a.chain(ia);
-                            // A's column, in B's coordinates. Only the eight-block strip
-                            // along the shared border is reachable from both.
                             int ax = ChainPrefilter.chainX(ca);
-                            int bx = ax - 16;
-                            if (bx < -4 || bx > 19 || ax < -4 || ax > 19) {
-                                continue;
+                            int az = ChainPrefilter.chainZ(ca);
+                            // The same world block, in the neighbour's frame.
+                            int bx = ax - shiftX;
+                            int bz = az - shiftZ;
+                            if (bx < -4 || bx > 19 || bz < -4 || bz > 19) {
+                                continue;   // outside the strip both can reach
                             }
                             int topA = ChainPrefilter.chainTop(ca);
                             int heightA = topA - ChainPrefilter.chainBaseY(ca, 0);
                             for (int ib = 0; ib < nb; ib++) {
                                 long cb = b.chain(ib);
                                 if (ChainPrefilter.chainX(cb) != bx
-                                        || ChainPrefilter.chainZ(cb) != ChainPrefilter.chainZ(ca)) {
+                                        || ChainPrefilter.chainZ(cb) != bz) {
                                     continue;
                                 }
                                 if (ChainPrefilter.chainBaseY(cb, 0) != topA) {

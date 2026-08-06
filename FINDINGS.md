@@ -3305,7 +3305,12 @@ on another needs no vertical extent, and the confirmed 5-tall is cave-carved.
 so both directions are reachable. `ReversePipelineTest` pins the confirmed 8-tall against the
 ravine-only path.
 
-## 6aw. Cross-chunk stacking: 1.25x at height 8-11, nothing at 12 and above
+## 6aw. Cross-chunk stacking: WRONG, superseded by 6ax
+
+**This section is wrong. 6ax has the corrected measurement.** Two flaws, both mine, and both
+suppressed exactly the case worth asking about. Left here because the reasoning about why
+alignment costs what it does is still right, and because a retracted measurement is worth
+more visible than deleted.
 
 A placement lands at chunk-relative x -4..19, so a chunk can put cane four blocks over its
 own border. If one chunk stacks into its neighbour's territory and the neighbour then stacks
@@ -3347,3 +3352,50 @@ works, so halve whatever the four-neighbour figure turns out to be.
 
 That is also why `SisterScan` calls these "not verifiable" -- a cross-chunk result is a lead,
 not a find.
+
+
+## 6ax. Cross-chunk, measured properly: it reaches heights one chunk cannot
+
+6aw concluded "nothing at 12 and above". That was an artefact of two mistakes.
+
+**The neighbour was enumerated with a depth band.** The band exists because a chain's base
+needs soil the terrain actually put there. The second chunk's chain stands on the first
+chunk's *cane*, so it needs nothing of the sort and the whole legal column is available.
+Restricting it to y 13..35 made any join above 35 invisible -- and for a tall combination the
+join is necessarily high. An 8-tall starting at y=25 tops out at 33; a 12-tall at 37.
+
+**And `minPart` capped the answer.** `collectChains` records the *shortest* chain reaching the
+height asked for, so `minPart=4` makes every chain a single column and no combination can
+exceed 8. The measurement could not have found a 12 whatever the data said.
+
+### Corrected
+
+Both fixed, all four neighbours walked, 100M pairs with each side contributing >= 6:
+
+| height | one chunk | two chunks |
+|---|---|---|
+| >= 14 | 0 | **1.0e-08** |
+| >= 13 | 0 | **1.0e-08** |
+| >= 12 | 3.30e-07 | 3.70e-07 |
+| >= 11 | 3.14e-06 | 3.18e-06 |
+
+**Cross-chunk reached 14 in a sample where one chunk reached neither 13 nor 14.** Against a
+separately measured single-chunk rate of 2e-9 at height 14, that is roughly 5x -- on one event
+each side, so the error bars are enormous and the direction is the only trustworthy part.
+
+At 16 there is still no positive evidence: 0 in 500M pairs with each side at 8. Single-chunk 16
+is under 3e-10 (0 targets in 5.02 billion seeds on the GPU), so the comparison is unresolved
+rather than settled -- both are below what 500M pairs can see.
+
+### The part that does not need statistics
+
+A single chunk is **capped**. Shifts must strictly increase, so four shift levels allow four
+columns and four columns of 4 is 16. Five levels allow five, so 20. There is no arrangement of
+one chunk's RNG that reaches 21.
+
+Two chunks are capped at twice that. So above 20 cross-chunk is not merely better, it is the
+only route, and the question stops being whether it pays and becomes whether the placement
+order can be relied on.
+
+That last part is still unresolved and still the reason these are leads rather than finds: the
+first chunk must have decorated before the second, which depends on how the world was explored.
