@@ -3110,3 +3110,35 @@ That is the same category as 6an: not a coverage trade, a soundness gap. And unl
 scanner it applies at every height, so fixing `ChainPrefilter` is worth more than adopting
 the scanner -- 26% off the target set at heights divisible by 4 is what the scanner buys,
 while the same rule in our filter buys it everywhere.
+
+## 6ar. Two implementations that now agree exactly
+
+6aq measured our chain filter accepting 26% chains no chunk could produce, found by
+disagreeing with the contributed 4+4+4+4 scanner. Chasing that disagreement to zero took
+three rules, each the same idea at a different scope.
+
+**Within an invocation.** All twenty tries share a y, so two tries at the same (x, z) are
+the same block. The first places; the second finds cane. 896 of 3,512 at height 8.
+
+**Between invocations, for a continuation.** Once a chain's column places, every later
+invocation reads the stream at one more shift. The earliest of those landing on the spot
+places there, at whatever height it drew -- a later one cannot supply the column instead.
+5 of 2,621.
+
+**Between invocations, for the base.** The same, one step earlier: a base whose spot an
+earlier invocation at the same shift already claimed never places. 2 of 2,618.
+
+```
+ours 2616, scanner 2616
+only ours    : 0
+only scanner : 0
+```
+
+Over 4M decoration seeds, a DP over enumerated candidates and a greedy single-pass stream
+walk now return exactly the same set. They share no code and were written from opposite
+directions, which makes the agreement worth more than either alone -- and every step of
+the way the disagreement was ours over-accepting, never theirs.
+
+All three rules need the shift a chain reads at to be pinned, so they apply only with no
+slack budget, which is the default. With foreign placements allowed the shift is not
+determined and the earliest owner is not knowable.

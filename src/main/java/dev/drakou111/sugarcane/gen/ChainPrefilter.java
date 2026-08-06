@@ -307,9 +307,44 @@ public final class ChainPrefilter {
             if (cy[i] < baseMinY || cy[i] > baseMaxY || cs[i] > maxBaseShift) {
                 continue;
             }
+            if (!baseIsFirst(i)) {
+                continue;
+            }
             best = Math.max(best, chainFrom(i, 0, maxSlack));
         }
         return best;
+    }
+
+    /**
+     * Whether this candidate is the first placement at its spot, and so can be a base.
+     *
+     * <p>The same argument the continuation rule uses, applied one step earlier. A chain's
+     * base needs terrain to permit building at its block; if an earlier invocation read at
+     * the same shift also lands there, that one places first, at whatever height it drew,
+     * and the base finds cane rather than air.
+     *
+     * <p>Only checked with no slack budget, where the shift a chain reads at is pinned. It
+     * was the last disagreement with the independent 4+4+4+4 scanner: two seeds in four
+     * million whose base sat at an invocation an earlier one had already claimed.
+     */
+    private boolean baseIsFirst(int i) {
+        if (maxSlack != 0) {
+            return true;
+        }
+        for (int g = yHead[cy[i] - Y_FLOOR]; g != -1; g = groupNext[g]) {
+            if (groupN[g] >= cn[i]) {
+                break;      // groups are in ascending invocation order
+            }
+            if (groupEnd[g] <= groupStart[g] || cs[groupStart[g]] != cs[i]) {
+                continue;   // not the shift this chain reads at
+            }
+            for (int j = groupStart[g]; j < groupEnd[g]; j++) {
+                if (cx[j] == cx[i] && cz[j] == cz[i]) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     /** Every column any try could place, over all four shift assumptions. */
@@ -418,6 +453,9 @@ public final class ChainPrefilter {
             if (cy[i] < baseMinY || cy[i] > baseMaxY || cs[i] > maxBaseShift) {
                 continue;
             }
+            if (!baseIsFirst(i)) {
+                continue;
+            }
             collect(i, 0, 0, maxSlack);
         }
         return chainCount;
@@ -449,14 +487,34 @@ public final class ChainPrefilter {
         if (!indexable(wantedY)) {
             return;
         }
+        // The first invocation to land on the spot owns it, not just the first try.
+        //
+        // Once column i has placed, every later invocation reads the stream at shift
+        // cs[i]+1, so those groups are the ones that physically happen. The earliest of
+        // them with a try at this (x, z) is the placement -- a chain needs terrain to
+        // permit building here, so that invocation's try succeeds, and whatever height it
+        // draws is what sits at this spot. A later invocation cannot supply the column
+        // instead; it finds cane rather than air.
+        //
+        // So take the earliest matching group and stop, even if its height ends the chain.
+        // Only meaningful with no slack budget, where the continuation's shift is pinned;
+        // with foreign placements allowed the shift is not determined and the earliest
+        // group is not knowable, so the old scan stands.
+        boolean strictOrder = maxSlack == 0;
         for (int g = yHead[wantedY - Y_FLOOR]; g != -1; g = groupNext[g]) {
             if (groupN[g] <= cn[i]) {
                 continue;
             }
+            if (strictOrder && groupEnd[g] > groupStart[g]
+                    && cs[groupStart[g]] != cs[i] + 1) {
+                continue;   // not the shift this invocation is actually read at
+            }
+            boolean owned = false;
             for (int j = groupStart[g]; j < groupEnd[g]; j++) {
                 if (cx[j] != cx[i] || cz[j] != cz[i]) {
                     continue;
                 }
+                owned = true;
                 if (cs[j] > maxAnyShift) {
                     continue;   // an interleaved placement, same implausibility as a prior one
                 }
@@ -471,6 +529,9 @@ public final class ChainPrefilter {
                 if (chainOverflow) {
                     return;
                 }
+            }
+            if (strictOrder && owned) {
+                return;     // this invocation owns the spot; no later one can
             }
         }
     }
@@ -589,14 +650,22 @@ public final class ChainPrefilter {
             return height;
         }
         int extra = 0;
+        // See collect: the earliest invocation to land on the spot owns it.
+        boolean strictOrder = maxSlack == 0;
         for (int g = yHead[wantedY - Y_FLOOR]; g != -1; g = groupNext[g]) {
             if (groupN[g] <= cn[i]) {
                 continue;
             }
+            if (strictOrder && groupEnd[g] > groupStart[g]
+                    && cs[groupStart[g]] != cs[i] + 1) {
+                continue;
+            }
+            boolean owned = false;
             for (int j = groupStart[g]; j < groupEnd[g]; j++) {
                 if (cx[j] != cx[i] || cz[j] != cz[i]) {
                     continue;
                 }
+                owned = true;
                 if (cs[j] > maxAnyShift) {
                     continue;   // interleaved placement; see maxAnyShift
                 }
@@ -613,6 +682,9 @@ public final class ChainPrefilter {
                     continue;   // more foreign placements than the budget allows
                 }
                 extra = Math.max(extra, chainFrom(j, depth + 1, slackLeft - spent));
+            }
+            if (strictOrder && owned) {
+                break;      // this invocation owns the spot; no later one can
             }
         }
         return height + extra;

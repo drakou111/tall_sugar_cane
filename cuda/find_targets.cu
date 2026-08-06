@@ -322,6 +322,40 @@ __device__ void addSlotToIndex(Chains<SC> &c, int slot) {
 }
 
 /**
+ * Whether a candidate is the first placement at its spot, and so can start a chain.
+ *
+ * <p>A chain's base needs terrain to permit building at its block. If an earlier invocation
+ * read at the same shift also lands there, that one places first at whatever height it
+ * drew, and the base finds cane rather than air. Same argument for continuations, one step
+ * earlier.
+ *
+ * <p>Only with no slack budget, where the shift a chain reads at is pinned.
+ */
+template<int SC>
+__device__ bool baseIsFirst(Chains<SC> &c, int i, int maxSlack) {
+    if (maxSlack != 0) {
+        return true;
+    }
+    for (int g = c.yHead[(int) c.y[i] - Y_FLOOR]; g != -1; g = c.groupNext[g]) {
+        if (c.groupN[g] >= c.n[i]) {
+            break;      // ascending invocation order
+        }
+        if (c.groupStart[g] >= c.groupEnd[g] || c.s[c.groupStart[g]] != c.s[i]) {
+            continue;
+        }
+        if ((c.groupMask[g] & xzBit(c.xz[i])) == 0ULL) {
+            continue;
+        }
+        for (int j = (int) c.groupStart[g]; j < (int) c.groupEnd[g]; j++) {
+            if (c.xz[j] == c.xz[i]) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/**
  * Whether the {@code count} invocations currently in the ring could chain a run of
  * {@code minHeight} starting inside the depth band.
  *
@@ -349,17 +383,24 @@ __device__ bool chainExists(Chains<SC> &c, int head, int count, int minHeight,
                 if (wantedY >= Y_FLOOR && wantedY <= Y_CEIL) {
                     unsigned short key = c.xz[i];
                     unsigned long long bit = xzBit(key);
+                    bool strictOrder = (maxSlack == 0);
                     for (int g = c.yHead[wantedY - Y_FLOOR]; g != -1; g = c.groupNext[g]) {
                         if (c.groupN[g] <= c.n[i]) {
                             continue;
                         }
+                        if (strictOrder && c.groupStart[g] < c.groupEnd[g]
+                                && c.s[c.groupStart[g]] != c.s[i] + 1) {
+                            continue;   // not the shift this invocation is read at
+                        }
                         if ((c.groupMask[g] & bit) == 0ULL) {
                             continue;   // nothing in this group can be at that spot
                         }
+                        bool owned = false;
                         for (int j = c.groupStart[g]; j < c.groupEnd[g]; j++) {
                             if (c.xz[j] != key) {
                                 continue;
                             }
+                            owned = true;
                             // Placements only accumulate, so a continuation cannot read
                             // the stream at the same offset as the column it sits on --
                             // that column is itself a placement. Only the i -> j step
@@ -382,6 +423,9 @@ __device__ bool chainExists(Chains<SC> &c, int head, int count, int minHeight,
                             if (four > h4) h4 = four;
                             if (five > h5) h5 = five;
                         }
+                        if (strictOrder && owned) {
+                            break;      // this invocation owns the spot; no later one can
+                        }
                     }
                 }
                 c.best2[i] = (unsigned char) h2;
@@ -391,6 +435,9 @@ __device__ bool chainExists(Chains<SC> &c, int head, int count, int minHeight,
                 }
 
                 if (c.y[i] < baseMinY || c.y[i] > baseMaxY || c.s[i] > maxBaseShift) {
+                    continue;
+                }
+                if (!baseIsFirst(c, i, maxSlack)) {
                     continue;
                 }
                 if (h1 >= minHeight
@@ -507,7 +554,8 @@ __device__ bool chainEndingInNewest(Chains<SC> &c, int newestSlot, int minHeight
         // The chain's base is its earliest column, and the band and shift cap apply there.
         if (acc >= minHeight
                 && c.y[cur] >= baseMinY && c.y[cur] <= baseMaxY
-                && c.s[cur] <= maxBaseShift) {
+                && c.s[cur] <= maxBaseShift
+                && baseIsFirst(c, cur, maxSlack)) {
             *baseNOut = (int) c.n[cur];
             return true;
         }
@@ -542,6 +590,35 @@ __device__ bool chainEndingInNewest(Chains<SC> &c, int newestSlot, int minHeight
                     }
                     if (maxSlack == 0 && c.s[cur] != c.s[i] + 1) {
                         continue;
+                    }
+                    // cur has to be the FIRST invocation after i to land on this spot, or
+                    // that earlier one placed here instead. Walking backwards this cannot
+                    // be read off the DP, so it is checked directly.
+                    if (maxSlack == 0) {
+                        bool preempted = false;
+                        for (int gg = c.yHead[(int) c.y[cur] - Y_FLOOR];
+                                gg != -1 && !preempted; gg = c.groupNext[gg]) {
+                            if (c.groupN[gg] <= c.n[i] || c.groupN[gg] >= c.n[cur]) {
+                                continue;
+                            }
+                            if (c.groupStart[gg] >= c.groupEnd[gg]
+                                    || c.s[c.groupStart[gg]] != c.s[cur]) {
+                                continue;
+                            }
+                            if ((c.groupMask[gg] & bit) == 0ULL) {
+                                continue;
+                            }
+                            for (int jj = (int) c.groupStart[gg];
+                                    jj < (int) c.groupEnd[gg]; jj++) {
+                                if (c.xz[jj] == key) {
+                                    preempted = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (preempted) {
+                            continue;
+                        }
                     }
                     if (top == 64) { *overflowed = true; return false; }
                     stack[top].cand = (short) i;
