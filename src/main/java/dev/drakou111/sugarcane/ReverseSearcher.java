@@ -671,7 +671,9 @@ public final class ReverseSearcher {
         Thread progress = new Thread(() -> {
             while (!Thread.currentThread().isInterrupted()) {
                 try {
-                    Thread.sleep(updateMs);
+                    // Woken often, printing rarely: the gate decides, so a checkpoint
+                    // that just printed suppresses the next tick rather than doubling it.
+                    Thread.sleep(Math.min(updateMs, PROGRESS_MS));
                 } catch (InterruptedException e) {
                     return;
                 }
@@ -683,10 +685,13 @@ public final class ReverseSearcher {
                 // continue without repeating work is to guess from the elapsed rate.
                 // Resuming from it can drop the few unfinished seeds behind it; pass
                 // `firstSeed` a little lower to overlap instead.
-                System.out.printf("[%4.1f min] seed %d (%d done), candidates %d (%.0f/s), "
+                System.out.printf("[%4.1f min] seed %d (%d done, %.0f/s), "
+                                + "candidates %d (%.0f/s), "
                                 + "ocean %d, past probe %d, chunks searched %d, cane %d, "
                                 + "tallest %d, hits %d%n",
-                        ms / 60000.0, nextSeed.get(), seedsDone.get(), candidates.get(),
+                        ms / 60000.0, nextSeed.get(), seedsDone.get(),
+                        seedsDone.get() * 1000.0 / Math.max(1, ms),
+                        candidates.get(),
                         candidates.get() * 1000.0 / Math.max(1, ms), oceans.get(),
                         probed.get(),
                         stats.chunksSearched.get(), stats.caneColumns.get(),
@@ -946,9 +951,11 @@ public final class ReverseSearcher {
             System.out.println("            reason: " + GpuChainFilter.lastFailure());
         }
 
-        // A line every few seconds, because the gap between checkpoints is 35 s on the
-        // CPU and an epoch at a high height can find nothing at all for minutes, which
-        // is indistinguishable from a hang.
+        // Progress on whatever interval --update asks for. It used to be
+        // min(updateMs, 60 s), which quietly ignored any setting above a minute: asking
+        // for --update=5 still printed every minute. The checkpoint lines are a different
+        // thing and still land per epoch, because those are saves rather than progress --
+        // moving them would change how much work a Ctrl-C costs.
         final java.util.concurrent.atomic.AtomicLong testedBase =
                 new java.util.concurrent.atomic.AtomicLong(totalTested);
         final java.util.concurrent.atomic.AtomicLong epochDone =
@@ -958,6 +965,13 @@ public final class ReverseSearcher {
         final java.util.concurrent.atomic.AtomicReference<String> phase =
                 new java.util.concurrent.atomic.AtomicReference<>("starting");
         final long buildStart = System.currentTimeMillis();
+        // Saving happens every epoch; PRINTING does not. An epoch is 50M samples, which at
+        // 10M/s is a line every five seconds -- at a height that finds nothing for hours
+        // that is thousands of identical lines. Every progress line shares this gate, so
+        // one lands per --update interval whichever produced it, and the save cadence is
+        // left alone because that is what a Ctrl-C costs.
+        final java.util.concurrent.atomic.AtomicLong lastPrintAt =
+                new java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis());
         final long testedAtStart = totalTested;
         final int startedWith = all.length;
         // Seconds per target, measured over whole epochs, so it does not drift within one.
@@ -968,10 +982,15 @@ public final class ReverseSearcher {
         Thread ticker = new Thread(() -> {
             while (!Thread.currentThread().isInterrupted()) {
                 try {
-                    Thread.sleep(Math.min(updateMs, PROGRESS_MS * 12L));
+                    Thread.sleep(updateMs);
                 } catch (InterruptedException e) {
                     return;
                 }
+                long nowMs = System.currentTimeMillis();
+                if (nowMs - lastPrintAt.get() < updateMs) {
+                    continue;
+                }
+                lastPrintAt.set(nowMs);
                 long tested = testedBase.get() + epochDone.get();
                 long thisRun = tested - testedAtStart;
                 double secs = (System.currentTimeMillis() - buildStart) / 1000.0;
@@ -989,7 +1008,8 @@ public final class ReverseSearcher {
                 // epoch `found` is flat while `tested` climbs, so the instantaneous ratio
                 // slides downward and looks like the yield collapsing.
                 double q = epochQ.get();
-                System.out.printf("  [%s] %s tested, %d/%d targets, %.2fM seeds/s%s%s%n",
+                System.out.printf("  [%s] %s decoration seeds tested, %d/%d targets, "
+                                + "%.2fM/s%s%s%n",
                         phase.get(), compact(tested), found, targets, rate / 1e6,
                         q > 0 ? String.format(", q = %.3e", q) : "", eta);
                 System.out.flush();
@@ -1019,11 +1039,14 @@ public final class ReverseSearcher {
                         epochFrom, EPOCH_SAMPLES, epochDone::set);
                 epochDone.set(EPOCH_SAMPLES);
                 phase.set("cpu soil filter");
-                System.out.printf("  epoch %d: gpu passed %d of %d seeds (%.2f%%), "
-                                + "sifting soil%n",
-                        epoch + 1, chainPassed.length, EPOCH_SAMPLES,
-                        100.0 * chainPassed.length / EPOCH_SAMPLES);
-                System.out.flush();
+                if (System.currentTimeMillis() - lastPrintAt.get() >= updateMs) {
+                    lastPrintAt.set(System.currentTimeMillis());
+                    System.out.printf("  epoch %d: gpu passed %d of %d seeds (%.2f%%), "
+                                    + "sifting soil%n",
+                            epoch + 1, chainPassed.length, EPOCH_SAMPLES,
+                            100.0 * chainPassed.length / EPOCH_SAMPLES);
+                    System.out.flush();
+                }
                 final long[] toSift = chainPassed;
                 final java.util.concurrent.atomic.AtomicInteger cursor =
                         new java.util.concurrent.atomic.AtomicInteger();
@@ -1164,12 +1187,20 @@ public final class ReverseSearcher {
                 TargetCache.save(cache, header(minHeight, totalTested, sampleAt), all, null);
             }
             double secs = (System.currentTimeMillis() - start) / 1000.0;
-            System.out.printf("  checkpoint %d: %d/%d targets, %d tested, %.0f s, "
-                            + "q = %.3e%s%n",
-                    epoch, all.length, targets, totalTested, secs,
-                    (double) all.length / totalTested,
-                    cache != null ? " (saved)" : "");
-            System.out.flush();
+            // Saved every epoch regardless; printed on the --update interval, or when the
+            // build is finished and the last line is the one worth having.
+            boolean finished = all.length >= targets;
+            if (finished || System.currentTimeMillis() - lastPrintAt.get() >= updateMs) {
+                lastPrintAt.set(System.currentTimeMillis());
+                double sinceStart = totalTested - testedAtStart;
+                System.out.printf("  checkpoint %d: %d/%d targets, %d decoration seeds "
+                                + "tested, %.2fM/s, %.0f s, q = %.3e%s%n",
+                        epoch, all.length, targets, totalTested,
+                        secs > 0 ? sinceStart / secs / 1e6 : 0.0, secs,
+                        (double) all.length / totalTested,
+                        cache != null ? " (saved)" : "");
+                System.out.flush();
+            }
         }
 
         ticker.interrupt();
