@@ -1072,7 +1072,7 @@ public final class ReverseSearcher {
                 long[] chainPassed = gpu.run(minHeight, OCEAN_COUNT, OCEAN_INDEX,
                         ChainPrefilter.DEFAULT_BASE_MIN_Y, ChainPrefilter.DEFAULT_BASE_MAX_Y,
                         maxBaseShift(), maxColumns(minHeight), maxSlack,
-                        shiftLevels(minHeight),
+                        shiftLevels(minHeight), -1, -1,
                         epochFrom, EPOCH_SAMPLES, epochDone::set);
                 epochDone.set(EPOCH_SAMPLES);
                 phase.set("cpu soil filter");

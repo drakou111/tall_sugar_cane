@@ -367,7 +367,7 @@ __device__ bool baseIsFirst(Chains<SC> &c, int i, int maxSlack) {
 template<int SC>
 __device__ bool chainExists(Chains<SC> &c, int head, int count, int minHeight,
                             int baseMinY, int baseMaxY, int maxBaseShift, int maxColumns,
-                            int maxSlack, int *baseNOut) {
+                            int maxSlack, int wantKey, int wantY, int *baseNOut) {
     for (int L = count - 1; L >= 0; L--) {
         int slot = head + L;
         if (slot >= count) {
@@ -435,6 +435,11 @@ __device__ bool chainExists(Chains<SC> &c, int head, int count, int minHeight,
                 }
 
                 if (c.y[i] < baseMinY || c.y[i] > baseMaxY || c.s[i] > maxBaseShift) {
+                    continue;
+                }
+                // A spot query: the chain must be based at one named block, not anywhere.
+                // wantKey < 0 leaves it unconstrained, which is every ordinary build.
+                if (wantKey >= 0 && (c.xz[i] != (unsigned short) wantKey || c.y[i] != wantY)) {
                     continue;
                 }
                 if (!baseIsFirst(c, i, maxSlack)) {
@@ -527,8 +532,8 @@ __device__ __forceinline__ unsigned long long sampleAt(unsigned long long i,
 template<int SC>
 __device__ bool chainEndingInNewest(Chains<SC> &c, int newestSlot, int minHeight,
                                     int baseMinY, int baseMaxY, int maxBaseShift,
-                                    int maxColumns, int maxSlack, int *baseNOut,
-                                    bool *overflowed) {
+                                    int maxColumns, int maxSlack, int wantKey, int wantY,
+                                    int *baseNOut, bool *overflowed) {
     struct Step { short cand; unsigned char acc; unsigned char col; };
     Step stack[64];
     int top = 0;
@@ -555,6 +560,8 @@ __device__ bool chainEndingInNewest(Chains<SC> &c, int newestSlot, int minHeight
         if (acc >= minHeight
                 && c.y[cur] >= baseMinY && c.y[cur] <= baseMaxY
                 && c.s[cur] <= maxBaseShift
+                && (wantKey < 0 || (c.xz[cur] == (unsigned short) wantKey
+                        && c.y[cur] == wantY))
                 && baseIsFirst(c, cur, maxSlack)) {
             *baseNOut = (int) c.n[cur];
             return true;
@@ -861,7 +868,7 @@ template<int SC>
 __global__ void filterKernel(unsigned long long sampleFrom, long long total,
                              int minHeight, int count, int featureIndex,
                              int baseMinY, int baseMaxY, int maxBaseShift, int maxColumns,
-                             int maxSlack,
+                             int maxSlack, int wantKey, int wantY,
                              unsigned long long *out, unsigned int *outCount,
                              unsigned int outCapacity) {
     Chains<SC> c;
@@ -905,7 +912,8 @@ __global__ void filterKernel(unsigned long long sampleFrom, long long total,
             int baseN = -1;
             if (step == 0) {
                 accept = chainExists(c, head, count, minHeight, baseMinY, baseMaxY,
-                                     maxBaseShift, maxColumns, maxSlack, &baseN);
+                                     maxBaseShift, maxColumns, maxSlack, wantKey, wantY,
+                                     &baseN);
             } else if (prevAccepted && prevBaseN >= windowStart) {
                 accept = true;              // the same chain is still inside the window
                 baseN = prevBaseN;
@@ -919,14 +927,17 @@ __global__ void filterKernel(unsigned long long sampleFrom, long long total,
                     // Its chain slid off the front; another may be left, and only the full
                     // DP can say.
                     accept = chainExists(c, head, count, minHeight, baseMinY, baseMaxY,
-                                         maxBaseShift, maxColumns, maxSlack, &baseN);
+                                         maxBaseShift, maxColumns, maxSlack, wantKey,
+                                         wantY, &baseN);
                 } else {
                     accept = chainEndingInNewest(c, newestSlot, minHeight, baseMinY,
                                                  baseMaxY, maxBaseShift, maxColumns,
-                                                 maxSlack, &baseN, &overflowed);
+                                                 maxSlack, wantKey, wantY, &baseN,
+                                                 &overflowed);
                     if (overflowed) {
                         accept = chainExists(c, head, count, minHeight, baseMinY, baseMaxY,
-                                             maxBaseShift, maxColumns, maxSlack, &baseN);
+                                             maxBaseShift, maxColumns, maxSlack, wantKey,
+                                             wantY, &baseN);
                     }
                 }
             }
@@ -985,9 +996,11 @@ int main(int argc, char **argv) {
                 MAX_SHIFT_COUNT, shiftLevels);
         return 3;
     }
-    unsigned long long sampleFrom = strtoull(argv[10], NULL, 10);
-    long long samples = atoll(argv[11]);
-    const char *outFile = argc > 12 ? argv[12] : NULL;
+    int wantKey = atoi(argv[10]);
+    int wantY = atoi(argv[11]);
+    unsigned long long sampleFrom = strtoull(argv[12], NULL, 10);
+    long long samples = atoll(argv[13]);
+    const char *outFile = argc > 14 ? argv[14] : NULL;
 
     if (count > MAX_COUNT) {
         fprintf(stderr, "count %d exceeds the compiled maximum %d\n", count, MAX_COUNT);
@@ -1069,7 +1082,10 @@ int main(int argc, char **argv) {
         // exactly what the greedy walk handles -- and it is several times faster. Anything
         // else falls through to the general filter. Both write the same seeds, which is
         // what the CPU comparison checks.
-        bool greedyEligible = minHeight % 4 == 0 && maxColumns == minHeight / 4
+        // Not for spot queries: the greedy walk picks its own root and would have to be
+        // rewritten to be told one. The general filter handles those.
+        bool greedyEligible = wantKey < 0 && minHeight % 4 == 0
+                && maxColumns == minHeight / 4
                 && maxBaseShift == 0 && maxSlack == 0
                 && maxColumns >= 2 && maxColumns <= 5 && count >= maxColumns;
         if (greedyEligible) {
@@ -1095,12 +1111,12 @@ int main(int argc, char **argv) {
         if (shiftLevels <= 4) {
             filterKernel<4><<<blocks, threads>>>(sampleFrom + (unsigned long long) done,
                     thisBatch, minHeight, count, featureIndex, baseMinY, baseMaxY,
-                    maxBaseShift, maxColumns, maxSlack, dOut, dCount,
+                    maxBaseShift, maxColumns, maxSlack, wantKey, wantY, dOut, dCount,
                     outCapacity);
         } else {
             filterKernel<5><<<blocks, threads>>>(sampleFrom + (unsigned long long) done,
                     thisBatch, minHeight, count, featureIndex, baseMinY, baseMaxY,
-                    maxBaseShift, maxColumns, maxSlack, dOut, dCount,
+                    maxBaseShift, maxColumns, maxSlack, wantKey, wantY, dOut, dCount,
                     outCapacity);
         }
         // The launch is checked separately from the synchronise, because a launch that never

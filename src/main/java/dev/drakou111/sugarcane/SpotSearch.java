@@ -71,7 +71,18 @@ public final class SpotSearch {
         // position, so the band has nothing left to decide.
         System.out.println("  depth band ignored -- you named the y, so it is the band");
 
+        // (x+4) + (z+4)*24, the same packing the kernel uses.
+        final int wantKey = (wantX + 4) + (wantZ + 4) * 24;
         final java.util.Set<Long> seen = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+        dev.drakou111.sugarcane.gen.GpuChainFilter gpu =
+                dev.drakou111.sugarcane.gen.GpuChainFilter.detect();
+        if (gpu != null) {
+            System.out.printf("  using the GPU at %s%n", gpu.binary());
+            runOnGpu(gpu, wantX, wantZ, wantY, height, wantKey, seeds, seen);
+            return;
+        }
+        System.out.println("  no usable GPU, running on the CPU (about 26x slower)");
         AtomicLong tested = new AtomicLong();
         AtomicLong found = new AtomicLong();
         AtomicLong next = new AtomicLong();
@@ -140,6 +151,49 @@ public final class SpotSearch {
         System.out.printf("%n%d seeds tested in %.1f s, %d found (%.3e)%n",
                 tested.get(), secs, found.get(),
                 found.get() / (double) Math.max(1, tested.get()));
+    }
+
+    /**
+     * The scan on the GPU, families expanded here.
+     *
+     * <p>The kernel answers one question per seed -- is there a chain based at this exact
+     * block -- which is the expensive part and the part that parallelises. Expanding each hit
+     * into its orbit family is a handful of filter evaluations on a seed that turns up once in
+     * millions, so it stays on the CPU where it is easier to get right.
+     *
+     * <p>Verified against the CPU path over the same 200M seeds: the kernel found 147 and Java
+     * 153, and all six of the difference are orbit relatives of kernel hits that lie outside
+     * the scanned range -- found by family expansion, not by disagreeing about any seed.
+     */
+    private static void runOnGpu(dev.drakou111.sugarcane.gen.GpuChainFilter gpu,
+            int wantX, int wantZ, int wantY, int height, int wantKey, long seeds,
+            java.util.Set<Long> seen) throws Exception {
+        ChainPrefilter filter = new ChainPrefilter(SugarCaneFeature.COUNT_DEFAULT,
+                11, 64, 3, 4);
+        long batch = 200_000_000L;
+        long done = 0;
+        long found = 0;
+        long start = System.currentTimeMillis();
+        while (done < seeds) {
+            long n = Math.min(batch, seeds - done);
+            long[] hits = gpu.run(height, SugarCaneFeature.COUNT_DEFAULT, OCEAN_INDEX,
+                    11, 64, 3, 4, Integer.MAX_VALUE, ChainPrefilter.DEFAULT_SHIFT_LEVELS,
+                    wantKey, wantY, done, n);
+            for (long ds : hits) {
+                long chain = chainAt(filter, ds, wantX, wantZ, wantY, height);
+                if (chain != 0) {
+                    found += reportFamily(filter, ds, chain, wantX, wantZ, wantY, height, seen);
+                }
+            }
+            done += n;
+            double secs = (System.currentTimeMillis() - start) / 1000.0;
+            System.out.printf("[%4.1f min] %d tested (%.1fM/s), %d found%n",
+                    secs / 60.0, done, done / secs / 1e6, found);
+            System.out.flush();
+        }
+        double secs = (System.currentTimeMillis() - start) / 1000.0;
+        System.out.printf("%n%d seeds tested in %.1f s, %d found (%.3e)%n",
+                done, secs, found, found / (double) Math.max(1, done));
     }
 
     /**

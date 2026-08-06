@@ -3441,3 +3441,44 @@ rather than a longer run.
 `crosschunk` now takes the two sides separately -- `crosschunk <seeds> <threads> <minThisChunk>
 <minNeighbour>` -- and reports which split carried each combination it finds, so the question
 is answerable once there is something fast enough to answer it with.
+
+## 6az. The position constraint on the GPU, and a disagreement that was not one
+
+`spot` asks whether a seed builds at one named block. That is a single-seed predicate, which
+means it fits the existing kernel rather than needing a new one: three lines in the accept
+test, comparing the base candidate's packed xz and y against a requested pair, with -1 meaning
+unconstrained.
+
+```
+spot at chunk-relative 3,10 base 21, height 8, 200M seeds
+  CPU   70.8 s
+  GPU    4.6 s      15x, same 153 seeds
+```
+
+The kernel alone runs 41.7M seeds/s against the CPU filter's 1.6M.
+
+The greedy N x 4 walk is skipped for spot queries: it picks its own root and would have to be
+rewritten to be told one. The general filter handles them, and the ordinary unconstrained build
+is byte-identical to before, so nothing that already worked moved.
+
+### The counts differed and neither was wrong
+
+First comparison gave 147 from the kernel and 153 from Java over the same 200M seeds. Six
+seeds, only ever in Java's favour, which is the shape of a kernel missing things.
+
+It was not. Disabling the window optimisation left it at 147, so the cheap path was innocent,
+and every one of the six turned out to be an orbit relative of a kernel hit -- at -2, -2 and -4.
+`spot` expands each hit into its orbit family, and a family reaches *backwards* out of the
+scanned index range. Java was reporting valid seeds the scan never visited.
+
+Worth recording because the instinct on a 147-vs-153 is that the faster implementation is
+cutting a corner. Here the slower one was doing extra work on purpose, and the filters agreed
+on every seed either had actually looked at.
+
+### What this buys for cross-chunk
+
+A cross-chunk combination needs the second chunk to have a chain at the exact block the first
+one stops on -- which is a spot query. So the two factors of P(cross) are both single-seed
+predicates the kernel can now measure at 40M/s, and neither needs the pair loop that made a
+brute force hopeless. 6ay's 55x rests on multiplying measured per-height rates; this is what
+would let it be measured directly instead.
