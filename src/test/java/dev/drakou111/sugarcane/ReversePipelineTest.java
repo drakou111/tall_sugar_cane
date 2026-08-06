@@ -138,6 +138,49 @@ class ReversePipelineTest {
     }
 
     /**
+     * Only ravines carve the air a tall stack needs -- measured, not assumed.
+     *
+     * <p>A cave is tubular and a few blocks across; four stacked columns need sixteen blocks
+     * of air at one x, z, which is a ravine's shape. Every find of height 8 or more that
+     * exists is reached by a canyon and by no cave at all, and the one cave-carved find is
+     * the 5-tall, a single column on another.
+     *
+     * <p>So --ravines-only must keep the 8-tall. If this ever fails, the assumption behind
+     * that flag is wrong and the flag is discarding real finds silently, which is the
+     * failure this whole test class exists to prevent.
+     */
+    @Test
+    void ravinesOnlyKeepsTheConfirmedEightTall() {
+        assertTrue(carveProbeAccepts(-7585781829663227268L, -1553005, 1170061, 8, true),
+                "the confirmed 8-tall is ravine-carved and must survive --ravines-only");
+        assertTrue(carveProbeAccepts(-7585781829663227268L, -1553005, 1170061, 8, false),
+                "and it must survive with caves included too");
+    }
+
+    private static boolean carveProbeAccepts(long worldSeed, int chunkX, int chunkZ,
+            int height, boolean ravinesOnly) {
+        AirCarveProbe probe = new AirCarveProbe().ravinesOnly(ravinesOnly);
+        probe.walk(worldSeed, chunkX, chunkZ, true);
+        DecorationLattice lattice = new DecorationLattice(worldSeed);
+        long ds = lattice.decorationSeedOf(chunkX, chunkZ);
+        ChainPrefilter filter = new ChainPrefilter(SugarCaneFeature.COUNT_DEFAULT);
+        int chains = filter.collectChains(ds, OCEAN_INDEX, height);
+        for (int i = 0; i < chains; i++) {
+            long chain = filter.chain(i);
+            int px = chunkX * 16 + ChainPrefilter.chainX(chain);
+            int pz = chunkZ * 16 + ChainPrefilter.chainZ(chain);
+            boolean all = true;
+            for (int c = 0; c < ChainPrefilter.chainColumns(chain) && all; c++) {
+                all = probe.isCarved(px, ChainPrefilter.chainBaseY(chain, c), pz);
+            }
+            if (all) {
+                return true;
+            }
+        }
+        return filter.chainsOverflowed();
+    }
+
+    /**
      * The water half of the position test is the one filter here that can lose real
      * finds -- a spot on the sea floor gets its water from the noise fill, not a carver
      * -- so the two confirmed finds are the only guard against it silently discarding

@@ -288,6 +288,7 @@ public final class ReverseSearcher {
     private static final String MAX_SLACK_FLAG = "--max-slack=";
     private static final String SHIFT_LEVELS_FLAG = "--shift-levels=";
     private static final String SAMPLE_FROM_FLAG = "--sample-from=";
+    private static final String RAVINES_FLAG = "--ravines-only";
     private static boolean forceCpu = false;
     private static int reportHeight = 0;
     private static java.nio.file.Path cacheOverride = null;
@@ -312,6 +313,8 @@ public final class ReverseSearcher {
      * actually been tested.
      */
     private static long sampleFromOverride = -1L;
+    /** "--ravines-only": drop caves from the carve probe. See AirCarveProbe.ravinesOnly. */
+    private static boolean ravinesOnly = false;
 
     /**
      * Builds or extends a target set and stops, without searching anything.
@@ -341,6 +344,8 @@ public final class ReverseSearcher {
                 forceCpu = true;
             } else if (arg.startsWith(REPORT_FLAG)) {
                 reportHeight = Integer.parseInt(arg.substring(REPORT_FLAG.length()));
+            } else if (arg.equals(RAVINES_FLAG)) {
+                ravinesOnly = true;
             } else if (arg.equals(WATER_FLAG)) {
                 waterProbe = true;
             } else if (arg.startsWith(SISTERS_FLAG)) {
@@ -526,7 +531,7 @@ public final class ReverseSearcher {
                 ChainPrefilter chainFilter = rankedFilter(minHeight);   // column cap from
                 // the target height, which is the looser one; the height asked of it below
                 // is the report height.
-                AirCarveProbe probe = new AirCarveProbe();
+                AirCarveProbe probe = new AirCarveProbe().ravinesOnly(ravinesOnly);
                 LiquidCarveProbe liquidProbe = waterProbe ? new LiquidCarveProbe() : null;
                 DirtBlobFilter dirtFilter = new DirtBlobFilter();
                 // Reused across sisters: the chunks whose carvers already accepted.

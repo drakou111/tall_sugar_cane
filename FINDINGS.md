@@ -3173,3 +3173,54 @@ Two passes, because greedy alone over-accepts: the walk finds a witness, then a 
 replays the chunk from invocation 0 and rejects it if any earlier or intervening invocation
 lands on a target position first. That validator is the ownership rule of 6ar, which is why
 the two paths agree rather than merely nearly agreeing.
+
+## 6at. Tall stacks are ravine-carved, and what that filter is actually worth
+
+A collaborator's claim: 99% of candidate seed-and-coordinate pairs can be thrown out with a
+couple of RNG calls from the ravine sphere placements. They found a 15-tall in ten minutes,
+so it works for them.
+
+### The observation is right, and it is not close
+
+Which carver reaches the base of every find we have:
+
+| find | cave reaches it | canyon reaches it | canyon's vertical run |
+|---|---|---|---|
+| confirmed 8-tall | no | **yes** | 5 |
+| confirmed 5-tall | yes | no | 0 |
+| reported 11 | no | **yes** | 10 |
+| simulated 10 | no | **yes** | 28 |
+
+Every find of height 8 or more is reached by a canyon and by **no cave at all**. The one
+cave-carved find is the 5-tall, which is one column on another and does not need the height.
+
+It makes sense from the shape. A cave is tubular and a few blocks across; four stacked
+columns need sixteen blocks of air at one x, z. That is a ravine.
+
+### But the filter is worth 31%, not 99%
+
+`--ravines-only` drops caves from the carve probe. Over identical work:
+
+```
+both carvers : chunks generated 103806, searched 11534
+ravines only : chunks generated  71829, searched  7981
+```
+
+31% fewer chunks, and chunk generation is ~84% of the search, so about 26% overall. Real,
+and nowhere near what the claim suggests.
+
+The reason is population, not disagreement. Their 99% is measured on raw candidates. Ours
+are already through a biome gate that rejects 99.2% and a depth band of y 13..35 -- and what
+survives that is heavily enriched for being near a ravine, because that is what put it in
+the band. Ravines are also long, so 5.8 of them over a 17x17 chunk region cover a great deal
+of ground. Filtering an already-filtered population gives back much less.
+
+Which means the technique is their **primary** filter and can only ever be our **secondary**
+one. Worth having, not worth expecting an order of magnitude from.
+
+### Kept as a flag
+
+It is a coverage trade: it would drop a cave-carved find like the 5-tall. Every find at the
+heights actually searched is ravine-carved, so the trade looks good above height 8, and
+`ReversePipelineTest` pins the confirmed 8-tall against it -- if that ever fails the
+assumption is wrong and the flag is discarding real finds silently.

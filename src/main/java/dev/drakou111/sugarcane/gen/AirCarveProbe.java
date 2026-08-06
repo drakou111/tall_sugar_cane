@@ -83,6 +83,27 @@ public final class AirCarveProbe {
      * @param ocean the carve probability differs, so this must be the biome at the
      *              generating chunk's corner, exactly as {@code runCarvers} uses it
      */
+    /**
+     * Only ravines carve the air a tall stack needs, so only run those.
+     *
+     * <p>A cave is tubular and a few blocks across; a stack of four columns needs sixteen
+     * blocks of air at one x,z, which is a ravine's shape and not a cave's. Measured on
+     * every find we have: the 8-tall, the reported 11 and the simulated 10 are all reached
+     * by a canyon and by no cave at all. The one cave-carved find is the 5-tall, which is
+     * a single column on top of another and does not need the height.
+     *
+     * <p>Ravines start in 1 chunk in 50 against a cave's 1 in 15, so dropping caves is most
+     * of what the probe could reject. It is a coverage trade rather than a free tightening,
+     * which is why it is a flag and why the confirmed finds are pinned against it.
+     */
+    private boolean ravinesOnly;
+
+    public AirCarveProbe ravinesOnly(boolean on) {
+        this.ravinesOnly = on;
+        this.walked = false;
+        return this;
+    }
+
     public void walk(long worldSeed, int chunkX, int chunkZ, boolean ocean) {
         if (walked && walkedSeed == worldSeed
                 && walkedChunkX == chunkX && walkedChunkZ == chunkZ) {
@@ -100,7 +121,9 @@ public final class AirCarveProbe {
         int r = CarverConfig.CARVE_RADIUS;
         for (int sx = chunkX - r; sx <= chunkX + r; sx++) {
             for (int sz = chunkZ - r; sz <= chunkZ + r; sz++) {
-                if (CarverConfig.isStartChunk(random, worldSeed, 0, sx, sz, caveProbability)) {
+                if (!ravinesOnly
+                        && CarverConfig.isStartChunk(random, worldSeed, 0, sx, sz,
+                                caveProbability)) {
                     cave.carve(random, sx, sz);
                 }
                 if (CarverConfig.isStartChunk(random, worldSeed, 1, sx, sz, CarverConfig.CANYON)) {
