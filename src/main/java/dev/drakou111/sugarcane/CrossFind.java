@@ -77,11 +77,11 @@ public final class CrossFind {
     private CrossFind() {
     }
 
-    private static int key(int x, int z, int y, long ds) {
+    static int key(int x, int z, int y, long ds) {
         return ((((x + 4) + (z + 4) * 24) * Y + y) << 4) | (int) (ds & 15L);
     }
 
-    private static boolean inFrame(int x, int z, int y) {
+    static boolean inFrame(int x, int z, int y) {
         return x >= -4 && x <= 19 && z >= -4 && z <= 19 && y >= 0 && y < Y;
     }
 
