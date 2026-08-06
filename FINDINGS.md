@@ -3603,3 +3603,81 @@ Not built here, deliberately. A wrong MITM returns most of the solutions and loo
 and the failure is invisible against a search that is supposed to find almost nothing. The
 oracle for it is cheap though -- pick a world seed, derive D1 and D2 from it, and require the
 solver to return that seed -- so it is testable, just not testable by inspection.
+
+## 6bc: the two-chunk solver, by lifting rather than meeting in the middle
+
+The MITM of 6bb was never built. It is superseded: the equation lifts, which is simpler, exact,
+and needs no table. The idea is a collaborator's -- "its just lifting on crack / you know the
+lower 4 bits for free / you guess the next 12 bits / and then just do bit by bit / if you run
+into a contradiction you stop". All three constants are right, and the twelve is not an estimate.
+
+### Why twelve
+
+Checking `(D2 ^ ws) - (D1 ^ ws) == 16*(dx*a + dz*b)` mod 2^k:
+
+- the left side is XOR and subtraction, so its low k bits need only `ws` mod 2^k;
+- `a` mod 2^j lives in `next(32)` results, i.e. state bits 16 and up, and an LCG is
+  lower-triangular, so it needs `ws` mod 2^(16+j);
+- the `*16` gives four bits back.
+
+So the equation mod 2^k needs `ws` mod 2^(k+12). Measured, not argued:
+
+```
+  lookahead 10 : FAILS first at k = 5
+  lookahead 11 : FAILS first at k = 5
+  lookahead 12 : holds for every k
+```
+
+The low four bits are not guessed either: `D1 = 16*(...) ^ ws`, so `ws` agrees with `D1` below
+bit four. That is the same condition `DecorationLattice` needs to reach `D1` at all, so pinning
+it does not merely cut the blind prefix 16x -- it stops fifteen in sixteen of the answers from
+being seeds that no chunk in the border can use. Before: 32 seeds, 3 usable. After: 3, all 3.
+
+### It works
+
+`TwoChunkLift`, 4 to 25 ms per pair on one thread, a few hundred thousand candidates against
+2^48 for a scan. Round trip over six chunk offsets including diagonals:
+
+```
+TwoChunkLift: 24 round trips, the true world seed recovered every time
+TwoChunkLift: lookahead 12 holds, 11 does not
+```
+
+### The bug this was always going to have
+
+The first working version missed 16 of 40 world seeds and reported zero bad answers. `nextLong`
+is `(next(32) << 32) + next(32)` with the low word **sign-extended**, not OR-ed. That only moves
+bits 32 and up, so the lifting never saw it -- every pruning decision was correct -- and it
+surfaced only in the full-width check at the end, which threw away the true seed whenever that
+bit was set. Every seed returned still satisfied the equation as coded. Exactly the failure 6bb
+predicted for the MITM, and only the round-trip oracle catches it.
+
+### Not for the GPU, and that is fine
+
+A branchy tree with data-dependent survival. It runs once per candidate pair, not once per seed,
+while the GPU stays on target sets.
+
+## 6bd: block rotation cracks coordinates, but there is no solve step
+
+Separate problem, opposite structure. `Mth.getSeed(x,y,z)` feeds one LCG step and the rotation
+is the **top** two bits. Two gotchas in the first line, one of them asymmetric: `x * 3129871` is
+an **int** multiply that overflows before widening, so a negative product fills the entire upper
+half with sign bits (49.9% of x); `z` is widened *first* and multiplied as a long; `y` is XOR-ed.
+
+The proposal was to guess two of x, y, z and solve for the third. There is no solve. Lifting
+worked in 6bc because the observable's low bits depended on the input's low bits; here the
+observable is the high bits, which depend on everything:
+
+```
+  flipping z bit 20 changes the rotation 75.1% of the time
+  flipping z bit 24 changes the rotation 75.1% of the time
+  flipping z bit 30 changes the rotation 75.0% of the time
+```
+
+75% is the ceiling for a uniform 2-bit output -- full mixing, no handle. So the third variable
+can only be scanned, and guess-two-scan-one is the same work as scanning the plane.
+
+What that costs: 6.4e8 rotations/s single-threaded, so the whole x,z plane at a known y is 2^52,
+about 52 CPU-days or ~12 GPU-hours. y must be known or nearly so; 256 values multiply it out of
+reach. Twenty observed blocks leave 4.1e3 false positives over the plane, twenty-six leave 1.
+The consolation is that this one is embarrassingly parallel, unlike 6bc.
