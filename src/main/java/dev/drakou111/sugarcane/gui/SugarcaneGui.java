@@ -243,6 +243,7 @@ public final class SugarcaneGui {
         addTab("reverse", reverseTab());
         addTab("targets", targetsTab());
         addTab("merge", mergeTab());
+        addTab("spot", spotTab());
         addTab("crosschunk", crossChunkTab());
         addTab("sisters", sistersTab());
         addTab("inspect", inspectTab());
@@ -522,6 +523,24 @@ public final class SugarcaneGui {
             }
             return a;
         });
+    }
+
+    private Tab spotTab() {
+        Form f = new Form("Decoration seeds that grow a stack at one NAMED block, instead of "
+                + "anywhere. For when you already have a block you like -- a ravine wall with "
+                + "soil under it and water beside it -- and want the seeds that build there. "
+                + "No world seed and no lattice: turning a decoration seed into coordinates is "
+                + "what the reverse tab does.");
+        JTextField relX = f.text("relX", "", "chunk-relative, -4..19: a placement can land "
+                + "four blocks outside its own chunk");
+        JTextField relZ = f.text("relZ", "", "chunk-relative, -4..19");
+        JTextField baseY = f.text("baseY", "", "where the bottom of the stack sits");
+        JTextField height = f.text("height", "8", null);
+        JTextField seeds = f.text("seeds", "", "blank runs until you press Stop");
+        JTextField threads = f.text("threads", defaultThreads(), null);
+        return new Tab(f.panel, () -> new ArrayList<>(List.of("spot",
+                req(relX, "relX"), req(relZ, "relZ"), req(baseY, "baseY"),
+                req(height, "height"), orZero(seeds), req(threads, "threads"))));
     }
 
     private Tab crossChunkTab() {

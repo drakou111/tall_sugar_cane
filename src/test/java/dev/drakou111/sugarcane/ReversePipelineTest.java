@@ -181,6 +181,34 @@ class ReversePipelineTest {
     }
 
     /**
+     * A spot query for the confirmed 8-tall's own block must accept its own seed.
+     *
+     * <p>`spot` asks the reverse of the usual question -- given a block, which decoration
+     * seeds build there -- so the one case where the answer is known has to come out right.
+     * The find is at chunk-relative 3,10 with its base at y=21, and its chain is 21+4, 25+4.
+     *
+     * <p>The position is the whole constraint here, so a filter that quietly normalised x, z
+     * or the base y would return seeds that build somewhere else and look perfectly healthy.
+     */
+    @Test
+    void aSpotQueryAcceptsTheConfirmedEightTallAtItsOwnBlock() {
+        ChainPrefilter filter = new ChainPrefilter(SugarCaneFeature.COUNT_DEFAULT, 11, 64, 3, 4);
+        int chains = filter.collectChains(72846194777308L, OCEAN_INDEX, 8);
+        boolean hit = false;
+        for (int i = 0; i < chains; i++) {
+            long chain = filter.chain(i);
+            if (ChainPrefilter.chainX(chain) == 3 && ChainPrefilter.chainZ(chain) == 10
+                    && ChainPrefilter.chainBaseY(chain, 0) == 21) {
+                hit = true;
+                assertEquals(4, ChainPrefilter.chainHeight(chain, 0), "first column is 4 tall");
+                assertEquals(25, ChainPrefilter.chainBaseY(chain, 1), "second sits on it");
+                assertEquals(4, ChainPrefilter.chainHeight(chain, 1), "and is 4 tall");
+            }
+        }
+        assertTrue(hit, "a spot query at 3,10 base 21 must accept the confirmed 8-tall");
+    }
+
+    /**
      * The water half of the position test is the one filter here that can lose real
      * finds -- a spot on the sea floor gets its water from the noise fill, not a carver
      * -- so the two confirmed finds are the only guard against it silently discarding

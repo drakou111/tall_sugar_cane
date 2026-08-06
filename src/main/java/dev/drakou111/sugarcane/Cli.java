@@ -127,6 +127,21 @@ public final class Cli {
                             + "seedCount count low-48 seeds, and each is searched at n "
                             + "different upper-16 values rather than consecutively.",
                     ReverseSearcher::main),
+            new Command("spot",
+                    "<relX> <relZ> <baseY> <height> [seeds] [threads]",
+                    "Decoration seeds that grow a stack at one NAMED block instead of "
+                            + "anywhere. The reverse search asks whether a seed stacks "
+                            + "somewhere and then hunts for terrain to suit it; this asks the "
+                            + "opposite, for when you already have a block you like -- a "
+                            + "ravine wall with soil under it and water beside it -- and want "
+                            + "the seeds that build there. No world seed and no lattice: the "
+                            + "answer is decoration seeds, and turning one into coordinates is "
+                            + "what `reverse` already does. Roughly 1,300x rarer than the "
+                            + "ordinary question, since the chain must land on one of 24x24 "
+                            + "positions and one of 54 base heights -- in exchange every hit "
+                            + "is already matched to terrain you have verified. Coordinates "
+                            + "are chunk-relative, -4..19, the frame `inspect` prints.",
+                    SpotSearch::main),
             new Command("crosschunk",
                     "[seeds] [threads] [minPerSide]",
                     "Measure whether two neighbouring chunks can build one stack between "
