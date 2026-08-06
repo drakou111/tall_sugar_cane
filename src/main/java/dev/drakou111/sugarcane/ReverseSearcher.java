@@ -671,9 +671,9 @@ public final class ReverseSearcher {
         Thread progress = new Thread(() -> {
             while (!Thread.currentThread().isInterrupted()) {
                 try {
-                    // Woken often, printing rarely: the gate decides, so a checkpoint
-                    // that just printed suppresses the next tick rather than doubling it.
-                    Thread.sleep(Math.min(updateMs, PROGRESS_MS));
+                    // This thread prints every time it wakes, so the sleep IS the interval.
+                    // The gated one is the target builder's, further down.
+                    Thread.sleep(updateMs);
                 } catch (InterruptedException e) {
                     return;
                 }
@@ -989,7 +989,9 @@ public final class ReverseSearcher {
         Thread ticker = new Thread(() -> {
             while (!Thread.currentThread().isInterrupted()) {
                 try {
-                    Thread.sleep(updateMs);
+                    // Woken often, printing rarely: the gate below decides, so a checkpoint
+                    // that just printed suppresses the next tick rather than doubling it.
+                    Thread.sleep(Math.min(updateMs, PROGRESS_MS));
                 } catch (InterruptedException e) {
                     return;
                 }
