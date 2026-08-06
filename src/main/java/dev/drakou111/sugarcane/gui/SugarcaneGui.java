@@ -242,6 +242,7 @@ public final class SugarcaneGui {
         addTab("search", searchTab());
         addTab("reverse", reverseTab());
         addTab("targets", targetsTab());
+        addTab("merge", mergeTab());
         addTab("sisters", sistersTab());
         addTab("inspect", inspectTab());
         // Not a command, so it contributes no arguments and Run does not apply to it.
@@ -489,6 +490,28 @@ public final class SugarcaneGui {
                 a.add("--cpu");
             }
             addIf(a, "--update=", update);
+            return a;
+        });
+    }
+
+    private Tab mergeTab() {
+        Form f = new Form("Pool target sets built on different machines. Builds start at a "
+                + "random sample index, so two people running the same command cover "
+                + "different ground and their files add up. Duplicates are dropped.");
+        JTextField out = f.text("output file", "", "where the pooled set goes");
+        JTextField ins = f.text("input files", "", "space separated; all must have been "
+                + "built with the same height, band and filter settings");
+        return new Tab(f.panel, () -> {
+            List<String> a = new ArrayList<>(List.of("merge", req(out, "output file")));
+            String raw = req(ins, "input files");
+            for (String part : raw.split("\s+")) {
+                if (!part.isBlank()) {
+                    a.add(part);
+                }
+            }
+            if (a.size() < 3) {
+                throw new IllegalArgumentException("give at least one input file");
+            }
             return a;
         });
     }

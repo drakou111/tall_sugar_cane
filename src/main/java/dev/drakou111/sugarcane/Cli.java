@@ -119,6 +119,21 @@ public final class Cli {
                             + "seedCount count low-48 seeds, and each is searched at n "
                             + "different upper-16 values rather than consecutively.",
                     ReverseSearcher::main),
+            new Command("merge",
+                    "<out> <in...>",
+                    "Pool target sets built on different machines into one. A set never "
+                            + "depends on the world seed, so it is the one artefact worth "
+                            + "sharing, and since a build now starts at a random sample "
+                            + "index two people running the same command cover different "
+                            + "ground -- this is what makes their files add up. Duplicates "
+                            + "are dropped and the result is sorted, so merging the same "
+                            + "file twice is harmless. Refuses sets that do not mean the "
+                            + "same thing: every header field except the counters decides "
+                            + "what membership is, so a mismatch is two different questions "
+                            + "rather than a wider set. Reports the per-bucket spread, "
+                            + "because a world seed reads only one bucket in sixteen and an "
+                            + "uneven pool helps some seeds and not others.",
+                    TargetMerge::main),
             new Command("targets",
                     "<minHeight> <count> <file> [threads] [--cpu] [--update=<minutes>] "
                             + "[--max-shift=<n>] [--max-columns=<n>] [--max-slack=<n>] "

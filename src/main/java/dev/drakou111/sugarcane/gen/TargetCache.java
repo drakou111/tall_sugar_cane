@@ -104,6 +104,17 @@ public final class TargetCache {
      *                     parameters — better to stop than to search a set that cannot
      *                     contain what is being looked for
      */
+    /**
+     * Read a set without saying what was expected, for tools that discover the parameters
+     * from the file rather than bringing their own -- merging, for one.
+     *
+     * <p>Still refuses a wrong magic or version, since those mean the bytes are not what
+     * they claim; it only skips the header comparison.
+     */
+    public static Loaded loadAny(Path path) throws IOException {
+        return load(path, null);
+    }
+
     public static Loaded load(Path path, Header wanted) throws IOException {
         if (!Files.exists(path)) {
             return null;
@@ -121,6 +132,9 @@ public final class TargetCache {
                     in.readInt(), in.readInt(), in.readBoolean(),
                     in.readInt(), in.readInt(), in.readInt(),
                     in.readLong(), in.readLong());
+            if (wanted == null) {
+                return readBody(in, path, found);
+            }
             requireSame(path, "height", wanted.minHeight(), found.minHeight());
             requireSame(path, "invocation count", wanted.count(), found.count());
             requireSame(path, "feature index", wanted.featureIndex(), found.featureIndex());
@@ -134,23 +148,28 @@ public final class TargetCache {
                         + (found.soilFilter() ? "on" : "off") + ", this run wants it "
                         + (wanted.soilFilter() ? "on" : "off"));
             }
-            int n = in.readInt();
-            if (n < 0) {
-                throw new IOException(path + " declares " + n + " targets");
-            }
-            long[] targets = new long[n];
-            for (int i = 0; i < n; i++) {
-                targets[i] = in.readLong();
-            }
-            byte[] scores = new byte[n];
-            try {
-                in.readFully(scores);
-            } catch (EOFException e) {
-                throw new IOException(path + " is truncated: " + n
-                        + " targets declared but the scores are incomplete", e);
-            }
-            return new Loaded(found, targets, scores);
+            return readBody(in, path, found);
         }
+    }
+
+    private static Loaded readBody(DataInputStream in, Path path, Header found)
+            throws IOException {
+        int n = in.readInt();
+        if (n < 0) {
+            throw new IOException(path + " declares " + n + " targets");
+        }
+        long[] targets = new long[n];
+        for (int i = 0; i < n; i++) {
+            targets[i] = in.readLong();
+        }
+        byte[] scores = new byte[n];
+        try {
+            in.readFully(scores);
+        } catch (EOFException e) {
+            throw new IOException(path + " is truncated: " + n
+                    + " targets declared but the scores are incomplete", e);
+        }
+        return new Loaded(found, targets, scores);
     }
 
     private static void requireSame(Path path, String what, int wanted, int found)
