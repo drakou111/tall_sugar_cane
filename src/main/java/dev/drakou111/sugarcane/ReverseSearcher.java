@@ -289,6 +289,7 @@ public final class ReverseSearcher {
     private static final String SHIFT_LEVELS_FLAG = "--shift-levels=";
     private static final String SAMPLE_FROM_FLAG = "--sample-from=";
     private static final String RAVINES_FLAG = "--ravines-only";
+    private static final String ALL_CARVERS_FLAG = "--all-carvers";
     private static boolean forceCpu = false;
     private static int reportHeight = 0;
     private static java.nio.file.Path cacheOverride = null;
@@ -313,8 +314,24 @@ public final class ReverseSearcher {
      * actually been tested.
      */
     private static long sampleFromOverride = -1L;
-    /** "--ravines-only": drop caves from the carve probe. See AirCarveProbe.ravinesOnly. */
-    private static boolean ravinesOnly = false;
+    /**
+     * Drop caves from the carve probe. Default ON at height 8 and above.
+     *
+     * <p>Only ravines carve the air a tall stack needs. Every find we have at height 8 or
+     * more is reached by a canyon and by no cave at all, with canyon vertical runs of 5, 10
+     * and 28 blocks -- a ravine opens a whole wall at once, which is why a 16 is barely
+     * harder than an 8 in terrain terms. The one cave-carved find is the 5-tall.
+     *
+     * <p>So it is a default rather than a flag, but only where the evidence reaches. Below
+     * height 8 a single column on another needs no vertical extent and a cave will do, so
+     * caves stay in. {@code --all-carvers} forces them back at any height,
+     * {@code --ravines-only} forces them out.
+     */
+    private static Boolean ravinesOnlyOverride = null;
+
+    private static boolean ravinesOnly(int minHeight) {
+        return ravinesOnlyOverride != null ? ravinesOnlyOverride : minHeight >= 8;
+    }
 
     /**
      * Builds or extends a target set and stops, without searching anything.
@@ -345,7 +362,9 @@ public final class ReverseSearcher {
             } else if (arg.startsWith(REPORT_FLAG)) {
                 reportHeight = Integer.parseInt(arg.substring(REPORT_FLAG.length()));
             } else if (arg.equals(RAVINES_FLAG)) {
-                ravinesOnly = true;
+                ravinesOnlyOverride = Boolean.TRUE;
+            } else if (arg.equals(ALL_CARVERS_FLAG)) {
+                ravinesOnlyOverride = Boolean.FALSE;
             } else if (arg.equals(WATER_FLAG)) {
                 waterProbe = true;
             } else if (arg.startsWith(SISTERS_FLAG)) {
@@ -466,6 +485,10 @@ public final class ReverseSearcher {
                 maxBaseShift(), maxColumns(minHeight),
                 ChainPrefilter.DEFAULT_BASE_MIN_Y, ChainPrefilter.DEFAULT_BASE_MAX_Y,
                 maxSlack, maxSlack == 0 ? "contiguous placements" : "foreign placements allowed");
+        System.out.printf("  carvers: %s%n", ravinesOnly(minHeight)
+                ? "ravines only -- every find at height 8+ is ravine-carved, and a cave "
+                        + "cannot open the vertical wall a stack needs (--all-carvers to include them)"
+                : "caves and ravines");
         if (reportHeight < minHeight) {
             System.out.printf("  a %d-chain whose last column finds no terrain still leaves "
                     + "a shorter run, and those now count%n", minHeight);
@@ -531,7 +554,7 @@ public final class ReverseSearcher {
                 ChainPrefilter chainFilter = rankedFilter(minHeight);   // column cap from
                 // the target height, which is the looser one; the height asked of it below
                 // is the report height.
-                AirCarveProbe probe = new AirCarveProbe().ravinesOnly(ravinesOnly);
+                AirCarveProbe probe = new AirCarveProbe().ravinesOnly(ravinesOnly(minHeight));
                 LiquidCarveProbe liquidProbe = waterProbe ? new LiquidCarveProbe() : null;
                 DirtBlobFilter dirtFilter = new DirtBlobFilter();
                 // Reused across sisters: the chunks whose carvers already accepted.

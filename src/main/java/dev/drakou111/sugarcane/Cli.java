@@ -71,7 +71,8 @@ public final class Cli {
                     "<minHeight> [threads] [targets] [firstSeed] [seedCount] "
                             + "[--targets=<file>] [--cpu] [--report=<h>] "
                             + "[--update=<minutes>] [--max-shift=<n>] [--max-columns=<n>] "
-                            + "[--max-slack=<n>] [--sample-from=<n>] [--sisters=<n>]",
+                            + "[--max-slack=<n>] [--sample-from=<n>] [--sisters=<n>] "
+                            + "[--all-carvers]",
                     "Pick the cane RNG first, then solve for a chunk that has it. seedCount "
                             + "0, or leaving it off, runs until you stop it. Collects "
                             + "decoration seeds whose draws could chain a tall enough column "
@@ -100,6 +101,13 @@ public final class Cli {
                             + "grew an unrelated column mid-stack. --max-slack=99 restores "
                             + "the old behaviour. Values between 0 and maxColumns are "
                             + "CPU-only; the kernel cannot express them. "
+                            + "From height 8 up the carve probe uses RAVINES ONLY, because "
+                            + "every find at that height is ravine-carved and a cave cannot "
+                            + "open the vertical wall a stack needs -- canyon runs of 5, 10 "
+                            + "and 28 blocks at the three finds we have. That is also why a "
+                            + "16 is barely harder than an 8 in terrain terms: the ravine "
+                            + "satisfies every column at once, so search tall. --all-carvers "
+                            + "puts caves back, --ravines-only forces them out below height 8. "
                             + "--sample-from=<n> starts decoration-seed sampling at that "
                             + "sample index. Left off, the start is RANDOM and printed, so "
                             + "two machines building the same set cover different ground "

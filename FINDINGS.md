@@ -3275,3 +3275,32 @@ optimisation open: 84% of the search sits behind it.
 
 `--water-probe` stays off, and now there is a named counterexample rather than a vague
 worry about the sea floor.
+
+
+## 6av. Search tall, not short -- a ravine satisfies every column at once
+
+The terrain event a stack needs is not "four columns each got lucky". It is "a ravine opened
+a wall of air against water, with soil at the bottom". Measured at the three tall finds, the
+canyon's vertical run at the stack's own column is **5, 10 and 28 blocks**.
+
+So a 16 is barely harder than an 8 in terrain terms. Once the wall is there it satisfies
+every column of the chain at the same time; the extra difficulty of a taller stack lives
+almost entirely on the RNG side, where q falls and the GPU does the work.
+
+Which makes a height-8 search a strategic error rather than a slow one: it pays the same
+terrain cost per candidate and returns an 8. A collaborator searching directly at 14-16 found
+a 14 in about ten minutes on a 5090, and a 15 not long after.
+
+It also settles why our height-8 run saw 57.5M candidates and no hit. Terrain cooperation is
+the binding constraint and it barely cares about the height being asked for, so the run was
+paying full price for the least valuable possible answer.
+
+### Ravines only, by default, from height 8
+
+`--ravines-only` is now the default at height 8 and above, since every find at that height is
+ravine-carved and no cave can open the vertical wall. Below 8 caves stay in -- a single column
+on another needs no vertical extent, and the confirmed 5-tall is cave-carved.
+
+`--all-carvers` forces caves back at any height and `--ravines-only` forces them out below 8,
+so both directions are reachable. `ReversePipelineTest` pins the confirmed 8-tall against the
+ravine-only path.

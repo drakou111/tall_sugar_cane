@@ -435,7 +435,11 @@ public final class SugarcaneGui {
         JTextField update = f.text("--update (minutes)", "", null);
         JCheckBox cpu = f.check("--cpu", "force the CPU chain filter instead of CUDA");
         JCheckBox water = f.check("--water-probe", "require a chain's water to come from a "
-                + "LIQUID carver: 1.6x, but it can lose spots that sit on the sea floor");
+                + "LIQUID carver: 1.6x, but it is known to reject the reported 11-tall, so "
+                + "leave it off unless you are experimenting");
+        JCheckBox allCarvers = f.check("--all-carvers", "put caves back into the carve probe. "
+                + "From height 8 up it uses ravines only, because every find at that height "
+                + "is ravine-carved; only tick this below height 8 or to compare");
         return new Tab(f.panel, () -> {
             List<String> a = new ArrayList<>(List.of("reverse", req(height, "minHeight"),
                     req(threads, "threads"), req(targets, "targets"),
@@ -454,6 +458,9 @@ public final class SugarcaneGui {
             }
             if (water.isSelected()) {
                 a.add("--water-probe");
+            }
+            if (allCarvers.isSelected()) {
+                a.add("--all-carvers");
             }
             return a;
         });
