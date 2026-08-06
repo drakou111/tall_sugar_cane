@@ -538,9 +538,17 @@ public final class SugarcaneGui {
         JTextField height = f.text("height", "8", null);
         JTextField seeds = f.text("seeds", "", "blank runs until you press Stop");
         JTextField threads = f.text("threads", defaultThreads(), null);
-        return new Tab(f.panel, () -> new ArrayList<>(List.of("spot",
-                req(relX, "relX"), req(relZ, "relZ"), req(baseY, "baseY"),
-                req(height, "height"), orZero(seeds), req(threads, "threads"))));
+        JCheckBox cpu = f.check("--cpu", "force the CPU; the GPU path is about 14x faster "
+                + "and gives the same seeds");
+        return new Tab(f.panel, () -> {
+            List<String> a = new ArrayList<>(List.of("spot",
+                    req(relX, "relX"), req(relZ, "relZ"), req(baseY, "baseY"),
+                    req(height, "height"), orZero(seeds), req(threads, "threads")));
+            if (cpu.isSelected()) {
+                a.add("--cpu");
+            }
+            return a;
+        });
     }
 
     private Tab crossChunkTab() {

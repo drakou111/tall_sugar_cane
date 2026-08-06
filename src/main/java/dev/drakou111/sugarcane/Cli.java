@@ -128,7 +128,7 @@ public final class Cli {
                             + "different upper-16 values rather than consecutively.",
                     ReverseSearcher::main),
             new Command("spot",
-                    "<relX> <relZ> <baseY> <height> [seeds] [threads]",
+                    "<relX> <relZ> <baseY> <height> [seeds] [threads] [--cpu]",
                     "Decoration seeds that grow a stack at one NAMED block instead of "
                             + "anywhere. The reverse search asks whether a seed stacks "
                             + "somewhere and then hunts for terrain to suit it; this asks the "
@@ -140,7 +140,9 @@ public final class Cli {
                             + "ordinary question, since the chain must land on one of 24x24 "
                             + "positions and one of 54 base heights -- in exchange every hit "
                             + "is already matched to terrain you have verified. Coordinates "
-                            + "are chunk-relative, -4..19, the frame `inspect` prints.",
+                            + "are chunk-relative, -4..19, the frame `inspect` prints. "
+                            + "Runs on the GPU when there is one, about 14x faster than the "
+                            + "CPU and giving the same seeds; --cpu forces the CPU path.",
                     SpotSearch::main),
             new Command("crosschunk",
                     "[seeds] [threads] [targetHeight] [minThisChunk] [minNeighbour]",

@@ -34,14 +34,27 @@ public final class SpotSearch {
     }
 
     public static void main(String[] args) throws Exception {
+        // --cpu anywhere in the arguments, stripped before the positional parse.
+        boolean forceCpu = false;
+        java.util.List<String> positional = new java.util.ArrayList<>(args.length);
+        for (String arg : args) {
+            if (arg.equals("--cpu")) {
+                forceCpu = true;
+            } else {
+                positional.add(arg);
+            }
+        }
+        args = positional.toArray(new String[0]);
+
         if (args.length < 4) {
-            System.err.println("usage: spot <relX> <relZ> <baseY> <height> [seeds] [threads]");
+            System.err.println("usage: spot <relX> <relZ> <baseY> <height> [seeds] [threads] [--cpu]");
             System.err.println("  relX and relZ are chunk-relative, -4..19 (a placement can");
             System.err.println("  land four blocks outside its own chunk). baseY is where the");
             System.err.println("  bottom of the stack sits.");
             System.exit(2);
             return;
         }
+
         int wantX = Integer.parseInt(args[0]);
         int wantZ = Integer.parseInt(args[1]);
         int wantY = Integer.parseInt(args[2]);
@@ -75,14 +88,16 @@ public final class SpotSearch {
         final int wantKey = (wantX + 4) + (wantZ + 4) * 24;
         final java.util.Set<Long> seen = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
-        dev.drakou111.sugarcane.gen.GpuChainFilter gpu =
-                dev.drakou111.sugarcane.gen.GpuChainFilter.detect();
+        dev.drakou111.sugarcane.gen.GpuChainFilter gpu = forceCpu ? null
+                : dev.drakou111.sugarcane.gen.GpuChainFilter.detect();
         if (gpu != null) {
             System.out.printf("  using the GPU at %s%n", gpu.binary());
             runOnGpu(gpu, wantX, wantZ, wantY, height, wantKey, seeds, seen);
             return;
         }
-        System.out.println("  no usable GPU, running on the CPU (about 26x slower)");
+        System.out.println(forceCpu
+                ? "  --cpu given, running on the CPU (about 15x slower)"
+                : "  no usable GPU, running on the CPU (about 15x slower)");
         AtomicLong tested = new AtomicLong();
         AtomicLong found = new AtomicLong();
         AtomicLong next = new AtomicLong();
