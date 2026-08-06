@@ -3142,3 +3142,34 @@ the way the disagreement was ours over-accepting, never theirs.
 All three rules need the shift a chain reads at to be pinned, so they apply only with no
 slack budget, which is the default. With foreign placements allowed the shift is not
 determined and the earliest owner is not knowable.
+
+## 6as. The greedy path, folded in: 11.3x at height 12
+
+6ar got the contributed 4+4+4+4 scanner and our chain filter to agree exactly. With the
+semantics identical, its remaining value is speed, so it is now a second kernel inside
+`find_targets.cu` rather than a second binary -- one output format, one host scaffold, one
+argument list, and the byte-identical CPU check covers it for free.
+
+It is chosen when the parameters are exactly what it models: height divisible by four, one
+column of 4 each, no prior placement and none interleaved. Anything else falls through to
+the general filter.
+
+```
+target build, 24 threads
+  height 8   general 3.0 s    greedy 0.9 s     3.3x
+  height 12  general 175.4 s  greedy 15.5 s   11.3x
+```
+
+Byte-identical at both, checked against the CPU at height 8 and against the general kernel
+at height 12 -- the CPU comparison there needs 2.2e9 seeds and does not finish in a
+sensible time, so the chain is greedy == general == CPU rather than one comparison.
+
+The gain grows with height because the walk gets to give up sooner. Every column must be
+exactly 4, so the target y of the next one is pinned, and an invocation whose origin y
+misses it costs one jump instead of 120 draws. At three columns almost every seed dies on
+the first or second invocation.
+
+Two passes, because greedy alone over-accepts: the walk finds a witness, then a validator
+replays the chunk from invocation 0 and rejects it if any earlier or intervening invocation
+lands on a target position first. That validator is the ownership rule of 6ar, which is why
+the two paths agree rather than merely nearly agreeing.

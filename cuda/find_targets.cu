@@ -632,6 +632,231 @@ __device__ bool chainEndingInNewest(Chains<SC> &c, int newestSlot, int minHeight
     return false;
 }
 
+/* ---------------------------------------------------------------------------------
+ * The greedy path: exact N x 4 stacks, for heights divisible by four.
+ *
+ * Contributed as a standalone scanner and folded in here rather than shipped as a second
+ * binary, so there is one output format, one host scaffold and one set of arguments -- and
+ * so the byte-identical CPU check covers it for free.
+ *
+ * It is several times faster than the general filter because it holds no candidate arrays
+ * at all: it walks the stream once carrying only the current target position, and when an
+ * invocation origin y cannot match it skips all twenty tries with a precomputed LCG jump
+ * instead of drawing 120 values. That only works because every column must be exactly 4
+ * tall, which pins the target y of the next column and makes the walk deterministic.
+ *
+ * Two passes, because greedy alone over-accepts. The walk finds a candidate witness; the
+ * validator replays the chunk from invocation 0 and rejects it if any earlier or
+ * intervening invocation lands on a target position first -- the same ownership rule the
+ * general filter enforces, and why the two agree exactly.
+ * --------------------------------------------------------------------------------- */
+
+struct LcgJump {
+    unsigned long long mul;
+    unsigned long long add;
+};
+
+__constant__ LcgJump d_skipAllTries;
+__constant__ LcgJump d_skipRemaining[TRIES];
+
+__device__ __forceinline__ void applyJump(unsigned long long &s, LcgJump j) {
+    s = (j.mul * s + j.add) & MASK48;
+}
+
+/** java.util.Random.next(31), which every bounded draw is built on. */
+__device__ __forceinline__ int next31(unsigned long long &s) {
+    s = (s * MULTIPLIER + ADDEND) & MASK48;
+    return (int) (s >> 17);
+}
+
+__device__ __forceinline__ int nextIntPow2(unsigned long long &s, int bound) {
+    return (int) (((long long) bound * (long long) next31(s)) >> 31);
+}
+
+__device__ __forceinline__ int nextIntMod(unsigned long long &s, int bound) {
+    return next31(s) % bound;
+}
+
+/** height == 4 needs nextInt(3) == 2 twice; the other outcomes still consume a draw. */
+__device__ __forceinline__ bool heightIsFour(unsigned long long &s) {
+    int outer = nextIntMod(s, 3);
+    if (outer != 2) {
+        (void) next31(s);
+        return false;
+    }
+    return nextIntMod(s, 3) == 2;
+}
+
+/** The greedy walk: is there a witness for COLS stacked 4s? May over-accept. */
+template<int COLS>
+__device__ bool greedyWitness(unsigned long long ds, int featureIndex, int count,
+                              int baseMinY, int baseMaxY, int absTries[COLS]) {
+    unsigned long long root = ((ds + (unsigned long long) featureIndex + 10000ULL * 8ULL)
+            ^ MULTIPLIER) & MASK48;
+
+    for (int inv = 0; inv <= count - COLS; inv++) {
+        int ox = nextIntPow2(root, 16);
+        int oz = nextIntPow2(root, 16);
+        int oy = nextIntMod(root, DOUBLED_HEIGHTMAP);
+
+        if (oy < baseMinY || oy > baseMaxY) {
+            applyJump(root, d_skipAllTries);
+            continue;
+        }
+        for (int t = 0; t < TRIES; t++) {
+            int px = ox + nextIntMod(root, 5) - nextIntMod(root, 5);
+            int py = oy + nextIntPow2(root, 1) - nextIntPow2(root, 1);
+            int pz = oz + nextIntMod(root, 5) - nextIntMod(root, 5);
+
+            unsigned long long afterHeight = root;
+            if (!heightIsFour(afterHeight)) {
+                continue;
+            }
+            absTries[0] = inv * TRIES + t;
+            // The invocation still has tries t+1..19 to go, and the walk below starts by
+            // reading an origin, so it needs the stream at the next invocation start.
+            // Missing this was the contributed scanner bug: only t == 19 worked.
+            applyJump(afterHeight, d_skipRemaining[t]);
+
+            int matched = 1;
+            int targetY = py + 4;
+            unsigned long long rng = afterHeight;
+            for (int n = inv + 1; n < count && matched < COLS && matched > 0; n++) {
+                if (count - n < COLS - matched) {
+                    break;
+                }
+                int ax = nextIntPow2(rng, 16);
+                int az = nextIntPow2(rng, 16);
+                int ay = nextIntMod(rng, DOUBLED_HEIGHTMAP);
+                if (ay != targetY) {
+                    applyJump(rng, d_skipAllTries);
+                    continue;
+                }
+                for (int u = 0; u < TRIES; u++) {
+                    int qx = ax + nextIntMod(rng, 5) - nextIntMod(rng, 5);
+                    int qy = ay + nextIntPow2(rng, 1) - nextIntPow2(rng, 1);
+                    int qz = az + nextIntMod(rng, 5) - nextIntMod(rng, 5);
+                    if (qx != px || qy != targetY || qz != pz) {
+                        continue;
+                    }
+                    unsigned long long after2 = rng;
+                    if (!heightIsFour(after2)) {
+                        matched = -1;   // the spot is taken, at the wrong height
+                        break;
+                    }
+                    absTries[matched] = n * TRIES + u;
+                    matched++;
+                    targetY += 4;
+                    rng = after2;
+                    applyJump(rng, d_skipRemaining[u]);
+                    break;
+                }
+            }
+            if (matched == COLS) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/**
+ * The exact check. Replays the chunk from invocation 0 and requires the witness to be
+ * what the game would actually build: every chosen try lands on the target, and no
+ * earlier or intervening try lands there first.
+ */
+template<int COLS>
+__device__ bool validateWitness(unsigned long long ds, int featureIndex, int count,
+                                const int absTries[COLS]) {
+    unsigned long long rng = ((ds + (unsigned long long) featureIndex + 10000ULL * 8ULL)
+            ^ MULTIPLIER) & MASK48;
+    int chosen = 0;
+    int tx = 0, ty = 0, tz = 0;
+    bool haveTarget = false;
+
+    for (int inv = 0; inv < count; inv++) {
+        int chosenTry = (chosen < COLS && absTries[chosen] / TRIES == inv)
+                ? absTries[chosen] % TRIES : -1;
+        int ox = nextIntPow2(rng, 16);
+        int oz = nextIntPow2(rng, 16);
+        int oy = nextIntMod(rng, DOUBLED_HEIGHTMAP);
+
+        if (chosenTry < 0) {
+            if (!haveTarget || oy != ty) {
+                applyJump(rng, d_skipAllTries);
+                continue;
+            }
+            for (int t = 0; t < TRIES; t++) {
+                int px = ox + nextIntMod(rng, 5) - nextIntMod(rng, 5);
+                int py = oy + nextIntPow2(rng, 1) - nextIntPow2(rng, 1);
+                int pz = oz + nextIntMod(rng, 5) - nextIntMod(rng, 5);
+                if (px == tx && py == ty && pz == tz) {
+                    return false;   // an unchosen invocation owns the spot
+                }
+            }
+            continue;
+        }
+
+        for (int t = 0; t < TRIES; t++) {
+            int px = ox + nextIntMod(rng, 5) - nextIntMod(rng, 5);
+            int py = oy + nextIntPow2(rng, 1) - nextIntPow2(rng, 1);
+            int pz = oz + nextIntMod(rng, 5) - nextIntMod(rng, 5);
+
+            if (t < chosenTry) {
+                if (haveTarget && px == tx && py == ty && pz == tz) {
+                    return false;   // an earlier try owns the spot
+                }
+                continue;
+            }
+            if (haveTarget && (px != tx || py != ty || pz != tz)) {
+                return false;
+            }
+            unsigned long long after = rng;
+            if (!heightIsFour(after)) {
+                return false;
+            }
+            if (!haveTarget) {
+                tx = px;
+                tz = pz;
+                ty = py;
+                haveTarget = true;
+            }
+            chosen++;
+            if (chosen == COLS) {
+                return true;
+            }
+            ty += 4;
+            rng = after;
+            applyJump(rng, d_skipRemaining[t]);
+            break;
+        }
+    }
+    return false;
+}
+
+template<int COLS>
+__global__ void greedyKernel(unsigned long long sampleFrom, long long total,
+                             int count, int featureIndex, int baseMinY, int baseMaxY,
+                             unsigned long long *out, unsigned int *outCount,
+                             unsigned int outCapacity) {
+    long long stride = (long long) blockDim.x * gridDim.x;
+    for (long long idx = (long long) blockIdx.x * blockDim.x + threadIdx.x;
+            idx < total; idx += stride) {
+        unsigned long long ds = sampleAt(sampleFrom + (unsigned long long) idx, featureIndex);
+        int absTries[COLS];
+        if (!greedyWitness<COLS>(ds, featureIndex, count, baseMinY, baseMaxY, absTries)) {
+            continue;
+        }
+        if (!validateWitness<COLS>(ds, featureIndex, count, absTries)) {
+            continue;
+        }
+        unsigned int slot = atomicAdd(outCount, 1u);
+        if (slot < outCapacity) {
+            out[slot] = ds;
+        }
+    }
+}
+
 template<int SC>
 __global__ void filterKernel(unsigned long long sampleFrom, long long total,
                              int minHeight, int count, int featureIndex,
@@ -798,11 +1023,63 @@ int main(int argc, char **argv) {
     int threads = 32;
     int blocks = prop.multiProcessorCount * 32;
 
+    {
+        // LCG^n as a single step, composed on the host: (a1,c1) then (a2,c2) is
+        // (a1*a2, a2*c1 + c2). These are what let the greedy walk skip an invocation's
+        // twenty tries without drawing them.
+        LcgJump all;
+        LcgJump remaining[TRIES];
+        for (int t = 0; t < TRIES; t++) {
+            unsigned long long a = 1, c = 0;
+            int steps = (TRIES - 1 - t) * DRAWS_PER_TRY;
+            for (int i = 0; i < steps; i++) {
+                a = (a * MULTIPLIER) & MASK48;
+                c = (c * MULTIPLIER + ADDEND) & MASK48;
+            }
+            remaining[t].mul = a;
+            remaining[t].add = c;
+        }
+        {
+            unsigned long long a = 1, c = 0;
+            for (int i = 0; i < TRIES * DRAWS_PER_TRY; i++) {
+                a = (a * MULTIPLIER) & MASK48;
+                c = (c * MULTIPLIER + ADDEND) & MASK48;
+            }
+            all.mul = a;
+            all.add = c;
+        }
+        cudaMemcpyToSymbol(d_skipAllTries, &all, sizeof(all));
+        cudaMemcpyToSymbol(d_skipRemaining, remaining, sizeof(remaining));
+    }
+
     long long done = 0, accepted = 0, dropped = 0;
     while (done < samples) {
         long long thisBatch = samples - done < batch ? samples - done : batch;
         unsigned int zero = 0;
         cudaMemcpy(dCount, &zero, sizeof(unsigned int), cudaMemcpyHostToDevice);
+        // Heights divisible by four, with one column of 4 each and no shift freedom, are
+        // exactly what the greedy walk handles -- and it is several times faster. Anything
+        // else falls through to the general filter. Both write the same seeds, which is
+        // what the CPU comparison checks.
+        bool greedyEligible = minHeight % 4 == 0 && maxColumns == minHeight / 4
+                && maxBaseShift == 0 && maxSlack == 0
+                && maxColumns >= 2 && maxColumns <= 5 && count >= maxColumns;
+        if (greedyEligible) {
+            switch (maxColumns) {
+                case 2: greedyKernel<2><<<blocks, threads>>>(
+                        sampleFrom + (unsigned long long) done, thisBatch, count,
+                        featureIndex, baseMinY, baseMaxY, dOut, dCount, outCapacity); break;
+                case 3: greedyKernel<3><<<blocks, threads>>>(
+                        sampleFrom + (unsigned long long) done, thisBatch, count,
+                        featureIndex, baseMinY, baseMaxY, dOut, dCount, outCapacity); break;
+                case 4: greedyKernel<4><<<blocks, threads>>>(
+                        sampleFrom + (unsigned long long) done, thisBatch, count,
+                        featureIndex, baseMinY, baseMaxY, dOut, dCount, outCapacity); break;
+                default: greedyKernel<5><<<blocks, threads>>>(
+                        sampleFrom + (unsigned long long) done, thisBatch, count,
+                        featureIndex, baseMinY, baseMaxY, dOut, dCount, outCapacity); break;
+            }
+        } else
         // Four levels is its own instantiation, so the common case keeps the smaller
         // struct. Sizing one struct for five cost 6.25e6 seeds/s against 14.2e6 at a
         // height that only ever needs four -- the arrays are per thread and local memory
