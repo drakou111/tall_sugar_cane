@@ -3354,7 +3354,11 @@ That is also why `SisterScan` calls these "not verifiable" -- a cross-chunk resu
 not a find.
 
 
-## 6ax. Cross-chunk, measured properly: it reaches heights one chunk cannot
+## 6ax. Cross-chunk (superseded by 6ba, which measures it properly)
+
+**The conclusion here is also unreliable.** It rests on single events -- one 14 in 100M pairs
+-- and 6ba, which counts hundreds of thousands instead, reverses it. The two flaws it
+identifies in 6aw are real and worth reading; the number it replaces them with is not.
 
 6aw concluded "nothing at 12 and above". That was an artefact of two mistakes.
 
@@ -3482,3 +3486,49 @@ one stops on -- which is a spot query. So the two factors of P(cross) are both s
 predicates the kernel can now measure at 40M/s, and neither needs the pair loop that made a
 brute force hopeless. 6ay's 55x rests on multiplying measured per-height rates; this is what
 would let it be measured directly instead.
+
+
+## 6ba. Cross-chunk, counted rather than sampled: it loses wherever one chunk can compete
+
+Both previous attempts sampled pairs, and pair sampling cannot answer this. The combined rate
+is around 1e-10, so seeing one costs 1e10 pairs, and every conclusion so far rested on zero,
+one or four events.
+
+It never needed pairs. A pair matters only through the block the two chunks share:
+
+```
+P(cross) = SUM over blocks p of  P(a chain ENDS at p) x P(a chain BEGINS at p)
+```
+
+Both factors belong to a single seed. One pass over N seeds, histogramming where chains end and
+where they begin, evaluates all N^2 pairings at once -- **O(N) instead of O(N^2)**, with the
+answer sharpening as the histograms fill rather than as pairs coincide. 20M seeds in 12 seconds
+now gives what 1e14 pairs could not.
+
+### And the answer is no
+
+| height | split | cross-chunk | one chunk | |
+|---|---|---|---|---|
+| 12 | 6+6 | 1.061e-07 | 2.940e-07 | **0.4x** |
+| 16 | 8+8 | 2.021e-10 | 3.000e-10 | **0.7x** |
+| 18 | 7+11 | 2.224e-13 | four shift levels cannot | -- |
+
+**Cross-chunk is worse at every height a single chunk can reach.** Splitting the RNG demand
+across two streams does buy something, and the alignment costs more: the second chain has to
+begin on the exact block the first ends on, and paying 1-in-24 x 24 x 54 for that exceeds what
+the easier chains save. 81,446 endings and 174,954 beginnings went into the height-16 row, so
+this is not another one-event conclusion.
+
+Its only exclusive ground is above 20, where one chunk cannot go at all -- five shift levels
+allow five columns and five columns of 4 is 20. That is real but remote: 2.2e-13 at height 18
+is already beyond reach, and 21+ is further still.
+
+### What was wrong before
+
+6aw sampled pairs with both sides banded and with `minPart` capping combinations at twice
+itself, and concluded "nothing at 12+". 6ax fixed both and saw a single 14, and read that as
+cross-chunk reaching what one chunk could not. Neither number survives counting properly.
+
+The lesson is about the method rather than the mechanism: three measurements of the same thing,
+and the two that sampled pairs were both wrong, in opposite directions. The rate was never
+within reach of sampling, and no amount of care about the filters would have fixed that.

@@ -95,11 +95,15 @@ scaling     3.0x   -> 8.8x
 - **`merge <out> <in...>`** pools target sets built on different machines. Deduplicates, refuses
   sets that answer different questions, and reports the per-bucket spread.
 - **`crosschunk`** measures whether two neighbouring chunks can build one stack between them.
-  They can, and it reaches heights one chunk cannot: over 100M pairs it produced a **14** in a
-  sample where a single chunk produced neither 13 nor 14. The structural point needs no
-  statistics — shifts must strictly increase, so one chunk is capped at four columns of 4 (16),
-  or five with a fifth shift level (20). **Above 20 a single chunk cannot do it at all**, and
-  two is the only route. Placement order is still assumed, so these are leads, not finds.
+  **They can, and it is not worth it** — 0.4x at height 12 and 0.7x at 16 against a single
+  chunk. Splitting the RNG demand across two streams buys less than the alignment costs, since
+  the second chain must begin on the exact block the first ends on. Its only exclusive ground
+  is above 20, where one chunk cannot go at all, and that is already out of reach.
+
+  It answers this by counting rather than sampling: a pair matters only through the block the
+  two chunks share, so histogramming where chains end and where they begin evaluates every
+  pairing of a sample at once — O(N) rather than O(N²). 20M seeds in 12 seconds gives what 1e14
+  sampled pairs could not.
 
 ## Also
 

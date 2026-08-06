@@ -1,52 +1,57 @@
 package dev.drakou111.sugarcane;
 
 import dev.drakou111.sugarcane.gen.ChainPrefilter;
+import dev.drakou111.sugarcane.gen.OrbitSampler;
 import dev.drakou111.sugarcane.gen.SugarCaneFeature;
 
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicLongArray;
 
 /**
- * Can two neighbouring chunks build one stack between them, and is it worth searching for?
+ * Whether two neighbouring chunks can build one stack between them, and how often.
  *
- * <p>A placement lands at chunk-relative x in -4..19, so a chunk can put cane up to four
- * blocks over its own border. If chunk A stacks into B's territory and B later stacks on top
- * of that, the run is the sum of the two -- and the RNG requirement is two ordinary chains
- * instead of one extraordinary one, which is the whole appeal.
+ * <p>A placement lands at chunk-relative x in -4..19, so a chunk can put cane four blocks over
+ * its own border. If one chunk stacks into the neighbour's territory and the neighbour stacks
+ * on top of that, the run is the sum -- two ordinary chains rather than one extraordinary one,
+ * which is why it is worth asking about at heights a single chunk cannot reach at all.
  *
- * <p>This measures rather than searches. Reaching a given height by combining two chunks is
- * only worth building a pipeline for if it happens meaningfully more often than reaching it
- * in one, and that is a number, not an argument.
+ * <p><b>Not measured by sampling pairs.</b> The combined rate is far below anything pair
+ * sampling can reach, and going faster does not fix that. But a pair only matters through the
+ * one block the two chunks share:
  *
- * <p>Two constraints make it much rarer than "two chains that happen to line up":
- * <ul>
- *   <li>the shared column must be reachable from both, which is an eight-block strip along
- *       the border -- chunk-relative x 12..19 for A, the same block being -4..3 for B;</li>
- *   <li>B's chain must start exactly where A's stops, and B reads its own RNG stream, so
- *       the two y values have to agree by luck.</li>
- * </ul>
+ * <pre>
+ *   P(cross) = SUM over blocks p of  P(a chain ENDS at p) x P(a chain BEGINS at p)
+ * </pre>
  *
- * <p>Placement order is assumed, not checked: A has to have decorated before B, or B's column
- * has nothing to stand on. That depends on how the world was explored, which is why
- * {@code SisterScan} calls these "not verifiable". A cross-chunk find is a lead, not a find.
+ * <p>Both factors are properties of a single seed. So one pass over N seeds, histogramming
+ * where chains end and where they begin, evaluates all N^2 pairings at once -- O(N) instead of
+ * O(N^2), and the answer sharpens as the histograms fill rather than as pairs coincide. The
+ * earlier version of this command formed pairs and could not have seen a 16 in a century.
+ *
+ * <p>Placement order is assumed, not checked: the first chunk must have decorated before the
+ * second, which depends on how the world was explored. A cross-chunk result is a lead.
  */
 public final class CrossChunk {
 
     private static final int OCEAN_INDEX = 5;
 
+    /** Chunk-relative x and z both span -4..19, so a position packs into 24 x 24 x height. */
+    private static final int Y = 128;
+    private static final int CELLS = 24 * 24 * Y;
+
     private CrossChunk() {
     }
 
+    private static int cell(int x, int z, int y) {
+        return ((x + 4) + (z + 4) * 24) * Y + y;
+    }
+
     public static void main(String[] args) throws Exception {
-        long seeds = args.length > 0 ? Long.parseLong(args[0]) : 200_000L;
+        long seeds = args.length > 0 ? Long.parseLong(args[0]) : 200_000_000L;
         int threads = Cli.clampThreads(args.length > 1 ? Integer.parseInt(args[1])
                 : Runtime.getRuntime().availableProcessors());
-        // What you actually want to say is how tall a stack you are after. The split is a
-        // consequence, and a badly chosen one costs orders of magnitude, so it is picked
-        // rather than asked for. Give both explicitly to override.
         int target = args.length > 2 ? Integer.parseInt(args[2]) : 20;
-        int minA;
-        int minB;
+        final int minA;
+        final int minB;
         if (args.length > 4) {
             minA = Integer.parseInt(args[3]);
             minB = Integer.parseInt(args[4]);
@@ -56,125 +61,65 @@ public final class CrossChunk {
             minB = best[1];
         }
 
-        System.out.printf("cross-chunk potential over %d world seeds, %d threads%n",
-                seeds, threads);
-        System.out.printf("  target %d: this chunk contributes >= %d, the neighbour >= %d "
-                        + "(estimated %.2e per pair before the strip constraint)%n",
-                target, minA, minB, rate(minA) * rate(minB));
-        System.out.println("  combined only where both can reach the block");
+        System.out.printf("cross-chunk rate for height %d, over %d seeds, %d threads%n",
+                target, seeds, threads);
+        System.out.printf("  split: one chunk contributes >= %d, the neighbour >= %d%n",
+                minA, minB);
+        System.out.println("  histogramming where chains end and where they begin, then "
+                + "pairing -- every pair of the sample at once, without forming any");
 
-        // Tallest reachable in one chunk, and tallest reachable across the pair.
-        AtomicLongArray single = new AtomicLongArray(64);
-        AtomicLongArray joined = new AtomicLongArray(64);
-        AtomicLong pairs = new AtomicLong();
-        AtomicLong better = new AtomicLong();
-        AtomicLong bestJoined = new AtomicLong();
-        // heightA of each successful combination: which side carried it.
-        AtomicLongArray splitA = new AtomicLongArray(64);
+        final long[][] tops = new long[threads][];
+        final long[][] bases = new long[threads][];
+        AtomicLong next = new AtomicLong();
+        AtomicLong done = new AtomicLong();
+        long start = System.currentTimeMillis();
 
         Thread[] pool = new Thread[threads];
-        AtomicLong next = new AtomicLong();
-        long start = System.currentTimeMillis();
         for (int t = 0; t < threads; t++) {
+            final int id = t;
             pool[t] = new Thread(() -> {
-                // A's chain stands on real soil, so the depth band applies to it.
+                long[] top = new long[CELLS];
+                long[] base = new long[CELLS];
+                // A chain that ENDS somewhere stands on soil, so it keeps the depth band.
                 ChainPrefilter a = new ChainPrefilter(SugarCaneFeature.COUNT_DEFAULT);
-                // B's stands on A's CANE. The band exists because a base needs soil the
-                // terrain actually put there; a column landing on cane needs nothing of the
-                // sort, so B gets the whole legal column. Enumerating B with the band was
-                // the flaw in the first version of this measurement: a join above y=35 was
-                // invisible, and for tall combinations the join is necessarily high -- an
-                // 8-tall A from y=25 tops out at 33, a 12-tall from 25 at 37. It excluded
-                // exactly the case worth asking about.
+                // One that BEGINS there stands on the neighbour's cane, so it does not. This
+                // was the flaw in the first version: banding both sides made any join above
+                // y=35 invisible, and a tall combination joins high by construction.
                 ChainPrefilter b = new ChainPrefilter(SugarCaneFeature.COUNT_DEFAULT,
                         11, 64, 3, 4);
-                for (long i = next.getAndIncrement(); i < seeds; i = next.getAndIncrement()) {
-                    // Decoration seeds sampled directly rather than through a world seed
-                    // and a lattice. Two adjacent chunks have decoration seeds related by
-                    // D' = ((D ^ ws) + 16a) ^ ws, which for a random world seed is no more
-                    // predictable from D than an independent draw -- and this is a rate
-                    // measurement, so what matters is the joint distribution, not that a
-                    // particular pair is genuinely adjacent. Building a lattice per pair was
-                    // most of the run time and bought nothing.
-                    long dsA = mix(i) & ((1L << 48) - 1);
-                    int soloA = a.tallestPossible(dsA, OCEAN_INDEX);
-                    int solo = soloA;
-                    int best = soloA;
-                    single.incrementAndGet(Math.min(solo, 63));
-
-                    // minPart is what each side must contribute, and it matters more than it
-                    // looks: collectChains records the SHORTEST chain reaching it, so
-                    // minPart=4 makes every chain a single column and no combination can
-                    // exceed 8. Asking about 16 means asking each side for 8.
-                    int na = a.collectChains(dsA, OCEAN_INDEX, minA);
-                    boolean aOk = !a.chainsOverflowed();
-
-                    // Nothing of A's reaches a strip a neighbour could continue from, so no
-                    // neighbour can help. Skipping here is most of the run time, since the
-                    // four neighbours are eight more filter evaluations and this is false
-                    // almost always.
-                    boolean anyInStrip = false;
-                    for (int ia = 0; ia < na && aOk && !anyInStrip; ia++) {
-                        int ax = ChainPrefilter.chainX(a.chain(ia));
-                        int az = ChainPrefilter.chainZ(a.chain(ia));
-                        anyInStrip = ax >= 12 || ax <= 3 || az >= 12 || az <= 3;
-                    }
-                    if (!anyInStrip) {
-                        joined.incrementAndGet(Math.min(best, 63));
-                        pairs.incrementAndGet();
-                        continue;
-                    }
-
-                    // All four orthogonal neighbours. The overhang is four blocks in every
-                    // direction, so each shares an eight-wide strip with this chunk, and a
-                    // chain can be continued from any of them.
-                    for (int dir = 0; dir < 4; dir++) {
-                        int nx = dir == 0 ? 1 : dir == 1 ? -1 : 0;
-                        int nz = dir == 2 ? 1 : dir == 3 ? -1 : 0;
-                        long dsB = mix(i ^ (0x9E3779B9L * (dir + 1))) & ((1L << 48) - 1);
-                        int nb = b.collectChains(dsB, OCEAN_INDEX, minB);
-                        if (b.chainsOverflowed()) {
-                            continue;
-                        }
-                        int shiftX = nx * 16;
-                        int shiftZ = nz * 16;
-                        for (int ia = 0; ia < na; ia++) {
-                            long ca = a.chain(ia);
-                            int ax = ChainPrefilter.chainX(ca);
-                            int az = ChainPrefilter.chainZ(ca);
-                            // The same world block, in the neighbour's frame.
-                            int bx = ax - shiftX;
-                            int bz = az - shiftZ;
-                            if (bx < -4 || bx > 19 || bz < -4 || bz > 19) {
-                                continue;   // outside the strip both can reach
-                            }
-                            int topA = ChainPrefilter.chainTop(ca);
-                            int heightA = topA - ChainPrefilter.chainBaseY(ca, 0);
-                            for (int ib = 0; ib < nb; ib++) {
-                                long cb = b.chain(ib);
-                                if (ChainPrefilter.chainX(cb) != bx
-                                        || ChainPrefilter.chainZ(cb) != bz) {
-                                    continue;
-                                }
-                                if (ChainPrefilter.chainBaseY(cb, 0) != topA) {
-                                    continue;   // B has to start exactly where A stops
-                                }
-                                int total = heightA + ChainPrefilter.chainTop(cb)
-                                        - ChainPrefilter.chainBaseY(cb, 0);
-                                if (total > best) {
-                                    best = total;
-                                    splitA.incrementAndGet(Math.min(heightA, 63));
+                for (long run = next.getAndIncrement(); run * OrbitSampler.RUN < seeds;
+                        run = next.getAndIncrement()) {
+                    long ds = OrbitSampler.runStart(run);
+                    for (int k = 0; k < OrbitSampler.RUN; k++) {
+                        int na = a.collectChains(ds, OCEAN_INDEX, minA);
+                        if (!a.chainsOverflowed()) {
+                            for (int i = 0; i < na; i++) {
+                                long c = a.chain(i);
+                                int y = ChainPrefilter.chainTop(c);
+                                if (y >= 0 && y < Y) {
+                                    top[cell(ChainPrefilter.chainX(c),
+                                            ChainPrefilter.chainZ(c), y)]++;
                                 }
                             }
                         }
-                    }
-                    joined.incrementAndGet(Math.min(best, 63));
-                    pairs.incrementAndGet();
-                    if (best > solo) {
-                        better.incrementAndGet();
-                        bestJoined.accumulateAndGet(best, Math::max);
+                        int nb = b.collectChains(ds, OCEAN_INDEX, minB);
+                        if (!b.chainsOverflowed()) {
+                            for (int i = 0; i < nb; i++) {
+                                long c = b.chain(i);
+                                int y = ChainPrefilter.chainBaseY(c, 0);
+                                if (y >= 0 && y < Y) {
+                                    base[cell(ChainPrefilter.chainX(c),
+                                            ChainPrefilter.chainZ(c), y)]++;
+                                }
+                            }
+                        }
+                        ds = OrbitSampler.shift(ds, OCEAN_INDEX,
+                                SugarCaneFeature.VEGETAL_DECORATION);
+                        done.incrementAndGet();
                     }
                 }
+                tops[id] = top;
+                bases[id] = base;
             }, "cross-" + t);
             pool[t].start();
         }
@@ -182,37 +127,78 @@ public final class CrossChunk {
             th.join();
         }
 
-        double secs = (System.currentTimeMillis() - start) / 1000.0;
-        System.out.printf("%n%d chunk pairs in %.1f s%n", pairs.get(), secs);
-        System.out.printf("  pairs where combining beats either chunk alone: %d (%.4f%%)%n",
-                better.get(), 100.0 * better.get() / Math.max(1, pairs.get()));
-        System.out.printf("  tallest combined seen: %d%n", bestJoined.get());
-        System.out.printf("%nsplits that produced a combination (height carried by this "
-                + "chunk):%n");
-        for (int h = 0; h < 64; h++) {
-            if (splitA.get(h) > 0) {
-                System.out.printf("  this chunk %2d + neighbour: %d%n", h, splitA.get(h));
+        long[] top = new long[CELLS];
+        long[] base = new long[CELLS];
+        for (int t = 0; t < threads; t++) {
+            for (int i = 0; i < CELLS; i++) {
+                top[i] += tops[t][i];
+                base[i] += bases[t][i];
             }
         }
-        System.out.printf("%n%-8s %14s %14s%n", "height", "one chunk", "two chunks");
-        for (int h = 63; h >= 4; h--) {
-            long s = tailFrom(single, h);
-            long j = tailFrom(joined, h);
-            if (s == 0 && j == 0) {
-                continue;
+
+        long n = done.get();
+        long topTotal = 0;
+        long baseTotal = 0;
+        for (int i = 0; i < CELLS; i++) {
+            topTotal += top[i];
+            baseTotal += base[i];
+        }
+
+        // Every ordered pairing of the sample, summed exactly. A chain ending at a block in
+        // this chunk's frame meets one beginning at the same world block in the neighbour's:
+        // the same (x, z) shifted by sixteen, and only where both frames can reach it.
+        double pairs = 0;
+        long blocks = 0;
+        for (int dir = 0; dir < 4; dir++) {
+            int sx = dir == 0 ? 16 : dir == 1 ? -16 : 0;
+            int sz = dir == 2 ? 16 : dir == 3 ? -16 : 0;
+            for (int x = -4; x <= 19; x++) {
+                for (int z = -4; z <= 19; z++) {
+                    int bx = x - sx;
+                    int bz = z - sz;
+                    if (bx < -4 || bx > 19 || bz < -4 || bz > 19) {
+                        continue;
+                    }
+                    for (int y = 0; y < Y; y++) {
+                        long ca = top[cell(x, z, y)];
+                        long cb = base[cell(bx, bz, y)];
+                        if (ca != 0 && cb != 0) {
+                            pairs += (double) ca * cb;
+                            blocks++;
+                        }
+                    }
+                }
             }
-            System.out.printf(">= %-5d %14s %14s%n", h, rate(s, pairs.get()), rate(j, pairs.get()));
+        }
+
+        double secs = (System.currentTimeMillis() - start) / 1000.0;
+        double rate = pairs / ((double) n * n);
+        System.out.printf("%n%d seeds in %.1f s (%.2fM/s)%n", n, secs, n / secs / 1e6);
+        System.out.printf("  chains ending, height >= %d  : %d (%.3e per seed)%n",
+                minA, topTotal, topTotal / (double) n);
+        System.out.printf("  chains beginning, height >= %d: %d (%.3e per seed)%n",
+                minB, baseTotal, baseTotal / (double) n);
+        System.out.printf("  blocks that were both an end and a beginning: %d%n", blocks);
+        System.out.printf("%n  P(a chunk pair reaches %d across the border) = %.3e%n",
+                target, rate);
+        System.out.printf("  P(one chunk reaches %d on its own)            = %.3e%n",
+                target, rate(target));
+        if (rate > 0 && rate(target) > 0) {
+            System.out.printf("  cross-chunk is %.1fx%n", rate / rate(target));
+        }
+        if (blocks == 0) {
+            System.out.println("  nothing lined up in this sample, so the estimate is 0 for "
+                    + "want of data rather than because it cannot happen -- use more seeds");
         }
     }
 
     /**
-     * Measured P(a chunk has a chain of at least this height), from the one-chunk column of
-     * this same command over 500M samples.
+     * Measured P(a chunk has a chain of at least this height).
      *
-     * <p>The shape is the whole point: it falls off cliffs at column boundaries rather than
-     * decaying smoothly, because a chain of C columns tops out at exactly 4C. 8 is the most
-     * two columns can give and 12 the most three can, so each is hundreds of times more
-     * common than the height one above it.
+     * <p>The shape is the point: it falls off cliffs at column boundaries rather than decaying
+     * smoothly, because a chain of C columns tops out at exactly 4C. 8 is the most two columns
+     * can give and 12 the most three can, so each is hundreds of times more common than the
+     * height one above it.
      */
     private static double rate(int height) {
         switch (Math.max(0, Math.min(height, 17))) {
@@ -236,13 +222,10 @@ public final class CrossChunk {
     /**
      * The split of {@code target} that maximises P(A) x P(B).
      *
-     * <p>Both sides pay their own rate and the position-matching cost is the same whatever
-     * the split, so the product is the whole objective. Because the rate cliffs at multiples
-     * of four, the answer is never the even split: reaching 20 as 12+8 is about 55x likelier
-     * than as 10+10, and reaching 24 as 16+8 beats 12+12 by about a hundred.
-     *
-     * <p>The rule that falls out: ask each side for a multiple of four, and never for one
-     * more than a multiple of four.
+     * <p>Both sides pay their own rate and the position matching costs the same either way, so
+     * the product is the whole objective. Because the rate cliffs at multiples of four the
+     * answer is rarely the even split: 20 as 12+8 beats 10+10 by about 55x. It is not a law
+     * though -- 12 comes out 6+6, because 6 is still common enough that two beat one 8.
      */
     static int[] bestSplit(int target) {
         int bestA = 4;
@@ -258,25 +241,5 @@ public final class CrossChunk {
             }
         }
         return new int[]{bestA, bestB};
-    }
-
-    private static long tailFrom(AtomicLongArray a, int from) {
-        long n = 0;
-        for (int i = from; i < a.length(); i++) {
-            n += a.get(i);
-        }
-        return n;
-    }
-
-    private static String rate(long hits, long of) {
-        return hits == 0 ? "0" : String.format("%.3e", hits / (double) of);
-    }
-
-    /** splitmix64, so the sampled world seeds and positions spread. */
-    private static long mix(long i) {
-        long z = i * 0x9E3779B97F4A7C15L + 0x632BE59BD9B4E019L;
-        z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L;
-        z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL;
-        return Math.abs(z ^ (z >>> 31));
     }
 }
