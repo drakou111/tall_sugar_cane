@@ -243,6 +243,7 @@ public final class SugarcaneGui {
         addTab("reverse", reverseTab());
         addTab("targets", targetsTab());
         addTab("merge", mergeTab());
+        addTab("crosschunk", crossChunkTab());
         addTab("sisters", sistersTab());
         addTab("inspect", inspectTab());
         // Not a command, so it contributes no arguments and Run does not apply to it.
@@ -521,6 +522,21 @@ public final class SugarcaneGui {
             }
             return a;
         });
+    }
+
+    private Tab crossChunkTab() {
+        Form f = new Form("Can two neighbouring chunks build one stack between them? A chunk "
+                + "places cane up to four blocks over its border, so one could stack into the "
+                + "next and the next stack on top. This measures whether that beats a single "
+                + "chunk -- measured over 20M pairs it is about 1.25x at heights 8 to 11 and "
+                + "nothing at all at 12 and above, because joining costs an exact alignment.");
+        JTextField seeds = f.text("seeds", "20000000", "chunk pairs to sample");
+        JTextField threads = f.text("threads", defaultThreads(), null);
+        JTextField minPart = f.text("minPerSide", "4", "shortest chain to count from each "
+                + "chunk. 4 is one column, which is the most permissive and shows the base "
+                + "rate; raise it to ask about joining two real stacks.");
+        return new Tab(f.panel, () -> new ArrayList<>(List.of("crosschunk",
+                req(seeds, "seeds"), req(threads, "threads"), req(minPart, "minPerSide"))));
     }
 
     private Tab sistersTab() {
