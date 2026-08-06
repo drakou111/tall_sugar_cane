@@ -3057,3 +3057,56 @@ every audit had asked whether the filter rejected real things and none had asked
 it accepted impossible ones. This one is worse: nobody asked whether the set was the size
 it was supposed to be. A parameter that is merely too small produces a search that works
 perfectly and slowly, and nothing in the output says so.
+
+## 6aq. The dedicated 4+4+4+4 scanner, and what validating it found
+
+A contributed kernel (`cuda/stack16.cu`) scans decoration seeds for exactly one stack shape:
+four columns of height 4, base in the usual band, nothing else placed in the chunk. It holds
+no per-thread candidate arrays at all -- it walks the RNG stream once, keeping only the
+current target position -- and it skips an invocation's twenty tries in O(1) with a
+precomputed LCG jump when the origin y cannot match. **215M seeds/s against the chain
+filter's 30M.**
+
+### It was missing 19 roots in every 20
+
+`search_seed` picks a root at try `t` of an invocation, consumes the two height draws, and
+calls `greedy_extensions` for the next invocation -- but the invocation still has tries
+`t+1..19` to go, and `greedy_extensions` starts by reading an origin. So the stream was
+positioned mid-invocation and the walk almost always failed. `greedy_extensions` applies
+`d_skip_remaining_try_jumps[t]` after its own matches; the root path did not.
+
+Only `t == 19` worked, where that jump is zero. The signature was unmistakable once looked
+for -- every hit in a 4M-seed run had `col=0 try=19`:
+
+```
+Name Count
+---- -----
+19     106
+```
+
+With the jump applied, the same range gives 2,616 instead of 107.
+
+### Validated against our own filter, and it wins
+
+Compared over 4M sequential decoration seeds, against `ChainPrefilter` asked the same
+question (minHeight 8 as 4+4, band 13..35, maxBaseShift 0, maxSlack 0):
+
+```
+scanner 2616, ours 3512
+only ours    : 896
+only scanner : 0
+```
+
+A strict subset. **Our filter accepts 896 of 3,512 chains -- 26% -- that cannot happen**, and
+the scanner is right to drop them.
+
+The reason is a rule the chain filter never had. Within one invocation, only the *first* try
+landing on the target position can be the column. A chain needs terrain to permit placement
+at that position, so an earlier try landing there would also have placed -- and if its height
+is not 4, the position is consumed at the wrong height. `ChainPrefilter` lets any of the
+twenty tries be the column and so accepts chains that a real chunk would have preempted.
+
+That is the same category as 6an: not a coverage trade, a soundness gap. And unlike the
+scanner it applies at every height, so fixing `ChainPrefilter` is worth more than adopting
+the scanner -- 26% off the target set at heights divisible by 4 is what the scanner buys,
+while the same rule in our filter buys it everywhere.
