@@ -28,13 +28,32 @@ public class SeedReporter {
                 .build();
     }
 
-    public void reportToDataBase(long seed, int x, int base, int z, int biome, int chunkX, int chunkZ, boolean isCrossChunk, int height, int spawnX, int spawnZ, long away) {
-        String username = Cli.getReporterUsername();
+    /**
+     * The report body.
+     *
+     * <p>Every number goes as a JSON <em>string</em>. JSON has one numeric type and the
+     * receiving end is JavaScript, where that is an IEEE-754 double: exact only to 2^53, while
+     * a world seed uses the full 64 bits. {@code -7585781829663227268} parses as
+     * {@code -7585781829663227000} and the find is then unreproducible — silently, because the
+     * number that comes back still looks like a seed. Quoting costs nothing and the loss is
+     * unrecoverable, so quote everything numeric rather than only the two fields that overflow
+     * today.
+     */
+    static String payload(String username, long seed, int x, int base, int z, int biome,
+            int chunkX, int chunkZ, boolean isCrossChunk, int height, int spawnX, int spawnZ,
+            long away) {
+        return String.format(
+                "{\"username\":\"%s\",\"seed\":\"%d\",\"x\":\"%d\",\"base\":\"%d\",\"z\":\"%d\","
+                        + "\"biome\":\"%d\",\"chunkX\":\"%d\",\"chunkZ\":\"%d\","
+                        + "\"isCrossChunk\":%b,\"height\":\"%d\",\"spawnX\":\"%d\","
+                        + "\"spawnZ\":\"%d\",\"distance\":\"%d\"}",
+                escapeJson(username), seed, x, base, z, biome, chunkX, chunkZ, isCrossChunk,
+                height, spawnX, spawnZ, away);
+    }
 
-        String jsonPayload = String.format(
-                "{\"username\":\"%s\",\"seed\":%d,\"x\":%d,\"base\":%d,\"z\":%d,\"biome\":%d,\"chunkX\":%d,\"chunkZ\":%d,\"isCrossChunk\":%b,\"height\":%d,\"spawnX\":%d,\"spawnZ\":%d,\"distance\":%d}",
-                escapeJson(username), seed, x, base, z, biome, chunkX, chunkZ, isCrossChunk, height, spawnX, spawnZ, away
-        );
+    public void reportToDataBase(long seed, int x, int base, int z, int biome, int chunkX, int chunkZ, boolean isCrossChunk, int height, int spawnX, int spawnZ, long away) {
+        String jsonPayload = payload(Cli.getReporterUsername(), seed, x, base, z, biome,
+                chunkX, chunkZ, isCrossChunk, height, spawnX, spawnZ, away);
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(WEB_APP_URL))
@@ -56,7 +75,7 @@ public class SeedReporter {
         }
     }
 
-    private String escapeJson(String input) {
+    private static String escapeJson(String input) {
         if (input == null) return "";
         return input.replace("\\", "\\\\").replace("\"", "\\\"");
     }
