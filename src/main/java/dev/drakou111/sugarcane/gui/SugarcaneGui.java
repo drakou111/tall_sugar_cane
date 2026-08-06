@@ -504,7 +504,7 @@ public final class SugarcaneGui {
         return new Tab(f.panel, () -> {
             List<String> a = new ArrayList<>(List.of("merge", req(out, "output file")));
             String raw = req(ins, "input files");
-            for (String part : raw.split("\s+")) {
+            for (String part : raw.split("\\s+")) {
                 if (!part.isBlank()) {
                     a.add(part);
                 }
