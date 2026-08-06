@@ -3224,3 +3224,54 @@ It is a coverage trade: it would drop a cave-carved find like the 5-tall. Every 
 heights actually searched is ravine-carved, so the trade looks good above height 8, and
 `ReversePipelineTest` pins the confirmed 8-tall against it -- if that ever fails the
 assumption is wrong and the flag is discarding real finds silently.
+
+## 6au. Why terrain checking is 84% of the search, and what stops it being cheap
+
+Nine chunks are generated per chunk searched -- full noise, carvers, surface builders -- to
+answer a question about roughly four blocks. Chunk generation is ~84% of the reverse search,
+and the probe meant to keep candidates out of it rejects 12%. The expensive stage is the
+crude one.
+
+### It should be five columns, not nine chunks
+
+A chain is a vertical stack at one (x, z). So everything the cane feature asks is answerable
+from five noise columns -- the column itself, for air at each base and soil under it, and its
+four horizontal neighbours, for `needWater`. That is 5 columns against the 2,304 a
+nine-chunk generation computes.
+
+`terrain.column` already exists and `noiseCouldHoldChain` already uses it, so the machinery
+is there. The blocker is not the column oracle, it is that we cannot yet answer *water*.
+
+### The water source that nothing models
+
+`--water-probe` (`LiquidCarveProbe`) rejects the reported 11-tall. Retention against every
+find:
+
+| find | --water-probe | --ravines-only |
+|---|---|---|
+| confirmed 8-tall | keeps | keeps |
+| confirmed 5-tall | keeps | drops (cave-carved, height 5) |
+| reported 11 | **drops** | keeps |
+| simulated 10 | keeps | keeps |
+
+The obvious explanation was that the 11's water is the noise fill rather than a carver, since
+the probe only knows carver water. It is not. Reading the four neighbours directly at the
+three levels `needWater` checks:
+
+```
+y=27  +x noise=1 water=false carver=false   -x ...   +z noise=1 water=false carver=false   -z ...
+y=31  (same)
+y=34  (same)
+```
+
+Every neighbour reads solid in the noise and unflooded in the carver probe, at every level --
+yet `inspect` shows the real world with `+z=water` at y=27, and the cane grows. So the water
+at that block comes from neither the noise fill nor a LIQUID carver, and until that is
+identified any water prefilter will silently discard real finds.
+
+That is the one thing standing between the current pipeline and a terrain check that never
+generates a chunk until a candidate has passed everything. Worth more than any other
+optimisation open: 84% of the search sits behind it.
+
+`--water-probe` stays off, and now there is a named counterexample rather than a vague
+worry about the sea floor.
