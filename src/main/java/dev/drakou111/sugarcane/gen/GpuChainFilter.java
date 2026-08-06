@@ -68,17 +68,30 @@ public final class GpuChainFilter {
             if (in == null) {
                 return null;
             }
-            String suffix = System.getProperty("os.name", "").toLowerCase().contains("win")
-                    ? ".exe" : "";
-            Path dir = Files.createTempDirectory("sugarcane-cuda");
+            boolean windows = System.getProperty("os.name", "").toLowerCase().contains("win");
+            String suffix = windows ? ".exe" : "";
+            // A stable path, not a fresh temp directory per run. Two reasons, both about
+            // antivirus: writing a new unsigned executable and immediately launching it is
+            // the shape of a dropper, and a random path means any exclusion a user adds
+            // stops applying the next time they start the program. Same bytes in the same
+            // place every run is both less alarming and actually excludable.
+            String home = windows ? System.getenv("LOCALAPPDATA") : System.getProperty("user.home");
+            Path dir = home != null && !home.isBlank()
+                    ? Path.of(home, windows ? "sugarcane" : ".sugarcane", "cuda")
+                    : Files.createTempDirectory("sugarcane-cuda");
+            Files.createDirectories(dir);
             Path exe = dir.resolve("find_targets" + suffix);
-            Files.copy(in, exe);
+
+            byte[] wanted = in.readAllBytes();
+            // Only rewritten when it differs, so a steady state is no writes at all --
+            // a scanner has nothing new to look at and the file stays whatever the user
+            // told their antivirus it was.
+            boolean same = Files.isRegularFile(exe) && Files.size(exe) == wanted.length
+                    && java.util.Arrays.equals(Files.readAllBytes(exe), wanted);
+            if (!same) {
+                Files.write(exe, wanted);
+            }
             exe.toFile().setExecutable(true);
-            // Best effort: a searcher can run for days, so leaving one file per run in
-            // the temp directory is untidy rather than harmful, and deleting it while a
-            // child process still holds it would be worse.
-            exe.toFile().deleteOnExit();
-            dir.toFile().deleteOnExit();
             unpacked = exe;
         } catch (IOException e) {
             lastFailure = "could not unpack the bundled kernel: " + e.getMessage();
@@ -101,6 +114,36 @@ public final class GpuChainFilter {
 
     public static String lastFailure() {
         return lastFailure;
+    }
+
+    /**
+     * Turn a launch failure into something the reader can act on.
+     *
+     * <p>Windows error 225 is Defender refusing to start the process. The kernel is an
+     * unsigned executable that the jar writes out and runs, which is a shape antivirus is
+     * right to be suspicious of in general, so this is not a bug to fix so much as a fact
+     * to explain -- silently dropping to the CPU is a 4x slowdown that looks like nothing
+     * happened.
+     */
+    private static String explain(Path binary, Exception e) {
+        String msg = String.valueOf(e.getMessage());
+        boolean blocked = msg.contains("error=225")
+                || msg.toLowerCase().contains("virus")
+                || msg.toLowerCase().contains("unwanted software");
+        if (!blocked) {
+            return binary + ": " + msg;
+        }
+        return binary + ": blocked by antivirus (" + msg + ")"
+                + System.lineSeparator()
+                + "            The CUDA kernel is an unsigned executable, so Defender stops"
+                + " it starting. The search still runs, on the CPU, several times slower."
+                + System.lineSeparator()
+                + "            To get the fast path back, either allow that exact path in"
+                + " your antivirus, or build the kernel yourself with cuda/build.bat and"
+                + " leave find_targets.exe beside the jar -- a local copy is preferred over"
+                + " the bundled one."
+                + System.lineSeparator()
+                + "            Or pass --cpu to stop it trying and quiet the warning.";
     }
 
     /** @return a usable filter, or null if this machine has none */
@@ -137,7 +180,7 @@ public final class GpuChainFilter {
                         + "height 2 -- suspect an argument mismatch between this build and "
                         + "the binary";
             } catch (Exception e) {
-                lastFailure = p + ": " + e.getMessage();
+                lastFailure = explain(p, e);
             }
         }
         if (!sawBinary) {

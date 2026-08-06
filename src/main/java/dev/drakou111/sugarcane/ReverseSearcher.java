@@ -754,11 +754,18 @@ public final class ReverseSearcher {
      * per member and is a one-off: the set is world-seed-independent.
      */
     /**
-     * Samples handed out between checkpoints. At a height-independent ~7.7 thread-us a
-     * seed this is roughly half a minute of work on a dozen threads, which is a
-     * reasonable amount to be willing to lose.
+     * Samples handed out between checkpoints, and therefore how much work a Ctrl-C costs.
+     *
+     * <p>Was 50M, chosen when the chain filter ran at a few million seeds a second and an
+     * epoch was tens of seconds. The greedy path does 383M/s, which made an epoch 0.13 s of
+     * GPU work wrapped in host work that does not shrink -- the card ran the pipeline at
+     * 104M/s against its own 383M/s, waiting between epochs rather than searching.
+     *
+     * <p>One constant for both devices, so a GPU-built and a CPU-built set still sample the
+     * same boundaries and stay comparable. That is the reason this is fixed rather than
+     * adapted to whatever rate a machine happens to measure.
      */
-    private static final long EPOCH_SAMPLES = 50_000_000L;
+    private static final long EPOCH_SAMPLES = 1_000_000_000L;
 
     /**
      * The ranked target filter: a chain may assume no earlier placement, and use no more

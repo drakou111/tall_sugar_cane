@@ -1,4 +1,4 @@
-// Chain prefilter on the GPU: which decoration seeds could chain a tall enough sugar
+﻿// Chain prefilter on the GPU: which decoration seeds could chain a tall enough sugar
 // cane column, judged from the RNG alone with no terrain.
 //
 // A transliteration of gen/ChainPrefilter.java, not a reimagining of it. Everything here
@@ -1000,7 +1000,15 @@ int main(int argc, char **argv) {
         return 3;
     }
 
-    const long long batch = 1LL << 22;
+    // Each batch ends in a synchronise, so the card sits idle while the host reads the
+    // count back and appends. At 2^22 a 50M-sample epoch was twelve of those and the GPU
+    // measured 26-98%, sawtoothing. 2^24 makes it three.
+    //
+    // Batching does not change which seeds are found -- only the order they are written in,
+    // and the host sorts. Capacity stays at half a batch, the same margin as before, so an
+    // overflow is still the impossible-acceptance-rate case and still exits 4 rather than
+    // silently dropping.
+    const long long batch = 1LL << 24;
     unsigned int outCapacity = (unsigned int) (batch / 2);
     unsigned long long *dOut = NULL;
     unsigned int *dCount = NULL;
@@ -1138,3 +1146,4 @@ int main(int argc, char **argv) {
     fprintf(stderr, "tested=%lld accepted=%lld dropped=%lld\n", samples, accepted, dropped);
     return dropped > 0 ? 4 : 0;
 }
+
