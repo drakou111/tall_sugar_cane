@@ -555,9 +555,10 @@ public final class SugarcaneGui {
     private Tab crossChunkTab() {
         Form f = new Form("Can two neighbouring chunks build one stack between them? A chunk "
                 + "places cane up to four blocks over its border, so one could stack into the "
-                + "next and the next stack on top. This measures whether that beats a single "
-                + "chunk -- measured over 20M pairs it is about 1.25x at heights 8 to 11 and "
-                + "nothing at all at 12 and above, because joining costs an exact alignment.");
+                + "next and the next stack on top. This measures the rate; the crossfind tab "
+                + "searches for actual ones. It does not sample pairs -- that could not have "
+                + "seen a 16 in a century -- but histograms where chains end and where they "
+                + "begin, which evaluates every pairing of the sample at once.");
         JTextField seeds = f.text("seeds", "20000000", "chunk pairs to sample");
         JTextField threads = f.text("threads", defaultThreads(), null);
         JTextField target = f.text("targetHeight", "20", "how tall a combined stack you are "

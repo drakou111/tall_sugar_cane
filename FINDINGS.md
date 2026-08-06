@@ -3681,3 +3681,47 @@ What that costs: 6.4e8 rotations/s single-threaded, so the whole x,z plane at a 
 about 52 CPU-days or ~12 GPU-hours. y must be known or nearly so; 256 values multiply it out of
 reach. Twenty observed blocks leave 4.1e3 false positives over the plane, twenty-six leave 1.
 The consolation is that this one is embarrassingly parallel, unlike 6bc.
+
+## 6be: cross-chunk finds 16s in seconds, and it is not close
+
+`crossfind` (FINDINGS 6bc gave it the solver) over 1e8 decoration seeds, 12 CPU threads, no GPU:
+
+```
+  pass 1: 407030 chains stored in 41.1 s
+  joins tried             : 32359
+  world seeds solved      : 32127
+  pairs inside the border : 19465
+  both chunks cane ocean  : 5723
+  every base carved       : 41
+  FINDS                   : 41          (40 x 16, 1 x 17)
+done in 93.9 s
+```
+
+Two numbers are consistency checks rather than results. **32127 world seeds from 32359 joins**
+is one per pair, which is what the algebra says: the low nibble is pinned, leaving 44 free bits
+against 44 bits of equation. **19465/32127 = 60.6% inside the border** against `DecorationLattice`'s
+independently measured 0.604. Both would have moved if the join rule or the lift were wrong.
+
+### The speedup
+
+`rate(16) = 3.0e-10` per decoration seed, so those same 1e8 seeds contain **0.030** single-chunk
+16-chains -- and each of those would still need a world seed that places it in the border, a
+cane-bearing ocean, and a ravine. `crossfind` returned 41 that had already passed all three.
+
+So about **1,400x more 16s per seed scanned**, and the comparison flatters the single-chunk route
+badly, because its 0.030 chains are raw and the 41 are finished. End to end the gap is far wider:
+the single-chunk route needs a target set at height 16 before it can start, and a target set is
+980x more expensive per member at 16 than at 12, where 100k members already cost 6.4 GPU-hours.
+`crossfind` needs no target set, no GPU, and no world-seed search at all -- the pair produces the
+world seed.
+
+The 17 is the sharper point. `rate(17) = 0` in the table: a single chunk needs a fifth column and
+a fifth shift level to reach it. Cross-chunk got one as 9+8 for the same price as a 16.
+
+### The standing caveat
+
+Decoration order is assumed, not checked. Chunk A must have decorated before chunk B, which is a
+property of how the world was explored rather than of the seed. Everything else on a hit is
+verified: both chains exist, they meet at one block, the world seed places both chunks, both are
+cane-bearing ocean, every column base of both is inside an air carve, and chunk A has soil under
+its bottom column. These are leads, and they want confirming in game before they are finds.
