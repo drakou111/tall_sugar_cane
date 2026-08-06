@@ -600,7 +600,10 @@ public final class RegionSearcher {
         void prepareBiomesOnly(long seed) {
             this.seed = seed;
             this.biomes = new OverworldBiomeSource(MCVersion.v1_16_1, seed);
-            dev.drakou111.sugarcane.gen.LayerCaches.enlarge(this.biomes);
+            // Deliberately NOT enlarged. The bigger layer caches are worth 1.07x to the box
+            // scan, where one biome source serves ~1,400 neighbouring chunks and the caches
+            // get hot. Here a source is built per sister and answers a handful of scattered
+            // lookups, so the cache never pays for itself and allocating it is pure cost.
             this.terrain = null;
             this.frozenOcean = null;
             spawnKnown = false;
