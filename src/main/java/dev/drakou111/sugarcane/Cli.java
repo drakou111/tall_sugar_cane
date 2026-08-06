@@ -167,6 +167,37 @@ public final class Cli {
                             + "to have decorated first, which depends on how the world was "
                             + "explored, so a cross-chunk result is a lead and not a find.",
                     CrossChunk::main),
+            new Command("crossfind",
+                    "[seeds] [threads] [targetHeight] [minA] [minB] [--dx=1] [--dz=0] "
+                            + "[--water-probe] [--max-store=<n>]",
+                    "Search for cross-chunk stacks, where `crosschunk` only measures them. "
+                            + "The single-chunk pipeline cannot do this: it picks a world seed "
+                            + "and asks the lattice where a decoration seed lands, and asking "
+                            + "a random world seed to place TWO particular decoration seeds in "
+                            + "adjacent chunks is hopeless, because the second is then fixed "
+                            + "and almost certainly wrong. So the world seed is solved for "
+                            + "instead, by Hensel lifting the equation the pair satisfies "
+                            + "(FINDINGS 6bc) -- the chunk coordinate cancels out of it, "
+                            + "leaving one equation in the world seed alone, and it comes back "
+                            + "afterwards from the same lattice as ever. 1.45 ms a pair. "
+                            + "The join is chunk-relative -- a chain ending at relative x meets "
+                            + "one beginning at x-16dx -- so pairs are matched without knowing "
+                            + "where either chunk is. Pairs whose decoration seeds disagree "
+                            + "below bit four cannot solve at all, so the low nibble is part of "
+                            + "the match key and those fifteen in sixteen are never formed. "
+                            + "Two passes: the taller side is rare and goes in a table, the "
+                            + "shorter is streamed against it. --dx and --dz pick which "
+                            + "neighbour, default the chunk at +1,0. "
+                            + "Verified on a hit: both chains exist, they meet at one block, "
+                            + "the world seed places both chunks inside the border, both are "
+                            + "cane-bearing ocean, every column base of both chains is inside "
+                            + "an air carve, and chunk A has soil under its bottom column -- "
+                            + "chunk B does not need any, since it stands on A's cane. "
+                            + "NOT verified: decoration order. A must have decorated before B, "
+                            + "which is a property of how the world was explored and not of "
+                            + "the seed, so a hit is a strong lead that still wants confirming "
+                            + "in game.",
+                    CrossFind::main),
             new Command("merge",
                     "<out> <in...>",
                     "Pool target sets built on different machines into one. A set never "

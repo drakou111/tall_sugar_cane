@@ -245,6 +245,7 @@ public final class SugarcaneGui {
         addTab("merge", mergeTab());
         addTab("spot", spotTab());
         addTab("crosschunk", crossChunkTab());
+        addTab("crossfind", crossFindTab());
         addTab("sisters", sistersTab());
         addTab("inspect", inspectTab());
         // Not a command, so it contributes no arguments and Run does not apply to it.
@@ -565,6 +566,50 @@ public final class SugarcaneGui {
                 + "10+10) and 16 as 8+8.");
         return new Tab(f.panel, () -> new ArrayList<>(List.of("crosschunk",
                 req(seeds, "seeds"), req(threads, "threads"), req(target, "targetHeight"))));
+    }
+
+    private Tab crossFindTab() {
+        Form f = new Form("Actually search for cross-chunk stacks, where the crosschunk tab only "
+                + "measures them. The ordinary pipeline cannot: it picks a world seed and asks "
+                + "where a decoration seed lands, and asking one world seed to place TWO "
+                + "particular decoration seeds in neighbouring chunks is hopeless. So the world "
+                + "seed is solved for instead, from the pair, in about 1.5 ms. Pairs are matched "
+                + "on chunk-relative coordinates, so where the chunks are never enters until the "
+                + "end. A hit still assumes chunk A decorated before chunk B, which depends on "
+                + "how the world was explored -- so it is a strong lead, not a confirmed find.");
+        JTextField seeds = f.text("seeds", "100000000", "decoration seeds to sweep, twice: "
+                + "once to build the table of the rarer side, once to stream the other past it");
+        JTextField threads = f.text("threads", defaultThreads(), null);
+        JTextField target = f.text("targetHeight", "16", "the combined height. The split is "
+                + "chosen for you and matters more than the total, because the per-chain rate "
+                + "cliffs at multiples of 4: 16 goes 8+8, which is two ordinary chains, and 20 "
+                + "goes 12+8 rather than 10+10.");
+        JTextField minA = f.text("minA", "", "blank lets the split be chosen; give both to "
+                + "override");
+        JTextField minB = f.text("minB", "", "blank lets the split be chosen");
+        JTextField dx = f.text("--dx", "1", "which neighbour, in chunks");
+        JTextField dz = f.text("--dz", "0", null);
+        JCheckBox water = f.check("--water-probe", "also require carved water beside every "
+                + "base. Sound but lossy -- a spot on the sea floor gets its water from the "
+                + "noise fill and no carver, so this can drop real finds");
+        return new Tab(f.panel, () -> {
+            List<String> a = new ArrayList<>(List.of("crossfind",
+                    req(seeds, "seeds"), req(threads, "threads"), req(target, "targetHeight")));
+            String a1 = minA.getText().trim(), b1 = minB.getText().trim();
+            if (!a1.isEmpty() != !b1.isEmpty()) {
+                throw new IllegalArgumentException("give both minA and minB, or neither");
+            }
+            if (!a1.isEmpty()) {
+                a.add(a1);
+                a.add(b1);
+            }
+            a.add("--dx=" + req(dx, "--dx"));
+            a.add("--dz=" + req(dz, "--dz"));
+            if (water.isSelected()) {
+                a.add("--water-probe");
+            }
+            return a;
+        });
     }
 
     private Tab sistersTab() {
