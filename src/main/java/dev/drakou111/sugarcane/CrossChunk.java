@@ -41,12 +41,18 @@ public final class CrossChunk {
         long seeds = args.length > 0 ? Long.parseLong(args[0]) : 200_000L;
         int threads = Cli.clampThreads(args.length > 1 ? Integer.parseInt(args[1])
                 : Runtime.getRuntime().availableProcessors());
-        int minPart = args.length > 2 ? Integer.parseInt(args[2]) : 5;
+        // Separate, because the split matters enormously and symmetric was hiding it. The
+        // per-chain rate has cliffs at column boundaries, not a smooth decay: 8 is the most a
+        // two-column chain can be and 12 the most a three-column one can, so they are 785x
+        // and 165x more common than the 9 and 13 just above them. Reaching 20 as 12+8 is
+        // therefore far likelier than as 10+10, even though both sum the same.
+        int minA = args.length > 2 ? Integer.parseInt(args[2]) : 5;
+        int minB = args.length > 3 ? Integer.parseInt(args[3]) : minA;
 
         System.out.printf("cross-chunk potential over %d world seeds, %d threads%n",
                 seeds, threads);
-        System.out.printf("  each seed: one chunk pair, chains of >= %d per side, "
-                + "combined only where both can reach the block%n", minPart);
+        System.out.printf("  each seed: this chunk contributes >= %d, the neighbour >= %d, "
+                + "combined only where both can reach the block%n", minA, minB);
 
         // Tallest reachable in one chunk, and tallest reachable across the pair.
         AtomicLongArray single = new AtomicLongArray(64);
@@ -54,6 +60,8 @@ public final class CrossChunk {
         AtomicLong pairs = new AtomicLong();
         AtomicLong better = new AtomicLong();
         AtomicLong bestJoined = new AtomicLong();
+        // heightA of each successful combination: which side carried it.
+        AtomicLongArray splitA = new AtomicLongArray(64);
 
         Thread[] pool = new Thread[threads];
         AtomicLong next = new AtomicLong();
@@ -89,7 +97,7 @@ public final class CrossChunk {
                     // looks: collectChains records the SHORTEST chain reaching it, so
                     // minPart=4 makes every chain a single column and no combination can
                     // exceed 8. Asking about 16 means asking each side for 8.
-                    int na = a.collectChains(dsA, OCEAN_INDEX, minPart);
+                    int na = a.collectChains(dsA, OCEAN_INDEX, minA);
                     boolean aOk = !a.chainsOverflowed();
 
                     // Nothing of A's reaches a strip a neighbour could continue from, so no
@@ -115,7 +123,7 @@ public final class CrossChunk {
                         int nx = dir == 0 ? 1 : dir == 1 ? -1 : 0;
                         int nz = dir == 2 ? 1 : dir == 3 ? -1 : 0;
                         long dsB = mix(i ^ (0x9E3779B9L * (dir + 1))) & ((1L << 48) - 1);
-                        int nb = b.collectChains(dsB, OCEAN_INDEX, minPart);
+                        int nb = b.collectChains(dsB, OCEAN_INDEX, minB);
                         if (b.chainsOverflowed()) {
                             continue;
                         }
@@ -144,7 +152,10 @@ public final class CrossChunk {
                                 }
                                 int total = heightA + ChainPrefilter.chainTop(cb)
                                         - ChainPrefilter.chainBaseY(cb, 0);
-                                best = Math.max(best, total);
+                                if (total > best) {
+                                    best = total;
+                                    splitA.incrementAndGet(Math.min(heightA, 63));
+                                }
                             }
                         }
                     }
@@ -167,6 +178,13 @@ public final class CrossChunk {
         System.out.printf("  pairs where combining beats either chunk alone: %d (%.4f%%)%n",
                 better.get(), 100.0 * better.get() / Math.max(1, pairs.get()));
         System.out.printf("  tallest combined seen: %d%n", bestJoined.get());
+        System.out.printf("%nsplits that produced a combination (height carried by this "
+                + "chunk):%n");
+        for (int h = 0; h < 64; h++) {
+            if (splitA.get(h) > 0) {
+                System.out.printf("  this chunk %2d + neighbour: %d%n", h, splitA.get(h));
+            }
+        }
         System.out.printf("%n%-8s %14s %14s%n", "height", "one chunk", "two chunks");
         for (int h = 63; h >= 4; h--) {
             long s = tailFrom(single, h);

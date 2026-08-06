@@ -3399,3 +3399,45 @@ order can be relied on.
 
 That last part is still unresolved and still the reason these are leads rather than finds: the
 first chunk must have decorated before the second, which depends on how the world was explored.
+
+
+## 6ay. The split matters more than the total: 12+8 beats 10+10 by ~55x
+
+A collaborator's point, and it follows from a shape in the data that is easy to miss. The
+per-chain rate does not decay smoothly with height -- it falls off cliffs at column boundaries,
+because a chain of C columns tops out at exactly 4C:
+
+| height | rate | columns needed |
+|---|---|---|
+| >= 8 | 3.77e-02 | 2 |
+| >= 9 | 4.80e-05 | 3 |
+| >= 12 | 3.30e-07 | 3 |
+| >= 13 | 2.00e-09 | 4 |
+
+**785x between 8 and 9, and 165x between 12 and 13.** So 8 and 12 are not ordinary heights,
+they are the maxima of their column counts, and asking for one more than either costs a whole
+extra column.
+
+Reaching 20 across two chunks, by split:
+
+| split | P(A) x P(B) |
+|---|---|
+| **12 + 8** | 3.3e-7 x 3.77e-2 = **1.24e-8** |
+| 16 + 4 | 3e-10 x ~1 = 3.0e-10 |
+| 10 + 10 | 1.5e-5 x 1.5e-5 = 2.3e-10 |
+| 9 + 11 | 4.8e-5 x 3.1e-6 = 1.5e-10 |
+
+**12+8 is about 55x better than 10+10**, and the even-looking split is close to the worst of
+the sensible ones. The rule: put every column boundary to work -- ask each side for a multiple
+of 4, and never for one more than a multiple of 4.
+
+### Not confirmed by brute force, and why that is expected
+
+100M pairs at 12+8 and at 10+10 both produced nothing. That is what the numbers predict: with
+the strip constraint, 12+8 expects about 0.06 events at that scale and 10+10 about 0.001.
+Separating them needs roughly 1.6e10 pairs, about five hours on the CPU, which is a GPU port
+rather than a longer run.
+
+`crosschunk` now takes the two sides separately -- `crosschunk <seeds> <threads> <minThisChunk>
+<minNeighbour>` -- and reports which split carried each combination it finds, so the question
+is answerable once there is something fast enough to answer it with.

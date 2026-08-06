@@ -143,7 +143,7 @@ public final class Cli {
                             + "are chunk-relative, -4..19, the frame `inspect` prints.",
                     SpotSearch::main),
             new Command("crosschunk",
-                    "[seeds] [threads] [minPerSide]",
+                    "[seeds] [threads] [minThisChunk] [minNeighbour]",
                     "Measure whether two neighbouring chunks can build one stack between "
                             + "them. A placement lands at chunk-relative x -4..19, so a chunk "
                             + "can put cane four blocks over its border; if one stacks into "
