@@ -3532,3 +3532,74 @@ cross-chunk reaching what one chunk could not. Neither number survives counting 
 The lesson is about the method rather than the mechanism: three measurements of the same thing,
 and the two that sampled pairs were both wrong, in opposite directions. The rate was never
 within reach of sampling, and no amount of care about the filters would have fixed that.
+
+## 6bb. Two-chunk reversal: the world seed cancels, and there are no free parameters
+
+The question was how to set free parameters so the lattice reduction works over two chunks at
+once -- fix x and z for the first chunk, take two decoration seeds, and solve. It turns out
+there is nothing to fix, because the position drops out.
+
+### The world seed cancels
+
+`D(x,z) = (x*l + z*m) ^ ws`, with l and m odd and fixed by ws. The neighbour at x+16 gains 16l
+inside the sum, so with `S = x*l + z*m`:
+
+```
+D1 ^ D2 = (S ^ ws) ^ ((S + 16l) ^ ws) = S ^ (S + 16l)
+```
+
+Verified on 2M adjacent pairs. And l is odd, so 16l has exactly four trailing zeros, which
+forces the low four bits of `D1 ^ D2` to zero for every S and every world seed:
+
+```
+2000000 adjacent chunk pairs
+  pairs where (D1 ^ D2) low four bits are NOT zero: 0
+```
+
+**A cross-chunk target pair must agree in its low nibble** -- a free 16x prune before any
+lattice work, and conveniently the same nibble the search already buckets by, so a valid pair
+always comes from one bucket.
+
+### And the position cancels too
+
+Since `S = D1 ^ ws`, substituting gives
+
+```
+(D2 ^ ws) - (D1 ^ ws)  ==  16 * l(ws)     (mod 2^48)
+```
+
+One equation, one unknown, and x and z are nowhere in it. So there are no free parameters to
+set: solve for ws first, and the position follows from the ordinary single-chunk lattice
+`x*l + z*m = D1 ^ ws`. Expect about one world seed per target pair, since it is one 48-bit
+equation over a 48-bit space.
+
+Worth ruling out: `X = D1 ^ D2` does not usefully constrain l. For any S, `K = (S ^ X) - S`, so
+almost every l admits some S. The low-nibble condition is the only cheap structural prune.
+
+### It splits 2^24 + 2^24
+
+Brute force over ws is 2^48. It separates, which is what makes a meet in the middle possible:
+
+```
+500000 world seeds
+  state2 != H2(hi) + L2(lo) mod 2^48 : 0
+  H2 with any of its low 24 bits set : 0
+  low 8 bits of next(32) depending on hi: 0
+```
+
+Writing `seed0 = (ws ^ M) & mask` as `hi<<24 | lo`, the hi half contributes `M*(hi<<24)`, whose
+low 24 bits are zero. The second LCG step stays separable because the wrap in state1 vanishes
+under multiplication: `(X - 2^48)*M == X*M mod 2^48`. So `state2 = H2(hi) + L2(lo)` exactly, no
+carry correction, and H2 keeps its low 24 bits clear -- which puts the low 8 bits of the second
+`next(32)` under `lo` alone.
+
+### What is left
+
+The solver itself. Both sides of the equation are additive in the two halves up to small carry
+corrections, which is the shape a meet in the middle wants, and 2^24 + 2^24 is minutes rather
+than the 2^48 of a scan.
+
+Not built here, deliberately. A wrong MITM returns most of the solutions and looks perfect,
+and the failure is invisible against a search that is supposed to find almost nothing. The
+oracle for it is cheap though -- pick a world seed, derive D1 and D2 from it, and require the
+solver to return that seed -- so it is testable, just not testable by inspection.
