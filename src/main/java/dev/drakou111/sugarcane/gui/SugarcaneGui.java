@@ -430,7 +430,7 @@ public final class SugarcaneGui {
                 + "which is the most columns a chain can have. Derived from the height "
                 + "(4 up to height 16, 5 above); set it only to experiment.");
         JTextField sampleFrom = f.text("--sample-from=<n>", "", "start decoration sampling "
-                + "at this index, so two machines cover different ground");
+                + "at this index. Blank means a random start, printed so you can repeat it");
         JTextField update = f.text("--update (minutes)", "", null);
         JCheckBox cpu = f.check("--cpu", "force the CPU chain filter instead of CUDA");
         JCheckBox water = f.check("--water-probe", "require a chain's water to come from a "
@@ -473,8 +473,8 @@ public final class SugarcaneGui {
         JTextField levels = f.text("--shift-levels=<n>", "", "derived from the height; "
                 + "4 up to 16, 5 above. Set it only to experiment.");
         JTextField sampleFrom = f.text("--sample-from=<n>", "", "start sampling at this "
-                + "index. Two machines with different values build disjoint halves of the "
-                + "same set, which is worth doing since the set is seed-independent.");
+                + "index. Blank picks a random one and prints it, so two machines build "
+                + "different halves of a set that does not depend on the world seed.");
         JCheckBox cpu = f.check("--cpu", "force the CPU filter; the GPU one is ~4.7x");
         JTextField update = f.text("--update (minutes)", "", null);
         return new Tab(f.panel, () -> {

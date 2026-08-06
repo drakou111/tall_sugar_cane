@@ -897,13 +897,23 @@ public final class ReverseSearcher {
         // Rounded down to a run boundary: the kernel processes whole runs of orbit
         // neighbours, so a cursor landing mid-run would have it start a run early and
         // re-test the seeds before the cursor.
-        long sampleAt = sampleFromOverride < 0 ? 0L
-                : sampleFromOverride - Math.floorMod(sampleFromOverride, (long) OrbitSampler.RUN);
+        // Random by default, so two people running the same command do not build the same
+        // set. The target set is seed-independent and meant to be pooled, and starting
+        // everyone at index 0 made every machine test the same decoration seeds in the same
+        // order -- the one arrangement where extra hardware adds nothing.
+        //
+        // Always printed, because a random start is only acceptable if the run can be
+        // repeated: pass the index back as --sample-from to reproduce it exactly.
+        boolean randomStart = sampleFromOverride < 0;
+        long chosen = randomStart
+                ? Math.floorMod(new java.security.SecureRandom().nextLong(), 1L << 48)
+                : sampleFromOverride;
+        long sampleAt = chosen - Math.floorMod(chosen, (long) OrbitSampler.RUN);
         long totalTested = 0L;
-        if (sampleFromOverride >= 0) {
-            System.out.printf("target set: sampling decoration seeds from index %d%n",
-                    sampleAt);
-        }
+        System.out.printf("target set: sampling decoration seeds from index %d%s%n",
+                sampleAt, randomStart
+                        ? " (random; pass --sample-from=" + sampleAt + " to repeat this run)"
+                        : "");
         if (cache != null) {
             TargetCache.Loaded loaded = TargetCache.load(cache, wanted);
             if (loaded != null) {
