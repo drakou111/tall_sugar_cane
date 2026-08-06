@@ -551,11 +551,12 @@ public final class SugarcaneGui {
                 + "nothing at all at 12 and above, because joining costs an exact alignment.");
         JTextField seeds = f.text("seeds", "20000000", "chunk pairs to sample");
         JTextField threads = f.text("threads", defaultThreads(), null);
-        JTextField minPart = f.text("minPerSide", "4", "shortest chain to count from each "
-                + "chunk. 4 is one column, which is the most permissive and shows the base "
-                + "rate; raise it to ask about joining two real stacks.");
+        JTextField target = f.text("targetHeight", "20", "how tall a combined stack you are "
+                + "after. The split between the two chunks is chosen for you: the per-chain "
+                + "rate cliffs at multiples of 4, so 20 is best as 12+8 (~55x likelier than "
+                + "10+10) and 16 as 8+8.");
         return new Tab(f.panel, () -> new ArrayList<>(List.of("crosschunk",
-                req(seeds, "seeds"), req(threads, "threads"), req(minPart, "minPerSide"))));
+                req(seeds, "seeds"), req(threads, "threads"), req(target, "targetHeight"))));
     }
 
     private Tab sistersTab() {

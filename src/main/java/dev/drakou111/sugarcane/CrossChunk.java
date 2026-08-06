@@ -41,18 +41,27 @@ public final class CrossChunk {
         long seeds = args.length > 0 ? Long.parseLong(args[0]) : 200_000L;
         int threads = Cli.clampThreads(args.length > 1 ? Integer.parseInt(args[1])
                 : Runtime.getRuntime().availableProcessors());
-        // Separate, because the split matters enormously and symmetric was hiding it. The
-        // per-chain rate has cliffs at column boundaries, not a smooth decay: 8 is the most a
-        // two-column chain can be and 12 the most a three-column one can, so they are 785x
-        // and 165x more common than the 9 and 13 just above them. Reaching 20 as 12+8 is
-        // therefore far likelier than as 10+10, even though both sum the same.
-        int minA = args.length > 2 ? Integer.parseInt(args[2]) : 5;
-        int minB = args.length > 3 ? Integer.parseInt(args[3]) : minA;
+        // What you actually want to say is how tall a stack you are after. The split is a
+        // consequence, and a badly chosen one costs orders of magnitude, so it is picked
+        // rather than asked for. Give both explicitly to override.
+        int target = args.length > 2 ? Integer.parseInt(args[2]) : 20;
+        int minA;
+        int minB;
+        if (args.length > 4) {
+            minA = Integer.parseInt(args[3]);
+            minB = Integer.parseInt(args[4]);
+        } else {
+            int[] best = bestSplit(target);
+            minA = best[0];
+            minB = best[1];
+        }
 
         System.out.printf("cross-chunk potential over %d world seeds, %d threads%n",
                 seeds, threads);
-        System.out.printf("  each seed: this chunk contributes >= %d, the neighbour >= %d, "
-                + "combined only where both can reach the block%n", minA, minB);
+        System.out.printf("  target %d: this chunk contributes >= %d, the neighbour >= %d "
+                        + "(estimated %.2e per pair before the strip constraint)%n",
+                target, minA, minB, rate(minA) * rate(minB));
+        System.out.println("  combined only where both can reach the block");
 
         // Tallest reachable in one chunk, and tallest reachable across the pair.
         AtomicLongArray single = new AtomicLongArray(64);
@@ -194,6 +203,61 @@ public final class CrossChunk {
             }
             System.out.printf(">= %-5d %14s %14s%n", h, rate(s, pairs.get()), rate(j, pairs.get()));
         }
+    }
+
+    /**
+     * Measured P(a chunk has a chain of at least this height), from the one-chunk column of
+     * this same command over 500M samples.
+     *
+     * <p>The shape is the whole point: it falls off cliffs at column boundaries rather than
+     * decaying smoothly, because a chain of C columns tops out at exactly 4C. 8 is the most
+     * two columns can give and 12 the most three can, so each is hundreds of times more
+     * common than the height one above it.
+     */
+    private static double rate(int height) {
+        switch (Math.max(0, Math.min(height, 17))) {
+            case 0: case 1: case 2: case 3: case 4: return 1.0;
+            case 5: return 7.687e-1;
+            case 6: return 5.437e-1;
+            case 7: return 1.976e-1;
+            case 8: return 3.773e-2;
+            case 9: return 4.797e-5;
+            case 10: return 1.495e-5;
+            case 11: return 2.872e-6;
+            case 12: return 2.940e-7;
+            case 13: return 2.000e-9;
+            case 14: return 2.000e-9;
+            case 15: return 5.0e-10;
+            case 16: return 3.0e-10;
+            default: return 0.0;    // 17+ needs a fifth column, and a fifth shift level
+        }
+    }
+
+    /**
+     * The split of {@code target} that maximises P(A) x P(B).
+     *
+     * <p>Both sides pay their own rate and the position-matching cost is the same whatever
+     * the split, so the product is the whole objective. Because the rate cliffs at multiples
+     * of four, the answer is never the even split: reaching 20 as 12+8 is about 55x likelier
+     * than as 10+10, and reaching 24 as 16+8 beats 12+12 by about a hundred.
+     *
+     * <p>The rule that falls out: ask each side for a multiple of four, and never for one
+     * more than a multiple of four.
+     */
+    static int[] bestSplit(int target) {
+        int bestA = 4;
+        int bestB = Math.max(4, target - 4);
+        double best = -1;
+        for (int a = 4; a <= target - 4; a++) {
+            int b = target - a;
+            double p = rate(a) * rate(b);
+            if (p > best) {
+                best = p;
+                bestA = a;
+                bestB = b;
+            }
+        }
+        return new int[]{bestA, bestB};
     }
 
     private static long tailFrom(AtomicLongArray a, int from) {

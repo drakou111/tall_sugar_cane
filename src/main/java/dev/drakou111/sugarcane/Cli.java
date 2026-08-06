@@ -143,7 +143,7 @@ public final class Cli {
                             + "are chunk-relative, -4..19, the frame `inspect` prints.",
                     SpotSearch::main),
             new Command("crosschunk",
-                    "[seeds] [threads] [minThisChunk] [minNeighbour]",
+                    "[seeds] [threads] [targetHeight] [minThisChunk] [minNeighbour]",
                     "Measure whether two neighbouring chunks can build one stack between "
                             + "them. A placement lands at chunk-relative x -4..19, so a chunk "
                             + "can put cane four blocks over its border; if one stacks into "
@@ -154,6 +154,13 @@ public final class Cli {
                             + "often than one chunk does, which is a number. Note the shared "
                             + "block must be in the eight-wide strip both chunks can reach, "
                             + "and the second chain must start exactly where the first stops. "
+                            + "Say what height you are after and the split is chosen for you: "
+                            + "the per-chain rate cliffs at column boundaries, since a chain "
+                            + "of C columns tops out at exactly 4C, so 8 and 12 are hundreds "
+                            + "of times more common than 9 and 13. That makes the split matter "
+                            + "more than the total -- 20 as 12+8 is ~55x likelier than as "
+                            + "10+10, and the even split is near the worst of the sensible "
+                            + "ones. Give both minimums explicitly to override. "
                             + "Placement order is assumed, not checked -- the first chunk has "
                             + "to have decorated first, which depends on how the world was "
                             + "explored, so a cross-chunk result is a lead and not a find.",
