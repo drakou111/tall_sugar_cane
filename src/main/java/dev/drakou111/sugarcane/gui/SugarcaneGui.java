@@ -577,7 +577,11 @@ public final class SugarcaneGui {
                 + "seed is solved for instead, from the pair, in about 1.5 ms. Pairs are matched "
                 + "on chunk-relative coordinates, so where the chunks are never enters until the "
                 + "end. A hit still assumes chunk A decorated before chunk B, which depends on "
-                + "how the world was explored -- so it is a strong lead, not a confirmed find.");
+                + "how the world was explored -- so it is a strong lead, not a confirmed find. "
+                + "The scan runs on the GPU when there is one, which is 9.9x at height 17 and "
+                + "returns the same seeds either way. Every candidate now has its terrain "
+                + "generated before anything is reported, so a run that says zero means zero "
+                + "cane grew, not that nothing was tried.");
         JTextField seeds = f.text("seeds", "100000000", "decoration seeds to sweep, twice: "
                 + "once to build the table of the rarer side, once to stream the other past it");
         JTextField threads = f.text("threads", defaultThreads(), null);
@@ -588,11 +592,31 @@ public final class SugarcaneGui {
         JTextField minA = f.text("minA", "", "blank lets the split be chosen; give both to "
                 + "override");
         JTextField minB = f.text("minB", "", "blank lets the split be chosen");
-        JTextField dx = f.text("--dx", "1", "which neighbour, in chunks");
-        JTextField dz = f.text("--dz", "0", null);
+        JTextField dx = f.text("--dx", "", "which neighbour, in chunks. **Leave both blank** "
+                + "to sweep all eight, which is what you want: pass 1 keys each side in its "
+                + "own chunk's frame, so one table serves every direction and the extra seven "
+                + "are almost free. Naming one is 3.5x fewer positions");
+        JTextField dz = f.text("--dz", "", null);
+        JTextField sisters = f.text("--sisters", "4096", "world seeds sharing this one's low "
+                + "48 bits. They place the same chains at the same chunk and only move the "
+                + "biome map and sea floor, so they re-roll terrain cheaply -- but NOT the "
+                + "carver walks, which decide air, soil and water. Raise it for more "
+                + "candidates, not for more independent tries");
+        JTextField maxCandidates = f.text("--max-candidates", "", "blank for 4,000,000. "
+                + "Candidates are held until the scan ends, and a high sister count makes "
+                + "that a real number");
+        JCheckBox floor = f.check("--floor", "require the block UNDER the bottom column to be "
+                + "uncarved. A ravine tall enough to hold the stack usually takes the floor "
+                + "with it, and dirt cannot be blobbed into air -- measured, 62% of the "
+                + "candidates that reached terrain with air at the base and nothing under it. "
+                + "Lossy in principle: the probe over-approximates carving, so it can discard "
+                + "a real floor");
         JCheckBox water = f.check("--water-probe", "also require carved water beside every "
                 + "base. Sound but lossy -- a spot on the sea floor gets its water from the "
                 + "noise fill and no carver, so this can drop real finds");
+        JCheckBox cpu = f.check("--cpu", "scan on the CPU even if a GPU is present. The kernel "
+                + "is 9.9x at height 17 and identical seed for seed, so this is for comparing "
+                + "the two, not for running");
         return new Tab(f.panel, () -> {
             List<String> a = new ArrayList<>(List.of("crossfind",
                     req(seeds, "seeds"), req(threads, "threads"), req(target, "targetHeight")));
@@ -604,10 +628,34 @@ public final class SugarcaneGui {
                 a.add(a1);
                 a.add(b1);
             }
-            a.add("--dx=" + req(dx, "--dx"));
-            a.add("--dz=" + req(dz, "--dz"));
+            // Blank means every neighbour. This used to send --dx=1 --dz=0 unconditionally,
+            // which after the shared-table change would quietly pin the search to one of the
+            // eight and cost 3.5x -- the flag went from naming a default to overriding one.
+            String x = dx.getText().trim(), z = dz.getText().trim();
+            if (!x.isEmpty() != !z.isEmpty()) {
+                throw new IllegalArgumentException("give both --dx and --dz, or neither "
+                        + "(neither sweeps all eight neighbours)");
+            }
+            if (!x.isEmpty()) {
+                a.add("--dx=" + x);
+                a.add("--dz=" + z);
+            }
+            String sis = sisters.getText().trim();
+            if (!sis.isEmpty()) {
+                a.add("--sisters=" + sis);
+            }
+            String cap = maxCandidates.getText().trim();
+            if (!cap.isEmpty()) {
+                a.add("--max-candidates=" + cap);
+            }
+            if (floor.isSelected()) {
+                a.add("--floor");
+            }
             if (water.isSelected()) {
                 a.add("--water-probe");
+            }
+            if (cpu.isSelected()) {
+                a.add("--cpu");
             }
             return a;
         });

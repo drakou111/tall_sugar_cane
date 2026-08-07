@@ -108,6 +108,23 @@ public final class CrossFind {
         return ((((x + 4) + (z + 4) * 24) * Y + y) << 4) | (int) (ds & 15L);
     }
 
+    /**
+     * Which neighbours to join against: the one named, or all eight.
+     *
+     * <p>Extracted so it can be tested without a display. The GUI used to send
+     * {@code --dx=1 --dz=0} unconditionally, which was harmless when a table served one
+     * direction and became a silent 3.5x loss the moment one table served all of them -- the
+     * flag went from restating the default to overriding it. A GUI-only regression is exactly
+     * the kind this project has shipped before, and the command line never sees it.
+     */
+    static int[][] directions(boolean named, int dx, int dz) {
+        if (named) {
+            return new int[][] {{dx, dz}};
+        }
+        return new int[][] {{1, 0}, {-1, 0}, {0, 1}, {0, -1},
+                            {1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
+    }
+
     static boolean inFrame(int x, int z, int y) {
         return x >= -4 && x <= 19 && z >= -4 && z <= 19 && y >= 0 && y < Y;
     }
@@ -241,13 +258,7 @@ public final class CrossFind {
         // frame test and a lookup on the streamed side -- there is no second pass 1 to pay
         // for. Eight times the positions, and positions are the currency: the terrain filters
         // are what reject cross-chunk candidates, and they turn on where the chunk IS.
-        final int[][] dirs;
-        if (dirNamed) {
-            dirs = new int[][] {{dx, dz}};
-        } else {
-            dirs = new int[][] {{1, 0}, {-1, 0}, {0, 1}, {0, -1},
-                                {1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
-        }
+        final int[][] dirs = directions(dirNamed, dx, dz);
 
         // Store whichever side is rarer, and stream the other. Height is monotone in rarity,
         // so the taller minimum wins without having to measure anything.

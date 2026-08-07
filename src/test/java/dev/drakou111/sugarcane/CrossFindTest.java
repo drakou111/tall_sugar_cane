@@ -5,6 +5,7 @@ import dev.drakou111.sugarcane.gen.SugarCaneFeature;
 import dev.drakou111.sugarcane.rng.JavaRandom;
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -145,5 +146,30 @@ class CrossFindTest {
         assertEquals(20, split[0] + split[1]);
         assertTrue((split[0] == 12 && split[1] == 8) || (split[0] == 8 && split[1] == 12),
                 "20 should split at a column boundary, got " + split[0] + "+" + split[1]);
+    }
+
+    /**
+     * Omitting the neighbour means all eight, and naming one means only that one.
+     *
+     * <p>The GUI sent {@code --dx=1 --dz=0} on every run. While a join table served a single
+     * direction that restated the default; once one table served all eight it silently pinned
+     * the search to an eighth of its reach. Nothing would have failed -- the run just finds
+     * 3.5x less -- so this pins the rule rather than the GUI.
+     */
+    @Test
+    void omittingTheNeighbourSweepsAllEight() {
+        assertEquals(8, CrossFind.directions(false, 1, 0).length);
+        assertEquals(1, CrossFind.directions(true, 1, 0).length);
+        assertArrayEquals(new int[] {-1, 1}, CrossFind.directions(true, -1, 1)[0]);
+
+        // Every one is a real neighbour, and no duplicates -- a repeat would double-count
+        // joins and inflate the funnel without finding anything.
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        for (int[] d : CrossFind.directions(false, 0, 0)) {
+            assertTrue(Math.abs(d[0]) <= 1 && Math.abs(d[1]) <= 1, "not a neighbour");
+            assertTrue(d[0] != 0 || d[1] != 0, "0,0 is one chunk, not two");
+            assertTrue(seen.add(d[0] + "," + d[1]), "duplicate direction " + d[0] + "," + d[1]);
+        }
+        assertEquals(8, seen.size());
     }
 }
