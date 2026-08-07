@@ -207,6 +207,7 @@ public final class CrossFind {
         }
         int dx = 1, dz = 0, maxStore = DEFAULT_MAX_STORE, sisterCount = DEFAULT_SISTERS;
         boolean dirNamed = false;
+        boolean forceCpu = false;
         int candidateCap = DEFAULT_MAX_CANDIDATES;
         boolean water = false;
         boolean floor = false;
@@ -227,6 +228,8 @@ public final class CrossFind {
                 water = true;
             } else if (arg.equals("--floor")) {
                 floor = true;
+            } else if (arg.equals("--cpu")) {
+                forceCpu = true;
             }
         }
         if (dx == 0 && dz == 0) {
@@ -275,10 +278,32 @@ public final class CrossFind {
         long start = System.currentTimeMillis();
         long runs = (seeds + OrbitSampler.RUN - 1) / OrbitSampler.RUN;
 
+        // The kernel scans 4.47e7 seeds/s against 3.15e6 for 22 CPU threads, and joins go as
+        // the SQUARE of seeds scanned, so this is worth ~200x the positions rather than 14x.
+        // It is only a pre-filter: it says which seeds carry a chain and the CPU re-derives
+        // the geometry for those, which is cheap because acceptance is 2e-5 on the stored
+        // side and 2e-2 on the streamed one.
+        dev.drakou111.sugarcane.gen.GpuChainFilter gpu = forceCpu ? null
+                : dev.drakou111.sugarcane.gen.GpuChainFilter.detect();
+        if (gpu != null) {
+            System.out.printf("  scanning on the GPU (%s); the CPU re-derives geometry for "
+                    + "what it keeps%n", gpu.binary());
+        } else {
+            System.out.printf("  scanning on the CPU%s%n", forceCpu ? " (--cpu)"
+                    : ": " + dev.drakou111.sugarcane.gen.GpuChainFilter.lastFailure());
+        }
+
         // ---- pass 1: collect the rare side, keyed by where the join would be ----
         final Hits[] collected = new Hits[threads];
         AtomicLong nextRun = new AtomicLong();
         AtomicLong stored = new AtomicLong();
+        final long[] accepted1 = gpu == null ? null
+                : gpuEpoch(gpu, storedMin, storeEndings, 0L, seeds);
+        final AtomicLong cursor1 = new AtomicLong();
+        if (accepted1 != null) {
+            System.out.printf("  pass 1: the kernel kept %d of %d seeds (%.4f%%)%n",
+                    accepted1.length, seeds, 100.0 * accepted1.length / seeds);
+        }
         Thread[] pool = new Thread[threads];
         for (int t = 0; t < threads; t++) {
             final int id = t;
@@ -286,33 +311,30 @@ public final class CrossFind {
             pool[t] = new Thread(() -> {
                 Hits hits = new Hits();
                 ChainPrefilter filter = storeEndings ? endingFilter() : beginningFilter();
-                for (long run = nextRun.getAndIncrement(); run < runs;
-                        run = nextRun.getAndIncrement()) {
-                    if (stored.get() >= cap) {
-                        break;
-                    }
-                    long ds = OrbitSampler.runStart(run);
-                    for (int k = 0; k < OrbitSampler.RUN; k++) {
-                        int n = filter.collectChains(ds, OCEAN_INDEX, storedMin);
-                        if (!filter.chainsOverflowed()) {
-                            for (int i = 0; i < n; i++) {
-                                long chain = filter.chain(i);
-                                int x = ChainPrefilter.chainX(chain);
-                                int z = ChainPrefilter.chainZ(chain);
-                                // Each side is keyed in its OWN chunk's frame, with no
-                                // direction folded in. That is what lets one table serve all
-                                // eight neighbours: the streamed side does the shifting, once
-                                // per direction, and pass 1 never has to be repeated.
-                                int y = storeEndings ? ChainPrefilter.chainTop(chain)
-                                        : ChainPrefilter.chainBaseY(chain, 0);
-                                if (inFrame(x, z, y)) {
-                                    hits.add(key(x, z, y, ds), ds);
-                                    stored.incrementAndGet();
-                                }
-                            }
+                if (accepted1 != null) {
+                    // GPU path: the kernel already said which seeds carry a chain, so the
+                    // CPU only re-derives geometry for those. Acceptance at the stored
+                    // side's height is ~2e-5, so this is a rounding error of the work.
+                    for (int k = (int) cursor1.getAndIncrement(); k < accepted1.length;
+                            k = (int) cursor1.getAndIncrement()) {
+                        if (stored.get() >= cap) {
+                            break;
                         }
-                        ds = OrbitSampler.shift(ds, OCEAN_INDEX,
-                                SugarCaneFeature.VEGETAL_DECORATION);
+                        collectOne(accepted1[k], filter, storedMin, storeEndings, hits,
+                                stored);
+                    }
+                } else {
+                    for (long run = nextRun.getAndIncrement(); run < runs;
+                            run = nextRun.getAndIncrement()) {
+                        if (stored.get() >= cap) {
+                            break;
+                        }
+                        long ds = OrbitSampler.runStart(run);
+                        for (int k = 0; k < OrbitSampler.RUN; k++) {
+                            collectOne(ds, filter, storedMin, storeEndings, hits, stored);
+                            ds = OrbitSampler.shift(ds, OCEAN_INDEX,
+                                    SugarCaneFeature.VEGETAL_DECORATION);
+                        }
                     }
                 }
                 collected[id] = hits;
@@ -382,8 +404,32 @@ public final class CrossFind {
         nextRun.set(0);
         long pass2Start = System.currentTimeMillis();
 
-        for (int t = 0; t < threads; t++) {
-            pool[t] = new Thread(() -> {
+        // The streamed side keeps ~2% of seeds, so its accepted list is far too big to hold
+        // for a whole run; the kernel is asked for it an epoch at a time. The CPU path is one
+        // epoch with a null list, which makes the worker below read from the orbit walk.
+        final AtomicLong epochCursor = new AtomicLong();
+        final long epochSize = 1_000_000_000L;
+        long epochCount = gpu == null ? 1 : (seeds + epochSize - 1) / epochSize;
+        AtomicLong kernelKept = new AtomicLong();
+
+        Thread progress = progressThread(pass2Start, streamed, joins, solvedSeeds, inBorder,
+                carved, oceanPairs, solidNoise);
+        progress.setDaemon(true);
+        progress.start();
+
+        for (long e = 0; e < epochCount; e++) {
+            final long[] epochSeeds;
+            if (gpu == null) {
+                epochSeeds = null;
+            } else {
+                long epochFrom = e * epochSize;
+                epochSeeds = gpuEpoch(gpu, streamedMin, !storeEndings, epochFrom,
+                        Math.min(epochSize, seeds - epochFrom));
+                kernelKept.addAndGet(epochSeeds.length);
+                epochCursor.set(0);
+            }
+            for (int t = 0; t < threads; t++) {
+                pool[t] = new Thread(() -> {
                 ChainPrefilter filter = storeEndings ? beginningFilter() : endingFilter();
                 ChainPrefilter endA = endingFilter();
                 ChainPrefilter beginB = beginningFilter();
@@ -394,10 +440,26 @@ public final class CrossFind {
                 RegionSearcher.Worker worker =
                         new RegionSearcher.Worker(999, false, 0, stats, 0);
 
-                for (long run = nextRun.getAndIncrement(); run < runs;
-                        run = nextRun.getAndIncrement()) {
-                    long ds = OrbitSampler.runStart(run);
-                    for (int k = 0; k < OrbitSampler.RUN; k++) {
+                while (true) {
+                    long ds;
+                    if (epochSeeds != null) {
+                        // GPU path: walk the seeds the kernel kept for this epoch. The outer
+                        // loop refills it, so a thread that runs dry waits at the barrier
+                        // rather than finishing early.
+                        int k2 = (int) epochCursor.getAndIncrement();
+                        if (k2 >= epochSeeds.length) {
+                            break;
+                        }
+                        ds = epochSeeds[k2];
+                    } else {
+                        long run = nextRun.getAndIncrement();
+                        if (run >= runs) {
+                            break;
+                        }
+                        ds = OrbitSampler.runStart(run);
+                    }
+                    int reps = epochSeeds != null ? 1 : OrbitSampler.RUN;
+                    for (int k = 0; k < reps; k++) {
                         int n = filter.collectChains(ds, OCEAN_INDEX, streamedMin);
                         if (!filter.chainsOverflowed()) {
                             for (int i = 0; i < n; i++) {
@@ -433,41 +495,25 @@ public final class CrossFind {
                                 }
                             }
                         }
-                        ds = OrbitSampler.shift(ds, OCEAN_INDEX,
-                                SugarCaneFeature.VEGETAL_DECORATION);
+                        if (epochSeeds == null) {
+                            ds = OrbitSampler.shift(ds, OCEAN_INDEX,
+                                    SugarCaneFeature.VEGETAL_DECORATION);
+                        }
                         streamed.incrementAndGet();
                     }
                 }
-            }, "crossfind-solve-" + t);
-            pool[t].start();
-        }
-
-        Thread progress = new Thread(() -> {
-            while (!Thread.currentThread().isInterrupted()) {
-                try {
-                    Thread.sleep(30_000L);
-                } catch (InterruptedException e) {
-                    return;
-                }
-                long ms = System.currentTimeMillis() - pass2Start;
-                System.out.printf("[%4.1f min] %d seeds streamed (%.0f/s), joins %d, "
-                                + "world seeds solved %d, in border %d, past carve %d, "
-                                + "ocean %d, solid noise %d "
-                                + "(candidates, terrain not generated yet)%n",
-                        ms / 60000.0, streamed.get(),
-                        streamed.get() * 1000.0 / Math.max(1, ms), joins.get(),
-                        solvedSeeds.get(), inBorder.get(), carved.get(),
-                        oceanPairs.get(), solidNoise.get());
-                System.out.flush();
+                }, "crossfind-solve-" + t);
+                pool[t].start();
             }
-        }, "crossfind-progress");
-        progress.setDaemon(true);
-        progress.start();
-
-        for (Thread th : pool) {
-            th.join();
+            for (Thread th : pool) {
+                th.join();
+            }
         }
         progress.interrupt();
+        if (gpu != null) {
+            System.out.printf("  pass 2: the kernel kept %d of %d seeds (%.4f%%)%n",
+                    kernelKept.get(), seeds, 100.0 * kernelKept.get() / seeds);
+        }
 
         verify(found, threads);
 
@@ -793,6 +839,76 @@ public final class CrossFind {
                 }
             }
         }
+    }
+
+    /** The pass-2 ticker, hoisted so the epoch loop can restart its workers underneath it. */
+    private static Thread progressThread(long pass2Start, AtomicLong streamed, AtomicLong joins,
+            AtomicLong solvedSeeds, AtomicLong inBorder, AtomicLong carved,
+            AtomicLong oceanPairs, AtomicLong solidNoise) {
+        return new Thread(() -> {
+            while (!Thread.currentThread().isInterrupted()) {
+                try {
+                    Thread.sleep(30_000L);
+                } catch (InterruptedException e) {
+                    return;
+                }
+                long ms = System.currentTimeMillis() - pass2Start;
+                System.out.printf("[%4.1f min] %d seeds examined (%.0f/s), joins %d, "
+                                + "world seeds solved %d, in border %d, past carve %d, "
+                                + "ocean %d, solid noise %d "
+                                + "(candidates, terrain not generated yet)%n",
+                        ms / 60000.0, streamed.get(),
+                        streamed.get() * 1000.0 / Math.max(1, ms), joins.get(),
+                        solvedSeeds.get(), inBorder.get(), carved.get(),
+                        oceanPairs.get(), solidNoise.get());
+                System.out.flush();
+            }
+        }, "crossfind-progress");
+    }
+
+    /**
+     * One decoration seed's contribution to the join table.
+     *
+     * <p>Shared by the CPU and GPU scanners so the two cannot drift: the GPU one simply calls
+     * it on fewer seeds. Each side is keyed in its OWN chunk's frame, with no direction folded
+     * in -- that is what lets one table serve all eight neighbours.
+     */
+    private static void collectOne(long ds, ChainPrefilter filter, int storedMin,
+            boolean storeEndings, Hits hits, AtomicLong stored) {
+        int n = filter.collectChains(ds, OCEAN_INDEX, storedMin);
+        if (filter.chainsOverflowed()) {
+            return;
+        }
+        for (int i = 0; i < n; i++) {
+            long chain = filter.chain(i);
+            int x = ChainPrefilter.chainX(chain);
+            int z = ChainPrefilter.chainZ(chain);
+            int y = storeEndings ? ChainPrefilter.chainTop(chain)
+                    : ChainPrefilter.chainBaseY(chain, 0);
+            if (inFrame(x, z, y)) {
+                hits.add(key(x, z, y, ds), ds);
+                stored.incrementAndGet();
+            }
+        }
+    }
+
+    /**
+     * The kernel run as a pre-filter, over one epoch.
+     *
+     * <p>It is not asked for chain geometry -- it cannot report any -- only for which seeds
+     * carry a chain at all. {@code KernelAgreement --config=crossfind-ending} and
+     * {@code --config=crossfind-beginning} hold it to exactly this command's two filters, at
+     * every height the command uses; both agree seed for seed, because these configs run at
+     * {@code maxBaseShift 3} and so take neither the greedy path nor the incremental one that
+     * 6bi caught dropping seeds at {@code maxBaseShift 0}.
+     */
+    private static long[] gpuEpoch(dev.drakou111.sugarcane.gen.GpuChainFilter gpu,
+            int minHeight, boolean endingSide, long from, long count) throws Exception {
+        int baseMinY = endingSide ? ChainPrefilter.DEFAULT_BASE_MIN_Y : 11;
+        int baseMaxY = endingSide ? ChainPrefilter.DEFAULT_BASE_MAX_Y : 64;
+        return gpu.run(minHeight, SugarCaneFeature.COUNT_DEFAULT, OCEAN_INDEX,
+                baseMinY, baseMaxY, 3, 4, Integer.MAX_VALUE,
+                ChainPrefilter.DEFAULT_SHIFT_LEVELS, -1, -1, from, count);
     }
 
     /** Every column base of both chains sits in a block the noise made solid. */

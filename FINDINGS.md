@@ -4250,3 +4250,66 @@ moving the chain scan to the GPU is worth ~200x positions rather than 14x. The k
 emits accepted decoration seeds; it would additionally have to emit each chain's join coordinate
 `(x, z, y)` so the key can be formed on the host. That is the next thing worth building, and it is
 a bigger change than anything in 6bh through 6bk.
+
+## 6bl: the kernel as a pre-filter for crossfind -- 9.9x, and it needed no kernel change
+
+6bj ranked this first and estimated it as a kernel rewrite. It is not one. `crossfind` does not
+need the GPU to report chain geometry; it needs to know **which seeds are worth looking at**, and
+the kernel already answers exactly that. Used as a pre-filter, with the CPU re-deriving geometry
+for the survivors, the CPU work falls by the acceptance rate:
+
+```
+  height 17, pass 1 (>= 10, the stored side) : kernel keeps 0.0031% of seeds
+  height 17, pass 2 (>=  7, the streamed one): kernel keeps 2.2259%
+```
+
+### It had to be pinned to the two filters first
+
+`crossfind` does not use the ranked filter, so 6bi's agreement result does not transfer.
+`KernelAgreement` grew `--config=crossfind-ending` and `--config=crossfind-beginning`, which build
+both sides from one set of numbers. Over 4M samples:
+
+```
+  h= 7 ending    agreed  89602, gpu-only 0, cpu-only 0
+  h= 7 beginning agreed 192013, gpu-only 0, cpu-only 0
+  h= 8 ending    agreed  16073, gpu-only 0, cpu-only 0
+  h= 8 beginning agreed  34089, gpu-only 0, cpu-only 0
+  h=10 ending    agreed     32, gpu-only 0, cpu-only 0
+  h=10 beginning agreed     97, gpu-only 0, cpu-only 0
+```
+
+**Exact agreement everywhere**, including height 7, where 6bi caught the kernel dropping seeds.
+It does not drop them here because `crossfind` runs at `maxBaseShift 3`, which takes neither the
+greedy path (it needs 0) nor the incremental path's failure case. The 6bi defect is real and is
+confined to the ranked configuration.
+
+### End to end, and the two regimes
+
+Both paths were run over the same seeds, `--cpu` against the GPU:
+
+```
+  height 10, 4M seeds, 12 threads   CPU 49.1 s   GPU 48.4 s   1.0x
+  height 17, 1e9 seeds, 22 threads  CPU  685 s   GPU 69.2 s   9.9x
+```
+
+Every funnel number is identical in both cases -- 803,929 / 520,473 / 37 at height 10 and
+31,374 / 160,627 / 7 at height 17 -- so this is a speed change and nothing else.
+
+Height 10 gains nothing because it is **lift-bound**, exactly as 6bg measured: 520,473 joins at
+1.45 ms over 12 threads is 63 s, which is the whole run. Height 17 is **filter-bound**, and there
+the kernel is the whole point. The regimes are the ones 6bg named; what is new is that the tool
+now matches them.
+
+9.9x rather than 14x because pass 1's 23.8 s includes fixed setup, and because the CPU still runs
+the geometry pass over 2.2% of a billion seeds.
+
+### What it is worth, which is more than 9.9x
+
+Joins go as the **square** of seeds scanned, so 9.9x the rate is ~98x the positions in a fixed
+wall-clock. Positions are the currency 6bh established: the terrain filters reject 99.99% of them
+and nothing else in the pipeline moves that rate. Combined with 6bk's 3.5x from the shared table,
+height 17 now produces roughly **340x the positions per hour** it did at the start of this run.
+
+Still zero confirmed. The bottleneck moves to the lift as positions multiply, which is where 6bg's
+two regimes come back: at 5e9 seeds and up, height 17 becomes lift-bound too, and the next thing
+to price is the 1.45 ms.

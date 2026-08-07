@@ -35,13 +35,47 @@ public final class KernelAgreement {
     private KernelAgreement() {
     }
 
-    /** Exactly {@code ReverseSearcher.rankedFilter}, which is what the builder actually uses. */
-    private static ChainPrefilter cpuFilter(int minHeight, int maxSlack) {
+    /**
+     * One filter configuration, so the CPU and the kernel can be handed the same numbers
+     * rather than each being built from its own defaults -- which is how 6bg's 5,090 phantom
+     * disagreements happened.
+     */
+    private record Config(String name, int baseMinY, int baseMaxY, int maxBaseShift,
+            int maxColumns, int maxSlack, int shiftLevels) {
+
+        ChainPrefilter cpu() {
+            return new ChainPrefilter(OCEAN_COUNT, baseMinY, baseMaxY, maxBaseShift,
+                    maxColumns, shiftLevels - 1, shiftLevels)
+                    .maxSlack(maxSlack);
+        }
+    }
+
+    /** {@code ReverseSearcher.rankedFilter}, which is what the target builder uses. */
+    private static Config ranked(int minHeight, int maxSlack) {
         int levels = ChainPrefilter.shiftLevelsFor(minHeight);
-        return new ChainPrefilter(OCEAN_COUNT, ChainPrefilter.DEFAULT_BASE_MIN_Y,
-                ChainPrefilter.DEFAULT_BASE_MAX_Y, 0, ChainPrefilter.minimumColumns(minHeight),
-                levels - 1, levels)
-                .maxSlack(maxSlack);
+        return new Config("ranked", ChainPrefilter.DEFAULT_BASE_MIN_Y,
+                ChainPrefilter.DEFAULT_BASE_MAX_Y, 0,
+                ChainPrefilter.minimumColumns(minHeight), maxSlack, levels);
+    }
+
+    /**
+     * {@code CrossFind.endingFilter}: the depth band, since a chain that ends here still
+     * stands on soil. Unlimited slack, which the kernel reads as its ascending rule.
+     */
+    private static Config crossEnding() {
+        return new Config("crossfind ending", ChainPrefilter.DEFAULT_BASE_MIN_Y,
+                ChainPrefilter.DEFAULT_BASE_MAX_Y, 3, 4, Integer.MAX_VALUE,
+                ChainPrefilter.DEFAULT_SHIFT_LEVELS);
+    }
+
+    /** {@code CrossFind.beginningFilter}: no depth band, because it stands on the neighbour. */
+    private static Config crossBeginning() {
+        return new Config("crossfind beginning", 11, 64, 3, 4, Integer.MAX_VALUE,
+                ChainPrefilter.DEFAULT_SHIFT_LEVELS);
+    }
+
+    private static ChainPrefilter cpuFilter(int minHeight, int maxSlack) {
+        return ranked(minHeight, maxSlack).cpu();
     }
 
     public static void main(String[] args) throws Exception {
@@ -65,20 +99,33 @@ public final class KernelAgreement {
             return;
         }
 
-        int levels = ChainPrefilter.shiftLevelsFor(minHeight);
-        int maxColumns = ChainPrefilter.minimumColumns(minHeight);
-        System.out.printf("min height %d, %d samples from %d%n", minHeight, samples, from);
-        System.out.printf("  count %d, index %d, baseY %d..%d, maxBaseShift 0, maxColumns %d, "
-                        + "maxSlack %d, shiftLevels %d%n",
-                OCEAN_COUNT, OCEAN_INDEX, ChainPrefilter.DEFAULT_BASE_MIN_Y,
-                ChainPrefilter.DEFAULT_BASE_MAX_Y, maxColumns, maxSlack, levels);
+        Config cfg = ranked(minHeight, maxSlack);
+        for (String arg : args) {
+            if (arg.equals("--config=crossfind-ending")) {
+                cfg = crossEnding();
+            } else if (arg.equals("--config=crossfind-beginning")) {
+                cfg = crossBeginning();
+            }
+        }
+        final Config config = cfg;
+        System.out.printf("min height %d, %d samples from %d, config \"%s\"%n",
+                minHeight, samples, from, config.name());
+        System.out.printf("  count %d, index %d, baseY %d..%d, maxBaseShift %d, maxColumns %d, "
+                        + "maxSlack %s, shiftLevels %d%n",
+                OCEAN_COUNT, OCEAN_INDEX, config.baseMinY(), config.baseMaxY(),
+                config.maxBaseShift(), config.maxColumns(),
+                config.maxSlack() == Integer.MAX_VALUE ? "unlimited"
+                        : Integer.toString(config.maxSlack()),
+                config.shiftLevels());
         System.out.printf("  greedy path eligible: %s%n",
-                minHeight % 4 == 0 ? "yes (minHeight divisible by 4)" : "no");
+                minHeight % 4 == 0 && config.maxBaseShift() == 0 && config.maxSlack() == 0
+                        ? "yes" : "no");
 
         long t0 = System.currentTimeMillis();
         long[] gpuSeeds = gpu.run(minHeight, OCEAN_COUNT, OCEAN_INDEX,
-                ChainPrefilter.DEFAULT_BASE_MIN_Y, ChainPrefilter.DEFAULT_BASE_MAX_Y,
-                0, maxColumns, maxSlack, levels, -1, -1, from, samples);
+                config.baseMinY(), config.baseMaxY(), config.maxBaseShift(),
+                config.maxColumns(), config.maxSlack(), config.shiftLevels(),
+                -1, -1, from, samples);
         double gpuSecs = (System.currentTimeMillis() - t0) / 1000.0;
         Arrays.sort(gpuSeeds);
 
@@ -92,7 +139,7 @@ public final class KernelAgreement {
         long end = from + samples;
         for (int t = 0; t < threads; t++) {
             pool[t] = new Thread(() -> {
-                ChainPrefilter filter = cpuFilter(fMin, fSlack);
+                ChainPrefilter filter = config.cpu();
                 long[] mine = new long[1024];
                 int n = 0;
                 while (true) {
