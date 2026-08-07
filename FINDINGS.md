@@ -4518,3 +4518,57 @@ disagreements, zero misses.
 inline, and using the kernel means batching joins, lifting a batch, then continuing — a real
 restructure of the hot loop rather than a flag. That is the next piece of work, and until it lands
 the 4.3x is available only to whatever calls `GpuLift` directly.
+
+## 6bp: the cross-chunk join has never once been exercised
+
+Height 10, 1e8 seeds, 7 hours, **18,420 positions** — the largest sample of cross-chunk positions
+yet, at the height where terrain is easiest. 236,729 candidates generated, zero confirmed. The
+column walk of 6bm is what makes this run different from the ten before it:
+
+```
+  where the predicted stack stops, first column with no cane:
+    A col 0: BLOCKED               137,713
+    A col 0: NO_SUPPORT             91,919
+    A col 0: NO_WATER                7,019
+    A col 1: NO_WATER                   39
+    A col 0: PLACEABLE_BUT_EMPTY        30
+    A col 1: PLACEABLE_BUT_EMPTY         9
+
+  48 grew some cane, of which 0 ran taller than any one chunk built
+```
+
+**Every line is chunk A.** Not one candidate in 236,729 reached chain B — the neighbour, the
+entire point of the command. 236,681 of them die on chunk A's *first* column; 48 reach its second;
+none go further. And of the 48 that grew cane, **zero** exceeded `caneRunFromOneChunk`, so no two
+chunks have ever cooperated here, not once, in the ~500,000 candidates generated today.
+
+### What that means, and it is not a tuning problem
+
+The split at height 10 is 5+5, so chain A must itself build a **5-tall stack** before the join is
+even reachable. That is the project's confirmed find — the one that took a search of a few billion
+chunks to turn up. Cross-chunk does not divide the terrain problem between two chunks: chunk A
+still has to complete an entire multi-column stack on its own, and only then does the neighbour
+get to add to it.
+
+So `crossfind` at target H with split (a, b) is **strictly harder than a single-chunk a-tall**. Its
+only real advantage is that a + b can exceed what four shift levels allow one chunk — 16 — and that
+advantage is bought on top of, not instead of, the a-tall. 6ba said exactly this from the rates
+("cross-chunk is worse at every height a single chunk can reach"); this is the same conclusion
+arriving from the terrain side, and it explains every zero in 6bh, 6bm and 6bn at a stroke.
+
+`PLACEABLE_BUT_EMPTY` — everything the feature asks for present and no placement — is 39 of
+236,729. The shift-level and decoration-order suspicions of 6bm are real but negligible. They were
+never the reason.
+
+### Which points somewhere specific
+
+The search has been building chain A from scratch and hoping, at a column the RNG chose. The
+pipeline that reliably produces tall single-chunk stacks already exists: `reverse` found the 8, and
+the record 16. **Start from a stack that pipeline found, and ask whether the neighbour extends it.**
+
+That inverts the expensive half. Chain B needs no soil — it stands on chunk A's cane — and the air
+it needs is in the ravine chunk A is already standing in, so the terrain is largely paid for. What
+remains is one question about the neighbour's decoration seed, which is pure RNG and cheap.
+
+It also explains why 17 as 9+8 looked so attractive in 6be and has never materialised: it still
+needs a 9-tall to exist first.
