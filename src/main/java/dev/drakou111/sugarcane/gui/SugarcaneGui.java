@@ -246,6 +246,7 @@ public final class SugarcaneGui {
         addTab("spot", spotTab());
         addTab("crosschunk", crossChunkTab());
         addTab("crossfind", crossFindTab());
+        addTab("crossmerge", crossMergeTab());
         addTab("sisters", sistersTab());
         addTab("inspect", inspectTab());
         // Not a command, so it contributes no arguments and Run does not apply to it.
@@ -526,6 +527,37 @@ public final class SugarcaneGui {
         });
     }
 
+    private Tab crossMergeTab() {
+        Form f = new Form("Pool crossfind join tables built on different machines. The table "
+                + "does not depend on the world seed, so it is the one thing here several "
+                + "people can build in parallel: each takes their own slice of sample space "
+                + "(leave --sample-from blank on the crossfind tab and it picks a random one, "
+                + "and prints it), and their files add up here. Worth more than the sum of its "
+                + "parts, because joins go as table size times seeds streamed -- doubling the "
+                + "table doubles the yield of every later run against it, not just the runs "
+                + "that built it. Duplicate entries are dropped, and the overlap between "
+                + "contributors is reported so nobody scans the same ground twice. Prints the "
+                + "next unclaimed --sample-from to hand out.");
+        JTextField out = f.text("output file", "", "where the pooled table goes");
+        JTextField ins = f.text("input files", "", "space separated; all must be the same "
+                + "search -- same stored side, same minimum height, same count and feature "
+                + "index. A file from a different search is refused rather than joined "
+                + "against, since its keys would land on the wrong block");
+        return new Tab(f.panel, () -> {
+            List<String> a = new ArrayList<>(List.of("crossmerge", req(out, "output file")));
+            String raw = req(ins, "input files");
+            for (String part : raw.split("\\s+")) {
+                if (!part.isBlank()) {
+                    a.add(part);
+                }
+            }
+            if (a.size() < 3) {
+                throw new IllegalArgumentException("give at least one input file");
+            }
+            return a;
+        });
+    }
+
     private Tab spotTab() {
         Form f = new Form("Decoration seeds that grow a stack at one NAMED block, instead of "
                 + "anywhere. For when you already have a block you like -- a ravine wall with "
@@ -625,6 +657,12 @@ public final class SugarcaneGui {
         JTextField outFile = f.text("--out", "", "a file to append confirmed finds to, one "
                 + "line each, flushed as they happen. A run long enough to want a table is "
                 + "long enough that scrollback is not where a find should live");
+        JTextField sampleFrom = f.text("--sample-from", "", "where this run's slice of sample "
+                + "space starts. Blank continues past whatever --table already covers, or is "
+                + "RANDOM and printed when there is no table. Leave it blank when several "
+                + "people are building one table: starting everyone at 0 has them rediscover "
+                + "the same chains, and duplicates inflate the table without adding a join. "
+                + "Pool the results in the crossmerge tab");
         return new Tab(f.panel, () -> {
             List<String> a = new ArrayList<>(List.of("crossfind",
                     req(seeds, "seeds"), req(threads, "threads"), req(target, "targetHeight")));
@@ -667,6 +705,7 @@ public final class SugarcaneGui {
             }
             addIf(a, "--table=", tableFile);
             addIf(a, "--out=", outFile);
+            addIf(a, "--sample-from=", sampleFrom);
             return a;
         });
     }
