@@ -158,7 +158,28 @@ public final class CrossFind {
      * near. Only generating the chunks settles it.
      */
     private record Candidate(long ws, int cxa, int cza, int cxb, int czb, int px, int pz,
-            int baseY, int joinY, int runA, int runB, int predicted) {
+            int baseY, int joinY, int runA, int runB, int predicted, long chainA, long chainB) {
+    }
+
+    /** Why a column of a predicted chain has no cane in the finished world. */
+    private enum ColumnFate {
+        /** It does — this column worked. */
+        GREW,
+        /** Something solid or liquid is in the block the base needed. */
+        BLOCKED,
+        /** Air, but nothing under it to stand on: not soil, and not the cane below it. */
+        NO_SUPPORT,
+        /** Air on soil or cane, but no water beside the block below. */
+        NO_WATER,
+        /**
+         * Everything the feature asks for was there and it still did not place.
+         *
+         * <p>This is the interesting one. Terrain cannot be blamed, so what is left is the RNG:
+         * the chain assumed a shift level — a number of earlier successful placements — that the
+         * real chunk did not produce, so the draws never line up. Or, for chunk B, the decoration
+         * order this whole command assumes and has never verified.
+         */
+        PLACEABLE_BUT_EMPTY
     }
 
     /** Where confirmed finds are appended, if {@code --out} named one. */
@@ -740,6 +761,14 @@ public final class CrossFind {
         AtomicLong whyPlaceable = new AtomicLong();
         AtomicLong soilWasCarved = new AtomicLong();
         AtomicLong soilWasWater = new AtomicLong();
+        // Where the stack actually stops, walked column by column over both chains. The
+        // histogram above only ever read chunk A's bottom base, which cannot say anything about
+        // a candidate whose base was perfect -- and those are the only ones left worth asking
+        // about (FINDINGS 6bm).
+        AtomicLong grewSomething = new AtomicLong();
+        AtomicLong trueCrossChunk = new AtomicLong();
+        java.util.concurrent.ConcurrentHashMap<String, AtomicLong> stopped =
+                new java.util.concurrent.ConcurrentHashMap<>();
         Thread[] pool = new Thread[threads];
         for (int t = 0; t < threads; t++) {
             pool[t] = new Thread(() -> {
@@ -774,6 +803,33 @@ public final class CrossFind {
                         done.incrementAndGet();
                     }
                     tallest.accumulateAndGet(grown, Math::max);
+                    if (grown > 0) {
+                        grewSomething.incrementAndGet();
+                        // A run taller than any one chunk built is the thing this command is
+                        // for, even when it falls short of the prediction.
+                        if (worker.world.caneRunFromOneChunk(c.px, c.baseY, c.pz) < grown) {
+                            trueCrossChunk.incrementAndGet();
+                        }
+                    }
+                    if (grown < c.predicted) {
+                        // First column that has no cane, over chain A then chain B in the order
+                        // they must be built.
+                        String where = null;
+                        for (int side = 0; side < 2 && where == null; side++) {
+                            long chain = side == 0 ? c.chainA() : c.chainB();
+                            int cols = ChainPrefilter.chainColumns(chain);
+                            for (int k = 0; k < cols; k++) {
+                                ColumnFate fate = fateOf(worker.world, c.px, c.pz,
+                                        ChainPrefilter.chainBaseY(chain, k));
+                                if (fate != ColumnFate.GREW) {
+                                    where = (side == 0 ? "A" : "B") + " col " + k + ": " + fate;
+                                    break;
+                                }
+                            }
+                        }
+                        stopped.computeIfAbsent(where == null ? "every column grew, run short"
+                                : where, k -> new AtomicLong()).incrementAndGet();
+                    }
                     if (grown < c.predicted) {
                         // The world did not provide. Which part of it did not is the whole
                         // question, so read the base back rather than only counting the miss.
@@ -851,6 +907,16 @@ public final class CrossFind {
             System.out.printf("  none survived; of the %d that DID generate, the tallest cane "
                     + "actually grown was %d%n", built, tallest.get());
         }
+        System.out.printf("  %d grew some cane, of which %d ran taller than any one chunk "
+                        + "built%n", grewSomething.get(), trueCrossChunk.get());
+        if (!stopped.isEmpty()) {
+            System.out.println("  where the predicted stack stops, first column with no cane:");
+            stopped.entrySet().stream()
+                    .sorted((x, y) -> Long.compare(y.getValue().get(), x.getValue().get()))
+                    .limit(12)
+                    .forEach(e -> System.out.printf("    %-32s %d%n", e.getKey(),
+                            e.getValue().get()));
+        }
         System.out.printf("  why they failed, at chunk A's bottom base: not air %d, "
                         + "air but no soil under it %d, soil but no water beside %d, "
                         + "placeable and the RNG still did not %d%n",
@@ -861,6 +927,32 @@ public final class CrossFind {
                     whyNoSoil.get(), soilWasCarved.get(), soilWasWater.get(),
                     whyNoSoil.get() - soilWasCarved.get() - soilWasWater.get());
         }
+    }
+
+    /**
+     * What became of one predicted column, read out of the finished world.
+     *
+     * <p>The base is the only block the feature tests — {@code ColumnPlacer} writes upward over
+     * whatever is there — so this asks exactly what {@code canPlace} asks, and in the same order.
+     */
+    private static ColumnFate fateOf(dev.drakou111.sugarcane.world.ArrayWorld world,
+            int px, int pz, int y) {
+        byte at = world.getBlock(px, y, pz);
+        if (at == dev.drakou111.sugarcane.world.Blocks.SUGAR_CANE) {
+            return ColumnFate.GREW;
+        }
+        if (!dev.drakou111.sugarcane.world.Blocks.isAir(at)) {
+            return ColumnFate.BLOCKED;
+        }
+        byte below = world.getBlock(px, y - 1, pz);
+        if (below != dev.drakou111.sugarcane.world.Blocks.SUGAR_CANE
+                && !dev.drakou111.sugarcane.world.Blocks.isCaneSoil(below)) {
+            return ColumnFate.NO_SUPPORT;
+        }
+        if (!SugarCaneFeature.hasWaterBeside(world, px, y - 1, pz)) {
+            return ColumnFate.NO_WATER;
+        }
+        return ColumnFate.PLACEABLE_BUT_EMPTY;
     }
 
     /** The tallest contiguous cane run standing anywhere in this column. */
@@ -985,9 +1077,9 @@ public final class CrossFind {
                             if (CANDIDATES.size() >= maxCandidates) {
                                 candidatesTruncated = true;
                             } else {
-                                CANDIDATES.add(new Candidate(full, cxa, cza, cxb, czb, px, pz,
+                                        CANDIDATES.add(new Candidate(full, cxa, cza, cxb, czb, px, pz,
                                         ChainPrefilter.chainBaseY(ca, 0), top, runOf(ca),
-                                        runOf(cb), height));
+                                        runOf(cb), height, ca, cb));
                             }
                         }
                     }
