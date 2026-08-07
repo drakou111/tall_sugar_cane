@@ -235,6 +235,11 @@ public final class DecorationLattice {
         return ((chunkX * 16L) * a + (chunkZ * 16L) * b ^ worldSeed) & LOW48_MASK;
     }
 
+    /** The seed this lattice was built for, so a caller need not carry it alongside. */
+    public long worldSeed() {
+        return worldSeed;
+    }
+
     /**
      * Just enough signed 128-bit arithmetic for the reduction, mutable so the loop
      * allocates nothing. Everything here is a norm or dot product of vectors whose

@@ -169,7 +169,7 @@ public final class Cli {
                     CrossChunk::main),
             new Command("crossfind",
                     "[seeds] [threads] [targetHeight] [minA] [minB] [--dx=1] [--dz=0] "
-                            + "[--water-probe] [--max-store=<n>]",
+                            + "[--sisters=64] [--floor] [--water-probe] [--max-store=<n>]",
                     "Search for cross-chunk stacks, where `crosschunk` only measures them. "
                             + "The single-chunk pipeline cannot do this: it picks a world seed "
                             + "and asks the lattice where a decoration seed lands, and asking "
@@ -188,6 +188,19 @@ public final class Cli {
                             + "Two passes: the taller side is rare and goes in a table, the "
                             + "shorter is streamed against it. --dx and --dz pick which "
                             + "neighbour, default the chunk at +1,0. "
+                            + "--sisters sweeps the upper 16 bits of each solved seed, which "
+                            + "the decoration seed never sees: the lattice, both decoration "
+                            + "seeds, the carver walk and the dirt blobs are identical across "
+                            + "them, and only the biome map and the sea floor move. Since "
+                            + "terrain is the only thing that has ever rejected a cross-chunk "
+                            + "candidate, that is 64 rolls of the binding constraint for one "
+                            + "1.45 ms lift. --floor additionally demands that the block under "
+                            + "the bottom column was NOT carved, because a ravine tall enough "
+                            + "to hold the stack usually took the floor with it and dirt "
+                            + "cannot be blobbed into air -- measured, 62% of the candidates "
+                            + "that reach real terrain with air at the base and nothing under "
+                            + "it. It is a flag and not the default because the probe "
+                            + "over-approximates carving, so it can throw away a real floor. "
                             + "Verified on a hit: both chains exist, they meet at one block, "
                             + "the world seed places both chunks inside the border, both are "
                             + "cane-bearing ocean, every column base of both chains is inside "

@@ -3836,3 +3836,243 @@ general filter but which no test checks. `BundledKernelTest` only asserts the bi
 and not stale. **Nothing pins the kernel to the filter**, and the target builder runs on that
 pairing. Not yet resolved -- it may equally be that the parameter mapping reconstructed here is
 wrong.
+
+## 6bh: crossfind's candidates were never checked against the terrain that rejects them
+
+6bg left 3,500 candidates and zero cane, and read that as the carve probe accepting roughly one
+candidate in 3,500 that terrain could support. That was the right diagnosis of the symptom and
+the wrong one of the cause. Four separate things were wrong, three of them fixable, and the
+fourth is where cross-chunk actually stands.
+
+### The noise gate was simply missing
+
+`ReverseSearcher` gates every chain on `Worker.noiseCouldHoldChain`: below sea level a carver
+turns stone into air and never turns water into air, so a column base the **noise** left as water
+can never be carved, whatever the walk did. `crossfind` never called it. It is one noise column
+against the probe's 81 carver walks, and rejecting on it cannot lose a find.
+
+Worth 20%, not the systematic kill 6bf's "probe says carved 31, actually air 7, overlap 0"
+suggested -- the overlap failure is real but it is the *walk* over-carving, not the noise:
+
+```
+4M seeds, height 10:  ocean 22916 -> solid noise 18326 -> past carve 149 -> generated 124
+```
+
+### The soil check was waved through on exactly the chains that needed it
+
+6bf spotted that soil was only tested for relative x in 0..15 while the join geometry puts the
+column at 12..19 or -4..3 about a third of the time. What it did not spot is that the fix is
+free here. The single-chunk pipeline asks only the decorating chunk because when a target set is
+built there is no world seed yet, so no neighbour's decoration seed can be named. `crossfind` has
+**already solved the world seed** by the time it asks, so every chunk within blob reach is one
+`decorationSeedOf` away. A blob reaches 8 blocks, so at most two chunk columns in x and two in z
+can supply any block, and asking all four is both tighter than the wave-through and more
+permissive than the single-chunk filter -- the 18% coverage that filter is known to lose to
+neighbour blobs is exactly what this sees.
+
+Candidates got 6x tighter, and every one is now actually checked.
+
+### The bottom column has to stand ON the ravine floor, and nothing said so
+
+This is the one that was hiding. Reading the base back out of generated terrain instead of only
+counting cane splits the failures cleanly, and the split is not what the funnel suggested:
+
+```
+2M seeds, 64 sisters, no floor rule:  301 generated
+  not air                      110
+  air but no soil under it     191   -> of those: block under the base was carved away  119
+                                                  was water                               0
+                                                  was stone the blobs missed              72
+```
+
+**62% of the no-soil failures had the floor carved out from under them.** A ravine tall enough to
+hold a cross-chunk stack usually takes the block below the base as well, and dirt cannot be
+blobbed into air. Every filter in the pipeline asked whether the base was carved; none asked that
+the block under it was not.
+
+`--floor` adds that condition, and it is worth more than anything else here:
+
+```
+2M seeds, 64 sisters, --floor:         79 generated
+  not air                       10   (13%, against 37%)
+  air but no soil under it      69   -> carved away 0, water 0, stone the blobs missed 69
+```
+
+Kept as a flag rather than made the default, on the same reasoning as `--ravines-only` in 6at:
+the probe over-approximates carving, so it can report "carved" where the real carver was stopped
+and throw away a find that was standing on that floor. The over-approximation is mostly above the
+noise floor and this block is below it, but "mostly" is not "measured".
+
+### One lift was buying one roll of the only thing that ever says no
+
+`TwoChunkLift` recovers the low 48 bits, which is all a decoration seed ever sees. 6al established
+what the upper 16 do and do not move: the lattice solution, both decoration seeds, the carver walk
+and the dirt blobs are **identical** across sisters, and only the biome map and, through depth and
+scale, the sea floor change. `crossfind` solved a 1.45 ms lift and then tested exactly one of the
+65,536 terrains it had just paid for.
+
+Since terrain is the only thing that has ever rejected a cross-chunk candidate, those 16 bits
+re-roll precisely the binding constraint. Reordering so the sister-invariant work (carve probe,
+dirt blobs) happens once and the biome and noise gates sweep sisters:
+
+```
+2M seeds, 12 threads:  27 sister-invariant survivors -> 535 ocean pairs -> 403 candidates
+                       (without sisters those 27 would have yielded ~8)
+```
+
+The reverse search caps its own sweep at 64 because chunk generation dominates there and
+amortises over nothing. Here the thing being amortised is the lift, so 64 is a floor rather than
+a ceiling; it is the default and `--sisters` raises it.
+
+`allCarved` had to become biome-blind to be shareable, which is sound in the accepting direction
+for the same reason 6al gives: `CAVE_LAND` fires on a superset of `CAVE_OCEAN` start chunks off
+the same `nextFloat`. With `--ravines-only`, which is this command's default, the cave carver
+does not run at all and the question does not arise.
+
+### Where the candidates die now, which is one gate further than before
+
+20M seeds, 11 threads, 64 sisters, `--floor`, 400 s:
+
+```
+  chains stored           : 4007919
+  joins tried             : 3172600
+  world seeds solved      : 3175764
+  pairs inside the border : 1922430
+  past carve + soil       : 200        (sister-invariant)
+  both chunks cane ocean  : 3656       (x64 sisters)
+  every base solid noise  : 3041
+  generated               : 2368       (673 were never built)
+  CONFIRMED               : 0
+
+  not air                     1321
+  air but no soil              936     (carved away 16, stone the blobs missed 920)
+  soil but no water beside     111
+  placeable, RNG did not         0
+```
+
+**111 candidates reached the last gate.** Across every cross-chunk run before this one, over
+3,500 candidates, not a single one had air and soil together at the base; the run above has 4.7%
+of them there, and what stops all 111 is water beside the base. That is the condition
+`LiquidCarveProbe` answers and which `--water-probe` has always been able to apply, and it has
+never been the gate that mattered because nothing used to get far enough to meet it.
+
+"not air" rising to 56% is expected and is the price of sisters: the carve probe is
+sister-invariant, so a sister whose sea floor sits elsewhere gets a walk that no longer describes
+its terrain. The candidates are cheap and generation runs at 1,155/s, so this costs nothing worth
+recovering.
+
+### Sisters are 66x for 1.27x, because the lift is the entire cost
+
+The funnel above accounts for its own runtime: 3.17M joins at 1.45 ms is 4,600 thread-seconds
+against 400 s on 11 threads, so the lift **is** the run. The sister sweep is 200 survivors times
+64 biome-source builds, which is nothing beside it. Raising it should therefore be close to free,
+and it is -- same 20M seeds, same everything else:
+
+```
+  sisters    candidates    wall
+       64         3,041     400 s
+    4,096       200,379     506 s        66x the candidates for 1.27x the time
+```
+
+So 64 was leaving the whole family on the table. 4,096 is now the default, and the last 16x is
+available with `--sisters`; it is not the default only because candidates are held in memory
+until verification, which is what `--max-candidates` bounds.
+
+### But 66x the candidates is not 66x the search, and the reason is 6al's own list
+
+6al says what sisters share: the lattice, both decoration seeds, **the carver walk**, and the
+dirt blobs. `LiquidCarveProbe` carries the same note -- "being a low-48 property it is shareable
+across sister seeds exactly as the air walk". Put those together and all three conditions that
+actually reject cross-chunk candidates are sister-invariant:
+
+```
+  air carve at every base   walk is low-48   -> identical across all 65,536 sisters
+  water beside the base     walk is low-48   -> identical
+  soil under the base       blobs are low-48 -> identical
+```
+
+What sisters do re-roll is the **noise**: which blocks are solid, and therefore which of the
+walk's reach the real carver converts, plus the biome gate. That is a real re-roll and it is why
+candidate counts move at all. It is not an independent redraw of the geometry.
+
+So the effective sample for the binding constraint is the number of **sister-invariant
+survivors** -- 200 in the height-10 run, not 156,765 -- and the truth sits somewhere between the
+two, at 6al's measured 0.56 correlation for rare geometry. The run cannot separate them: fully
+independent sisters predict 0.8 confirmations and fully correlated ones predict 0.001, and zero
+is consistent with both.
+
+The claim that survives is narrow and worth keeping anyway: sisters cost 1.27x and can only help,
+so there is no reason not to sweep them. The claim that does not survive is that they multiply the
+search 66x. **The lever that multiplies the search is distinct lifts**, because a different low-48
+seed is the only thing that moves the carver walks.
+
+### Where it stands: 156,765 candidates, and the wall is water
+
+```
+20M seeds, 22 threads, 4,096 sisters, --floor:  156,765 generated, 0 confirmed
+  not air                     88,476   (56%)
+  air but no soil             60,418   (39%)   carved away 1,211, stone the blobs missed 59,207
+  soil but no water beside     7,871   (5.0%)
+  placeable, RNG did not           0
+```
+
+The `--floor` rule is doing its job -- the failure it was built for is down from 62% of the
+no-soil bucket to 2%. And 7,871 candidates now reach the last gate, against zero in every
+cross-chunk run before this one.
+
+**None of them have water.** That is the finding. The bottom column needs water beside the block
+it stands on, `--floor` requires that block to be uncarved, and water beside a *solid* ravine
+floor at depth means a LIQUID-step carver flooding the column next to it at exactly that y. It
+happens -- the confirmed 8-tall is that geometry -- but 0 in 7,871 puts it below 1.3e-4 even
+given air and soil, and `--water-probe` barely helps because the liquid probe over-approximates
+about as freely as the air one (it trims candidates 43% and moved the water pass rate from 4.7%
+to 3.4%, both of them still zero).
+
+Cumulatively, counting 6bg's 3,500: about **168,000 cross-chunk candidates and no confirmation**.
+Per candidate that bounds the rate under 6e-6; per *position*, which is the number that governs,
+it is 168,000 candidates drawn from only a few hundred distinct low-48 seeds, and bounds nothing
+much at all.
+
+Height 17, the cheapest target above 16 (7+10, since 6ba puts 18 about 1000x below 16 and 20
+further still), makes the position problem impossible to miss:
+
+```
+1e9 seeds, 22 threads, 4,096 sisters, --floor, 667 s
+  chains stored           : 5563
+  joins tried             : 40709
+  past carve + soil       : 2          <- two positions
+  both chunks cane ocean  : 2356       (x4096 sisters, off those two)
+  every base solid noise  : 1899
+  generated               : 541        (1358 never built -- one bad neighbourhood, twice)
+  CONFIRMED               : 0
+```
+
+1,899 candidates that are really two places seen under many biome maps. The 71% never generated
+is the same artifact: `searchRegion` needs all eight neighbours of the chunk to be cane-bearing
+ocean, and with two positions in the sample, one bad neighbourhood is 71% of the run.
+
+### What this does and does not settle
+
+It does not overturn 6bf. Terrain is still the binding constraint and the RNG is still free; what
+changed is that the pipeline now spends its terrain budget on the constraint instead of around
+it, and can afford 66x more of it per lift.
+
+The structural reading is that `crossfind` lets the **RNG choose the column** and then hopes the
+terrain at that one column obliges. The base rate for the geometry is ~1.3e-3 per ocean chunk, or
+~5e-6 for a named column, which is the order the measured bound sits at -- the search is not
+missing something, it is paying the column-selection price in full. A terrain-first search picks
+the column instead and pays for RNG, which is the trade `spot` already makes; and 6ba's result
+that cross-chunk loses per-seed to one chunk is consistent with that, because the world seed it
+solves for is an arbitrary one.
+
+What that means for cost. Distinct positions arrive at 200 per 400 s on 11 threads at height 10,
+and at **2 per 667 s on 22 threads at height 17**, since joins go as the square of the seeds and
+a height-17 pass stores 5,563 chains where height 10 stores 4M. Getting height 17 to a few hundred
+positions is a 1e10-seed run, about 1.8 hours on 22 threads, and a few hundred positions against a
+~5e-6 per-position rate is not a find -- it is a lottery ticket. Cross-chunk reaches 17 for the
+price of 16 in **RNG**, which was 6be's claim and is still true; it does not reach it for the price
+of 16 in terrain, and terrain is the whole bill.
+
+The lever this analysis points at is not throughput. It is to stop letting the RNG name the
+column: find the geometry first, as `spot` does, and let cross-chunk supply the much easier RNG
+that a found column then needs.

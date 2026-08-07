@@ -56,7 +56,7 @@ public final class DirtBlobFilter {
      * x and z, and the largest sphere radius is {@code ((1+1)*2.0625 + 1)/2 = 2.5625},
      * so 6.69 horizontally and 4.57 vertically. 8 is the same bound with margin.
      */
-    private static final int REACH = 8;
+    public static final int REACH = 8;
 
     /** ORE_DIRT is the first feature of UNDERGROUND_ORES, which is step 6. */
     public static final int ORE_INDEX = 0;

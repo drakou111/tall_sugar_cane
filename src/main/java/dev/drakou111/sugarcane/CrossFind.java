@@ -10,7 +10,6 @@ import dev.drakou111.sugarcane.gen.OrbitSampler;
 import dev.drakou111.sugarcane.gen.SugarCaneFeature;
 import dev.drakou111.sugarcane.rng.DecorationLattice;
 import dev.drakou111.sugarcane.rng.TwoChunkLift;
-import dev.drakou111.sugarcane.validate.BiomeSourceValidator;
 
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -74,6 +73,34 @@ public final class CrossFind {
     /** Above this many stored entries the table is closed early rather than eating the heap. */
     private static final int DEFAULT_MAX_STORE = 20_000_000;
 
+    /**
+     * How many of a solved seed's 65,536 sisters to try.
+     *
+     * <p>Only the low 48 bits of a world seed reach {@code setSeed}, so the lift recovers
+     * exactly those and the upper 16 are free. They move the biome map and, through depth and
+     * scale, the sea floor — which is to say they re-roll the terrain, the one thing that has
+     * ever rejected a cross-chunk candidate. The reverse search caps its own sweep at 64
+     * because chunk generation dominates there and amortises over nothing; here the thing
+     * being amortised is a 1.45 ms lift, so it pays much further up.
+     *
+     * <p>Measured at height 10 over the same 20M seeds: 64 sisters gave 3,041 candidates in
+     * 400 s, 4,096 gave 200,379 in 506 s. That is <b>66x the candidates for 1.27x the
+     * wall-clock</b>, because the lift is the whole cost and the sweep rides along on it. The
+     * remaining 16x up to the full family is available with {@code --sisters}; it is not the
+     * default only because candidates are held in memory until verification.
+     */
+    private static final int DEFAULT_SISTERS = 4096;
+
+    /**
+     * Above this many candidates, stop collecting rather than exhaust the heap.
+     *
+     * <p>Candidates are verified after the scan, so they accumulate for the whole run, and a
+     * high sister count makes that a real number: 4,096 sisters produce them 66x faster than
+     * 64 do. Truncating is honest as long as it is reported — the run has then searched less
+     * ground than asked for, which is different from having searched it and found nothing.
+     */
+    private static final int DEFAULT_MAX_CANDIDATES = 4_000_000;
+
     private CrossFind() {
     }
 
@@ -118,6 +145,9 @@ public final class CrossFind {
 
     private static final java.util.List<Candidate> CANDIDATES =
             java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+
+    /** Set once the candidate cap is reached, so the run can say it searched less ground. */
+    private static volatile boolean candidatesTruncated;
 
     /** Growable (key, seed) pairs, per thread, so collection never synchronises. */
     private static final class Hits {
@@ -175,17 +205,25 @@ public final class CrossFind {
             minA = split[0];
             minB = split[1];
         }
-        int dx = 1, dz = 0, maxStore = DEFAULT_MAX_STORE;
+        int dx = 1, dz = 0, maxStore = DEFAULT_MAX_STORE, sisterCount = DEFAULT_SISTERS;
+        int candidateCap = DEFAULT_MAX_CANDIDATES;
         boolean water = false;
+        boolean floor = false;
         for (String arg : rawArgs) {
-            if (arg.startsWith("--dx=")) {
+            if (arg.startsWith("--sisters=")) {
+                sisterCount = Integer.parseInt(arg.substring(10));
+            } else if (arg.startsWith("--dx=")) {
                 dx = Integer.parseInt(arg.substring(5));
             } else if (arg.startsWith("--dz=")) {
                 dz = Integer.parseInt(arg.substring(5));
+            } else if (arg.startsWith("--max-candidates=")) {
+                candidateCap = Integer.parseInt(arg.substring(17));
             } else if (arg.startsWith("--max-store=")) {
                 maxStore = Integer.parseInt(arg.substring(12));
             } else if (arg.equals("--water-probe")) {
                 water = true;
+            } else if (arg.equals("--floor")) {
+                floor = true;
             }
         }
         if (dx == 0 && dz == 0) {
@@ -200,6 +238,9 @@ public final class CrossFind {
         final int streamedMin = storeEndings ? minB : minA;
         final int fdx = dx, fdz = dz;
         final boolean useWater = water;
+        final boolean useFloor = floor;
+        final int sisters = sisterCount;
+        final int maxCandidates = candidateCap;
 
         System.out.printf("cross-chunk SEARCH for height %d, %d seeds, %d threads%n",
                 target, seeds, threads);
@@ -207,6 +248,9 @@ public final class CrossFind {
                 minA, dx, dz, minB);
         System.out.printf("  storing the %s side (>= %d, the rarer), streaming the other%n",
                 storeEndings ? "ending" : "beginning", storedMin);
+        System.out.printf("  %d sister%s per solved seed (the upper 16 bits re-roll the "
+                        + "terrain and nothing else)%n",
+                sisters, sisters == 1 ? "" : "s");
 
         long start = System.currentTimeMillis();
         long runs = (seeds + OrbitSampler.RUN - 1) / OrbitSampler.RUN;
@@ -315,6 +359,7 @@ public final class CrossFind {
         AtomicLong solvedSeeds = new AtomicLong();
         AtomicLong inBorder = new AtomicLong();
         AtomicLong oceanPairs = new AtomicLong();
+        AtomicLong solidNoise = new AtomicLong();
         AtomicLong carved = new AtomicLong();
         AtomicLong found = new AtomicLong();
         AtomicLong streamed = new AtomicLong();
@@ -359,9 +404,10 @@ public final class CrossFind {
                                     long dsA = storeEndings ? tab[p] : ds;
                                     long dsB = storeEndings ? ds : tab[p];
                                     joins.incrementAndGet();
-                                    examine(dsA, dsB, fdx, fdz, minA, minB, endA, beginB,
-                                            probe, liquid, dirt, worker, useWater,
-                                            solvedSeeds, inBorder, oceanPairs, carved, found);
+                                    examine(dsA, dsB, fdx, fdz, minA, minB, sisters, endA,
+                                            beginB, probe, liquid, dirt, worker, useWater,
+                                            useFloor, maxCandidates, solvedSeeds, inBorder,
+                                            carved, oceanPairs, solidNoise);
                                 }
                             }
                         }
@@ -383,12 +429,13 @@ public final class CrossFind {
                 }
                 long ms = System.currentTimeMillis() - pass2Start;
                 System.out.printf("[%4.1f min] %d seeds streamed (%.0f/s), joins %d, "
-                                + "world seeds solved %d, in border %d, ocean %d, "
-                                + "past carve %d (candidates, terrain not generated yet)%n",
+                                + "world seeds solved %d, in border %d, past carve %d, "
+                                + "ocean %d, solid noise %d "
+                                + "(candidates, terrain not generated yet)%n",
                         ms / 60000.0, streamed.get(),
                         streamed.get() * 1000.0 / Math.max(1, ms), joins.get(),
-                        solvedSeeds.get(), inBorder.get(), oceanPairs.get(),
-                        carved.get());
+                        solvedSeeds.get(), inBorder.get(), carved.get(),
+                        oceanPairs.get(), solidNoise.get());
                 System.out.flush();
             }
         }, "crossfind-progress");
@@ -408,8 +455,10 @@ public final class CrossFind {
         System.out.printf("  joins tried             : %d%n", joins.get());
         System.out.printf("  world seeds solved      : %d%n", solvedSeeds.get());
         System.out.printf("  pairs inside the border : %d%n", inBorder.get());
-        System.out.printf("  both chunks cane ocean  : %d%n", oceanPairs.get());
-        System.out.printf("  past the carve probe    : %d%n", carved.get());
+        System.out.printf("  past carve + soil       : %d   (sister-invariant)%n", carved.get());
+        System.out.printf("  both chunks cane ocean  : %d   (x%d sisters)%n",
+                oceanPairs.get(), sisters);
+        System.out.printf("  every base solid noise  : %d%n", solidNoise.get());
         System.out.printf("  CONFIRMED IN TERRAIN    : %d%n", found.get());
         if (joins.get() == 0) {
             System.out.println("  no pair of chains ever met at a block -- more seeds, or a "
@@ -445,6 +494,11 @@ public final class CrossFind {
         }
         System.out.printf("%ngenerating terrain for %d candidates on %d threads...%n",
                 pending.size(), threads);
+        if (candidatesTruncated) {
+            System.out.println("  (the candidate cap was hit, so later ones were dropped "
+                    + "unexamined -- raise --max-candidates or use fewer seeds; this run "
+                    + "searched less ground than it was asked for)");
+        }
         long start = System.currentTimeMillis();
 
         // Parallel because this is now the cost that decides how many candidates the run can
@@ -455,6 +509,15 @@ public final class CrossFind {
         AtomicLong ungenerated = new AtomicLong();
         AtomicLong tallest = new AtomicLong();
         AtomicLong done = new AtomicLong();
+        // Why each generated candidate failed, at chunk A's bottom column. "Grew no cane" and
+        // "the base was never carved" look identical from the height alone, and they point at
+        // completely different filters: the first is the RNG, the second is the carve probe.
+        AtomicLong whyNotAir = new AtomicLong();
+        AtomicLong whyNoSoil = new AtomicLong();
+        AtomicLong whyNoWater = new AtomicLong();
+        AtomicLong whyPlaceable = new AtomicLong();
+        AtomicLong soilWasCarved = new AtomicLong();
+        AtomicLong soilWasWater = new AtomicLong();
         Thread[] pool = new Thread[threads];
         for (int t = 0; t < threads; t++) {
             pool[t] = new Thread(() -> {
@@ -490,7 +553,33 @@ public final class CrossFind {
                     }
                     tallest.accumulateAndGet(grown, Math::max);
                     if (grown < c.predicted) {
-                        continue;   // the RNG wanted it; the world did not provide
+                        // The world did not provide. Which part of it did not is the whole
+                        // question, so read the base back rather than only counting the miss.
+                        // The chunk is decorated by now, but a base that never got cane still
+                        // holds whatever the carvers left, which is what is being asked about.
+                        byte at = worker.world.getBlock(c.px, c.baseY, c.pz);
+                        byte below = worker.world.getBlock(c.px, c.baseY - 1, c.pz);
+                        if (!dev.drakou111.sugarcane.world.Blocks.isAir(at)) {
+                            whyNotAir.incrementAndGet();
+                        } else if (!dev.drakou111.sugarcane.world.Blocks.isCaneSoil(below)) {
+                            whyNoSoil.incrementAndGet();
+                            // A ravine tall enough to hold the stack usually carved the block
+                            // under it too, and dirt cannot be blobbed into air. Splitting
+                            // "carved away" from "still stone" says whether the fix is a
+                            // tighter soil filter or a floor condition on the carve.
+                            if (dev.drakou111.sugarcane.world.Blocks.isAir(below)) {
+                                soilWasCarved.incrementAndGet();
+                            } else if (dev.drakou111.sugarcane.world.Blocks
+                                    .isWaterFluid(below)) {
+                                soilWasWater.incrementAndGet();
+                            }
+                        } else if (!SugarCaneFeature.hasWaterBeside(
+                                worker.world, c.px, c.baseY - 1, c.pz)) {
+                            whyNoWater.incrementAndGet();
+                        } else {
+                            whyPlaceable.incrementAndGet();
+                        }
+                        continue;
                     }
                     found.incrementAndGet();
                     synchronized (CrossFind.class) {
@@ -539,6 +628,16 @@ public final class CrossFind {
             System.out.printf("  none survived; of the %d that DID generate, the tallest cane "
                     + "actually grown was %d%n", built, tallest.get());
         }
+        System.out.printf("  why they failed, at chunk A's bottom base: not air %d, "
+                        + "air but no soil under it %d, soil but no water beside %d, "
+                        + "placeable and the RNG still did not %d%n",
+                whyNotAir.get(), whyNoSoil.get(), whyNoWater.get(), whyPlaceable.get());
+        if (whyNoSoil.get() > 0) {
+            System.out.printf("  of the %d with no soil: the block under the base was carved "
+                            + "away %d, was water %d, was stone the blobs missed %d%n",
+                    whyNoSoil.get(), soilWasCarved.get(), soilWasWater.get(),
+                    whyNoSoil.get() - soilWasCarved.get() - soilWasWater.get());
+        }
     }
 
     /** The tallest contiguous cane run standing anywhere in this column. */
@@ -558,10 +657,11 @@ public final class CrossFind {
      * matters is that the solve happens once per pair rather than once per world seed.
      */
     private static void examine(long dsA, long dsB, int dx, int dz, int minA, int minB,
-            ChainPrefilter endA, ChainPrefilter beginB, AirCarveProbe probe,
+            int sisters, ChainPrefilter endA, ChainPrefilter beginB, AirCarveProbe probe,
             LiquidCarveProbe liquid, DirtBlobFilter dirt, RegionSearcher.Worker worker,
-            boolean useWater, AtomicLong solvedSeeds, AtomicLong inBorder,
-            AtomicLong oceanPairs, AtomicLong carved, AtomicLong found) {
+            boolean useWater, boolean floorOnly, int maxCandidates, AtomicLong solvedSeeds,
+            AtomicLong inBorder, AtomicLong carved, AtomicLong oceanPairs,
+            AtomicLong solidNoise) {
 
         long[] worldSeeds = TwoChunkLift.solve(dsA, dsB, dx, dz);
         if (worldSeeds.length == 0) {
@@ -588,16 +688,6 @@ public final class CrossFind {
             }
             inBorder.incrementAndGet();
 
-            worker.prepare(ws);
-            int biomeA = BiomeIds.noiseGen(worker.biomeSource(), cxa * 4 + 2, cza * 4 + 2);
-            int biomeB = BiomeIds.noiseGen(worker.biomeSource(), cxb * 4 + 2, czb * 4 + 2);
-            if (!RegionSearcher.isSearchableOcean(biomeA) || !BiomeCaneConfig.hasSugarCane(biomeA)
-                    || !RegionSearcher.isSearchableOcean(biomeB)
-                    || !BiomeCaneConfig.hasSugarCane(biomeB)) {
-                continue;
-            }
-            oceanPairs.incrementAndGet();
-
             // Recover the two chains. The pair was matched on a join key, so the chains that
             // produced it are found again by re-running the filters and looking for the block
             // where one stops and the other starts.
@@ -622,26 +712,80 @@ public final class CrossFind {
                     }
                     int px = cxa * 16 + ax;
                     int pz = cza * 16 + az;
-                    if (!allCarved(probe, liquid, dirt, worker, ws, cxa, cza, ca, px, pz,
-                            useWater, true)
-                            || !allCarved(probe, liquid, dirt, worker, ws, cxb, czb, cb, px, pz,
-                                    useWater, false)) {
+                    // Sister-invariant terrain first. The carver walk and the dirt blobs are
+                    // both driven by seeds that get masked to 48 bits, so they answer for all
+                    // 65,536 sisters of this world seed at once (FINDINGS 6al) — and if they
+                    // say no, every sister is dead and the lift that produced them is wasted.
+                    if (!allCarved(probe, liquid, dirt, lattice, ca, px, pz, useWater,
+                            true, floorOnly)
+                            || !allCarved(probe, liquid, dirt, lattice, cb, px, pz,
+                                    useWater, false, floorOnly)) {
                         continue;
                     }
                     carved.incrementAndGet();
                     int height = runOf(ca) + runOf(cb);
-                    // NOT a find. The carve probe only says a carver's walk reached these
-                    // blocks, which is a necessary condition and nothing more -- the finished
-                    // world can still be solid stone there, and was for the first batch this
-                    // command printed. Real terrain decides, in verify() below.
-                    synchronized (CANDIDATES) {
-                        CANDIDATES.add(new Candidate(ws, cxa, cza, cxb, czb, px, pz,
-                                ChainPrefilter.chainBaseY(ca, 0), top, runOf(ca), runOf(cb),
-                                height));
+
+                    // Everything the upper 16 bits DO move: the biome map, and through its
+                    // depth and scale the sea floor. Both of the gates below are terrain, and
+                    // terrain is what kills cross-chunk candidates (6bf), so this is the whole
+                    // point — one 1.45 ms lift used to buy one roll of it.
+                    for (int u = 0; u < sisters; u++) {
+                        long full = ws | ((long) u << 48);
+                        worker.prepareBiomesOnly(full);
+                        int biomeA = BiomeIds.noiseGen(worker.biomeSource(),
+                                cxa * 4 + 2, cza * 4 + 2);
+                        int biomeB = BiomeIds.noiseGen(worker.biomeSource(),
+                                cxb * 4 + 2, czb * 4 + 2);
+                        if (!RegionSearcher.isSearchableOcean(biomeA)
+                                || !BiomeCaneConfig.hasSugarCane(biomeA)
+                                || !RegionSearcher.isSearchableOcean(biomeB)
+                                || !BiomeCaneConfig.hasSugarCane(biomeB)) {
+                            continue;
+                        }
+                        oceanPairs.incrementAndGet();
+                        // The whole stack is one world column, so one noise column answers both
+                        // chains. This is the check 6bf found missing: the carve probe's stub
+                        // replaces anything, but the real carver will not turn water into air,
+                        // so a base the noise left as water can never be carved. A cross-chunk
+                        // join is high by construction, which puts these bases exactly where
+                        // the noise is most likely to have stopped — 6bf's "probe says carved
+                        // 31, actually air 7, overlap 0".
+                        if (!noiseHolds(worker, px, pz, ca, cb)) {
+                            continue;
+                        }
+                        solidNoise.incrementAndGet();
+                        // NOT a find. The carve probe only says a carver's walk reached these
+                        // blocks, which is a necessary condition and nothing more -- the
+                        // finished world can still be solid stone there, and was for the first
+                        // batch this command printed. Real terrain decides, in verify() below.
+                        synchronized (CANDIDATES) {
+                            if (CANDIDATES.size() >= maxCandidates) {
+                                candidatesTruncated = true;
+                            } else {
+                                CANDIDATES.add(new Candidate(full, cxa, cza, cxb, czb, px, pz,
+                                        ChainPrefilter.chainBaseY(ca, 0), top, runOf(ca),
+                                        runOf(cb), height));
+                            }
+                        }
                     }
                 }
             }
         }
+    }
+
+    /** Every column base of both chains sits in a block the noise made solid. */
+    private static boolean noiseHolds(RegionSearcher.Worker worker, int px, int pz,
+            long ca, long cb) {
+        int na = ChainPrefilter.chainColumns(ca);
+        int nb = ChainPrefilter.chainColumns(cb);
+        int[] bases = new int[na + nb];
+        for (int c = 0; c < na; c++) {
+            bases[c] = ChainPrefilter.chainBaseY(ca, c);
+        }
+        for (int c = 0; c < nb; c++) {
+            bases[na + c] = ChainPrefilter.chainBaseY(cb, c);
+        }
+        return worker.noiseCouldHoldChain(px, pz, bases, bases.length);
     }
 
     /**
@@ -649,12 +793,16 @@ public final class CrossFind {
      * stands on the sea floor rather than on cane — soil beneath it.
      */
     private static boolean allCarved(AirCarveProbe probe, LiquidCarveProbe liquid,
-            DirtBlobFilter dirt, RegionSearcher.Worker worker, long ws, int cx, int cz,
-            long chain, int px, int pz, boolean useWater, boolean needsSoil) {
+            DirtBlobFilter dirt, DecorationLattice lattice, long chain, int px, int pz,
+            boolean useWater, boolean needsSoil, boolean floorOnly) {
+        long ws = lattice.worldSeed();
         int pcx = px >> 4, pcz = pz >> 4;
-        boolean ocean = BiomeSourceValidator.isOcean(
-                BiomeIds.noiseGen(worker.biomeSource(), pcx * 4, pcz * 4));
-        probe.walk(ws, pcx, pcz, ocean);
+        // Biome-blind on purpose, so one walk serves every sister. Only the cave carver's
+        // start probability depends on the biome, and CAVE_LAND (0.1429) fires on a strict
+        // superset of CAVE_OCEAN (0.0667) start chunks off the same nextFloat, so claiming
+        // land carves a superset and can lose no find (FINDINGS 6al). With --ravines-only,
+        // which is this command's default, the cave carver does not run at all.
+        probe.walk(ws, pcx, pcz, false);
         int columns = ChainPrefilter.chainColumns(chain);
         for (int c = 0; c < columns; c++) {
             if (!probe.isCarved(px, ChainPrefilter.chainBaseY(chain, c), pz)) {
@@ -674,9 +822,51 @@ public final class CrossFind {
             // under it would reject exactly the case this whole command exists to find.
             return true;
         }
-        int rx = px - cx * 16, rz = pz - cz * 16;
         int soilY = ChainPrefilter.chainBaseY(chain, 0) - 1;
-        long deco = new DecorationLattice(ws).decorationSeedOf(cx, cz);
-        return rx < 0 || rx > 15 || rz < 0 || rz > 15 || dirt.couldSupply(deco, rx, soilY, rz);
+        // The bottom column has to stand ON the ravine floor, not inside the ravine. A cut
+        // tall enough to hold a cross-chunk stack usually took the block below the base as
+        // well, and dirt cannot be blobbed into air: measured, that is 62% of every
+        // candidate that reached real terrain with air at its base and nothing under it.
+        //
+        // A flag rather than the default because the probe over-approximates carving, so it
+        // can say "carved" where the real carver was stopped, and the find that was standing
+        // there is then thrown away. The over-approximation is mostly above the noise floor
+        // and this block is below it, but "mostly" is not the same as measured.
+        if (floorOnly && probe.isCarved(px, soilY, pz)) {
+            return false;
+        }
+        return couldHaveSoil(dirt, lattice, px, soilY, pz);
+    }
+
+    /**
+     * Whether any chunk's ORE_DIRT pass could have put soil under the bottom column.
+     *
+     * <p>The single-chunk pipeline asks only the decorating chunk, because when a target set
+     * is built there is no world seed yet and therefore no way to name a neighbour's
+     * decoration seed. Here the world seed is already solved, so the neighbours are free —
+     * which matters, because the join geometry puts the column outside its own chunk about a
+     * third of the time. That case used to be waved through unchecked (FINDINGS 6bf): the
+     * chain most in need of the test was the one that skipped it.
+     *
+     * <p>A blob reaches {@code REACH} blocks from a draw inside its own chunk, so at most two
+     * chunk columns in x and two in z can supply any one block. Asking all of them is both
+     * tighter than the wave-through and more permissive than the single-chunk filter, whose
+     * measured 18% coverage loss is exactly the neighbour blobs this now sees.
+     */
+    private static boolean couldHaveSoil(DirtBlobFilter dirt, DecorationLattice lattice,
+            int px, int soilY, int pz) {
+        int cx0 = Math.floorDiv(px - (16 + DirtBlobFilter.REACH - 1), 16);
+        int cx1 = Math.floorDiv(px + DirtBlobFilter.REACH, 16);
+        int cz0 = Math.floorDiv(pz - (16 + DirtBlobFilter.REACH - 1), 16);
+        int cz1 = Math.floorDiv(pz + DirtBlobFilter.REACH, 16);
+        for (int qcx = cx0; qcx <= cx1; qcx++) {
+            for (int qcz = cz0; qcz <= cz1; qcz++) {
+                long deco = lattice.decorationSeedOf(qcx, qcz);
+                if (dirt.couldSupply(deco, px - qcx * 16, soilY, pz - qcz * 16)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 }
