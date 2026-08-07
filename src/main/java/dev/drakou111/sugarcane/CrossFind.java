@@ -255,6 +255,7 @@ public final class CrossFind {
         boolean forceCpu = false;
         String tablePath = null;
         String outPath = null;
+        long sampleFrom = -1L;
         int candidateCap = DEFAULT_MAX_CANDIDATES;
         boolean water = false;
         boolean floor = false;
@@ -281,6 +282,12 @@ public final class CrossFind {
                 tablePath = arg.substring(8);
             } else if (arg.startsWith("--out=")) {
                 outPath = arg.substring(6);
+            } else if (arg.startsWith("--sample-from=")) {
+                sampleFrom = Long.parseLong(arg.substring(14));
+                if (sampleFrom < 0) {
+                    System.err.println("--sample-from must be >= 0, got " + sampleFrom);
+                    return;
+                }
             }
         }
         if (dx == 0 && dz == 0) {
@@ -328,7 +335,7 @@ public final class CrossFind {
         final java.nio.file.Path table = tablePath == null ? null
                 : java.nio.file.Path.of(tablePath);
         CrossTable.Header wanted = new CrossTable.Header(storeEndings, storedMin,
-                SugarCaneFeature.COUNT_DEFAULT, OCEAN_INDEX, 0L);
+                SugarCaneFeature.COUNT_DEFAULT, OCEAN_INDEX, java.util.List.of());
         CrossTable.Loaded prior;
         try {
             prior = table == null ? null : CrossTable.load(table, wanted);
@@ -339,17 +346,46 @@ public final class CrossFind {
             System.err.println("give a different --table, or delete that one to start over");
             return;
         }
+        // Where this run's slice starts. Named wins; otherwise continue past whatever the
+        // table already covers; otherwise random.
+        //
+        // Random matters for more than variety. The table does not depend on the world seed,
+        // so several people can build one together -- but only if they scan different ground.
+        // Starting everyone at 0 would have them all rediscover the same chains, and the
+        // duplicates would inflate the table without adding a single new join. Always printed,
+        // because a random start is only acceptable if the run can be repeated.
+        boolean randomStart = false;
+        long chosen;
+        if (sampleFrom >= 0) {
+            chosen = sampleFrom;
+        } else if (prior != null) {
+            chosen = prior.header().nextFrom();
+        } else {
+            randomStart = true;
+            chosen = Math.floorMod(new java.security.SecureRandom().nextLong(), 1L << 48);
+        }
         // Slices start on a run boundary so the CPU walk can be expressed as a run offset.
-        long scanFrom = prior == null ? 0L
-                : (prior.header().sampledThrough() / OrbitSampler.RUN) * OrbitSampler.RUN;
+        final long scanFrom = chosen - Math.floorMod(chosen, (long) OrbitSampler.RUN);
         if (prior != null) {
-            System.out.printf("  resuming from %s: %d chains already stored, scanned through "
-                            + "%d, this run takes [%d, %d)%n",
-                    table, prior.keys().length, prior.header().sampledThrough(),
-                    scanFrom, scanFrom + seeds);
+            System.out.printf("  resuming from %s: %d chains already stored over %d range(s) "
+                            + "covering %d samples%n",
+                    table, prior.keys().length, prior.header().ranges().size(),
+                    prior.header().covered());
         } else if (table != null) {
             System.out.printf("  %s does not exist yet; it will be written at the end of "
                     + "pass 1%n", table);
+        }
+        System.out.printf("  this run scans samples [%d, %d)%s%n", scanFrom, scanFrom + seeds,
+                randomStart ? " (random; pass --sample-from=" + scanFrom + " to repeat it, "
+                        + "and let collaborators take their own)" : "");
+        if (prior != null) {
+            long dup = CrossTable.overlap(
+                    java.util.List.of(new CrossTable.Range(scanFrom, seeds)),
+                    prior.header().ranges());
+            if (dup > 0) {
+                System.out.printf("  warning: %d of those samples are already in the table, "
+                        + "so that much of pass 1 is redone and its chains stored twice%n", dup);
+            }
         }
 
         long start = System.currentTimeMillis();
@@ -456,11 +492,16 @@ public final class CrossFind {
                     flatSeeds[at2++] = h.seeds[i];
                 }
             }
-            CrossTable.save(table, new CrossTable.Header(storeEndings, storedMin,
-                    SugarCaneFeature.COUNT_DEFAULT, OCEAN_INDEX, scanFrom + seeds),
-                    flatKeys, flatSeeds, at2);
-            System.out.printf("  wrote %d chains to %s (scanned through %d)%n",
-                    at2, table, scanFrom + seeds);
+            java.util.List<CrossTable.Range> ranges = new java.util.ArrayList<>();
+            if (prior != null) {
+                ranges.addAll(prior.header().ranges());
+            }
+            ranges.add(new CrossTable.Range(scanFrom, seeds));
+            CrossTable.Header written = new CrossTable.Header(storeEndings, storedMin,
+                    SugarCaneFeature.COUNT_DEFAULT, OCEAN_INDEX, ranges);
+            CrossTable.save(table, written, flatKeys, flatSeeds, at2);
+            System.out.printf("  wrote %d chains to %s, now %d range(s) covering %d samples%n",
+                    at2, table, ranges.size(), written.covered());
         }
         if (total == 0) {
             System.out.println("  nothing to join against, so nothing to search");

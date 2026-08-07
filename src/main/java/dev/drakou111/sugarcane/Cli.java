@@ -170,7 +170,7 @@ public final class Cli {
             new Command("crossfind",
                     "[seeds] [threads] [targetHeight] [minA] [minB] [--dx=1] [--dz=0] "
                             + "[--sisters=64] [--floor] [--water-probe] [--max-store=<n>] "
-                            + "[--table=<file>] [--out=<file>] [--cpu]",
+                            + "[--table=<file>] [--out=<file>] [--sample-from=<n>] [--cpu]",
                     "Search for cross-chunk stacks, where `crosschunk` only measures them. "
                             + "The single-chunk pipeline cannot do this: it picks a world seed "
                             + "and asks the lattice where a decoration seed lands, and asking "
@@ -210,7 +210,13 @@ public final class Cli {
                             + "the same total would, 75% for two and tending to 50%, because "
                             + "new-stored against old-streamed is never formed. Prefer few "
                             + "large slices. --out appends confirmed finds to a file as they "
-                            + "happen. "
+                            + "happen. --sample-from picks where this run's slice starts; "
+                            + "left off it continues past whatever --table already covers, or "
+                            + "is RANDOM and printed when there is no table. Random is what "
+                            + "lets several people build one table together: starting everyone "
+                            + "at 0 has them rediscover the same chains, and duplicates inflate "
+                            + "the table without adding a single join. Pool the results with "
+                            + "`crossmerge`. "
                             + "Verified on a hit: both chains exist, they meet at one block, "
                             + "the world seed places both chunks inside the border, both are "
                             + "cane-bearing ocean, every column base of both chains is inside "
@@ -221,6 +227,21 @@ public final class Cli {
                             + "the seed, so a hit is a strong lead that still wants confirming "
                             + "in game.",
                     CrossFind::main),
+            new Command("crossmerge",
+                    "<out> <in...>",
+                    "Pool crossfind join tables built on different machines. The table does "
+                            + "not depend on the world seed, so it is the one artefact here "
+                            + "several people can build in parallel -- each takes their own "
+                            + "slice of sample space (--sample-from, or the random start "
+                            + "crossfind prints) and their tables add up. Worth more than the "
+                            + "sum of its parts, because joins go as table size times seeds "
+                            + "streamed: doubling the table doubles the yield of every later "
+                            + "run against it. Duplicate (key, seed) entries are dropped -- a "
+                            + "repeat forms the same join twice and finds nothing new -- and "
+                            + "the overlap between contributors is reported, since it is "
+                            + "effort somebody should not spend again. Prints the next "
+                            + "unclaimed --sample-from to hand out.",
+                    CrossMerge::main),
             new Command("merge",
                     "<out> <in...>",
                     "Pool target sets built on different machines into one. A set never "
