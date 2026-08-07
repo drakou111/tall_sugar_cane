@@ -169,7 +169,8 @@ public final class Cli {
                     CrossChunk::main),
             new Command("crossfind",
                     "[seeds] [threads] [targetHeight] [minA] [minB] [--dx=1] [--dz=0] "
-                            + "[--sisters=64] [--floor] [--water-probe] [--max-store=<n>]",
+                            + "[--sisters=64] [--floor] [--water-probe] [--max-store=<n>] "
+                            + "[--table=<file>] [--out=<file>] [--cpu]",
                     "Search for cross-chunk stacks, where `crosschunk` only measures them. "
                             + "The single-chunk pipeline cannot do this: it picks a world seed "
                             + "and asks the lattice where a decoration seed lands, and asking "
@@ -201,6 +202,15 @@ public final class Cli {
                             + "that reach real terrain with air at the base and nothing under "
                             + "it. It is a flag and not the default because the probe "
                             + "over-approximates carving, so it can throw away a real floor. "
+                            + "--table keeps pass 1's join table in a file and resumes from "
+                            + "it, taking the next slice of sample space and streaming that "
+                            + "against everything stored before -- so a campaign compounds, "
+                            + "since joins go as table size times seeds streamed. It is not "
+                            + "free: k equal slices cover (k+1)/(2k) of the pairs one run of "
+                            + "the same total would, 75% for two and tending to 50%, because "
+                            + "new-stored against old-streamed is never formed. Prefer few "
+                            + "large slices. --out appends confirmed finds to a file as they "
+                            + "happen. "
                             + "Verified on a hit: both chains exist, they meet at one block, "
                             + "the world seed places both chunks inside the border, both are "
                             + "cane-bearing ocean, every column base of both chains is inside "

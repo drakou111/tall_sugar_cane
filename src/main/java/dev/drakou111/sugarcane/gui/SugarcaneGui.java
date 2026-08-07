@@ -617,6 +617,14 @@ public final class SugarcaneGui {
         JCheckBox cpu = f.check("--cpu", "scan on the CPU even if a GPU is present. The kernel "
                 + "is 9.9x at height 17 and identical seed for seed, so this is for comparing "
                 + "the two, not for running");
+        JTextField tableFile = f.text("--table", "", "a file to keep pass 1's join table in. "
+                + "Resuming extends it and streams the new slice against everything stored "
+                + "before, so a campaign compounds -- joins go as table size times seeds "
+                + "streamed. Not free: two slices cover ~75% of the pairs one run of the same "
+                + "total would, tending to 50% for many, so prefer few large ones");
+        JTextField outFile = f.text("--out", "", "a file to append confirmed finds to, one "
+                + "line each, flushed as they happen. A run long enough to want a table is "
+                + "long enough that scrollback is not where a find should live");
         return new Tab(f.panel, () -> {
             List<String> a = new ArrayList<>(List.of("crossfind",
                     req(seeds, "seeds"), req(threads, "threads"), req(target, "targetHeight")));
@@ -657,6 +665,8 @@ public final class SugarcaneGui {
             if (cpu.isSelected()) {
                 a.add("--cpu");
             }
+            addIf(a, "--table=", tableFile);
+            addIf(a, "--out=", outFile);
             return a;
         });
     }

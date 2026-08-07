@@ -11,6 +11,7 @@ import dev.drakou111.sugarcane.gen.SugarCaneFeature;
 import dev.drakou111.sugarcane.rng.DecorationLattice;
 import dev.drakou111.sugarcane.rng.TwoChunkLift;
 
+import java.nio.file.Files;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -160,6 +161,33 @@ public final class CrossFind {
             int baseY, int joinY, int runA, int runB, int predicted) {
     }
 
+    /** Where confirmed finds are appended, if {@code --out} named one. */
+    private static java.nio.file.Path FINDS_FILE;
+
+    /**
+     * Appends one confirmed find, flushed immediately.
+     *
+     * <p>Separate from the table: that is work banked, this is results. A run long enough to
+     * want a table is long enough that its console scrollback is not where a find should live.
+     */
+    private static synchronized void recordFind(Candidate c, int grown) {
+        if (FINDS_FILE == null) {
+            return;
+        }
+        String line = String.format(
+                "height=%d seed=%d x=%d y=%d z=%d chunkA=%d,%d chunkB=%d,%d runA=%d runB=%d "
+                        + "joinY=%d at=%s%n",
+                grown, c.ws(), c.px(), c.baseY(), c.pz(), c.cxa(), c.cza(), c.cxb(), c.czb(),
+                c.runA(), c.runB(), c.joinY(), java.time.Instant.now());
+        try {
+            Files.writeString(FINDS_FILE, line, java.nio.charset.StandardCharsets.UTF_8,
+                    java.nio.file.StandardOpenOption.CREATE,
+                    java.nio.file.StandardOpenOption.APPEND);
+        } catch (java.io.IOException e) {
+            System.out.printf("  could not append to %s: %s%n", FINDS_FILE, e);
+        }
+    }
+
     private static final java.util.List<Candidate> CANDIDATES =
             java.util.Collections.synchronizedList(new java.util.ArrayList<>());
 
@@ -225,6 +253,8 @@ public final class CrossFind {
         int dx = 1, dz = 0, maxStore = DEFAULT_MAX_STORE, sisterCount = DEFAULT_SISTERS;
         boolean dirNamed = false;
         boolean forceCpu = false;
+        String tablePath = null;
+        String outPath = null;
         int candidateCap = DEFAULT_MAX_CANDIDATES;
         boolean water = false;
         boolean floor = false;
@@ -247,6 +277,10 @@ public final class CrossFind {
                 floor = true;
             } else if (arg.equals("--cpu")) {
                 forceCpu = true;
+            } else if (arg.startsWith("--table=")) {
+                tablePath = arg.substring(8);
+            } else if (arg.startsWith("--out=")) {
+                outPath = arg.substring(6);
             }
         }
         if (dx == 0 && dz == 0) {
@@ -286,8 +320,41 @@ public final class CrossFind {
                         + "terrain and nothing else)%n",
                 sisters, sisters == 1 ? "" : "s");
 
+        FINDS_FILE = outPath == null ? null : java.nio.file.Path.of(outPath);
+
+        // Resume: everything already scanned stays in the table, and this run takes the next
+        // slice. Joins go as |table| x streamed, so the table is the thing worth keeping --
+        // a second run against a table twice the size is twice as productive per seed.
+        final java.nio.file.Path table = tablePath == null ? null
+                : java.nio.file.Path.of(tablePath);
+        CrossTable.Header wanted = new CrossTable.Header(storeEndings, storedMin,
+                SugarCaneFeature.COUNT_DEFAULT, OCEAN_INDEX, 0L);
+        CrossTable.Loaded prior;
+        try {
+            prior = table == null ? null : CrossTable.load(table, wanted);
+        } catch (java.io.IOException e) {
+            // A user-facing mistake -- wrong height, wrong file, an older key convention --
+            // not a crash. The message already says what differs; a stack trace only buries it.
+            System.err.println("cannot use " + table + ": " + e.getMessage());
+            System.err.println("give a different --table, or delete that one to start over");
+            return;
+        }
+        // Slices start on a run boundary so the CPU walk can be expressed as a run offset.
+        long scanFrom = prior == null ? 0L
+                : (prior.header().sampledThrough() / OrbitSampler.RUN) * OrbitSampler.RUN;
+        if (prior != null) {
+            System.out.printf("  resuming from %s: %d chains already stored, scanned through "
+                            + "%d, this run takes [%d, %d)%n",
+                    table, prior.keys().length, prior.header().sampledThrough(),
+                    scanFrom, scanFrom + seeds);
+        } else if (table != null) {
+            System.out.printf("  %s does not exist yet; it will be written at the end of "
+                    + "pass 1%n", table);
+        }
+
         long start = System.currentTimeMillis();
         long runs = (seeds + OrbitSampler.RUN - 1) / OrbitSampler.RUN;
+        final long runOffset = scanFrom / OrbitSampler.RUN;
 
         // The kernel scans 4.47e7 seeds/s against 3.15e6 for 22 CPU threads, and joins go as
         // the SQUARE of seeds scanned, so this is worth ~200x the positions rather than 14x.
@@ -309,7 +376,7 @@ public final class CrossFind {
         AtomicLong nextRun = new AtomicLong();
         AtomicLong stored = new AtomicLong();
         final long[] accepted1 = gpu == null ? null
-                : gpuEpoch(gpu, storedMin, storeEndings, 0L, seeds);
+                : gpuEpoch(gpu, storedMin, storeEndings, scanFrom, seeds);
         final AtomicLong cursor1 = new AtomicLong();
         if (accepted1 != null) {
             System.out.printf("  pass 1: the kernel kept %d of %d seeds (%.4f%%)%n",
@@ -340,7 +407,7 @@ public final class CrossFind {
                         if (stored.get() >= cap) {
                             break;
                         }
-                        long ds = OrbitSampler.runStart(run);
+                        long ds = OrbitSampler.runStart(runOffset + run);
                         for (int k = 0; k < OrbitSampler.RUN; k++) {
                             collectOne(ds, filter, storedMin, storeEndings, hits, stored);
                             ds = OrbitSampler.shift(ds, OCEAN_INDEX,
@@ -356,16 +423,45 @@ public final class CrossFind {
             th.join();
         }
 
-        long total = 0;
+        long fresh = 0;
         for (Hits h : collected) {
-            total += h.size;
+            fresh += h.size;
         }
+        int priorCount = prior == null ? 0 : prior.keys().length;
+        long total = fresh + priorCount;
         boolean truncated = stored.get() >= maxStore;
-        System.out.printf("%n  pass 1: %d chains stored in %.1f s%s%n", total,
+        System.out.printf("%n  pass 1: %d chains stored in %.1f s%s%n", fresh,
                 (System.currentTimeMillis() - start) / 1000.0,
                 truncated ? " (table filled up -- raise --max-store, raise the stored side's "
                         + "minimum, or use fewer seeds; the search below is still valid, just "
                         + "over less ground)" : "");
+        if (priorCount > 0) {
+            System.out.printf("  plus %d from %s, so %d in the join table%n",
+                    priorCount, table, total);
+        }
+
+        // Written before pass 2, which is the long half: a run killed there still leaves its
+        // pass 1 banked, which is the whole point of having the file.
+        if (table != null) {
+            int[] flatKeys = new int[(int) total];
+            long[] flatSeeds = new long[(int) total];
+            int at2 = 0;
+            for (int i = 0; i < priorCount; i++) {
+                flatKeys[at2] = prior.keys()[i];
+                flatSeeds[at2++] = prior.seeds()[i];
+            }
+            for (Hits h : collected) {
+                for (int i = 0; i < h.size; i++) {
+                    flatKeys[at2] = h.keys[i];
+                    flatSeeds[at2++] = h.seeds[i];
+                }
+            }
+            CrossTable.save(table, new CrossTable.Header(storeEndings, storedMin,
+                    SugarCaneFeature.COUNT_DEFAULT, OCEAN_INDEX, scanFrom + seeds),
+                    flatKeys, flatSeeds, at2);
+            System.out.printf("  wrote %d chains to %s (scanned through %d)%n",
+                    at2, table, scanFrom + seeds);
+        }
         if (total == 0) {
             System.out.println("  nothing to join against, so nothing to search");
             return;
@@ -374,6 +470,9 @@ public final class CrossFind {
         // Counting sort into CSR: at most 24*24*128 distinct joins, so this is a small table
         // however many chains landed in it.
         int[] offset = new int[KEYS + 1];
+        for (int i = 0; i < priorCount; i++) {
+            offset[prior.keys()[i] + 1]++;
+        }
         for (Hits h : collected) {
             for (int i = 0; i < h.size; i++) {
                 offset[h.keys[i] + 1]++;
@@ -382,11 +481,14 @@ public final class CrossFind {
         for (int i = 0; i < KEYS; i++) {
             offset[i + 1] += offset[i];
         }
-        long[] table = new long[(int) total];
+        long[] joinTable = new long[(int) total];
         int[] cursor = offset.clone();
+        for (int i = 0; i < priorCount; i++) {
+            joinTable[cursor[prior.keys()[i]]++] = prior.seeds()[i];
+        }
         for (Hits h : collected) {
             for (int i = 0; i < h.size; i++) {
-                table[cursor[h.keys[i]]++] = h.seeds[i];
+                joinTable[cursor[h.keys[i]]++] = h.seeds[i];
             }
         }
         for (int i = 0; i < collected.length; i++) {
@@ -403,7 +505,7 @@ public final class CrossFind {
 
         // ---- pass 2: stream the common side, join, solve, verify ----
         final int[] off = offset;
-        final long[] tab = table;
+        final long[] tab = joinTable;
         AtomicLong joins = new AtomicLong();
         AtomicLong solvedSeeds = new AtomicLong();
         AtomicLong inBorder = new AtomicLong();
@@ -434,7 +536,7 @@ public final class CrossFind {
                 epochSeeds = null;
             } else {
                 long epochFrom = e * epochSize;
-                epochSeeds = gpuEpoch(gpu, streamedMin, !storeEndings, epochFrom,
+                epochSeeds = gpuEpoch(gpu, streamedMin, !storeEndings, scanFrom + epochFrom,
                         Math.min(epochSize, seeds - epochFrom));
                 kernelKept.addAndGet(epochSeeds.length);
                 epochCursor.set(0);
@@ -467,7 +569,7 @@ public final class CrossFind {
                         if (run >= runs) {
                             break;
                         }
-                        ds = OrbitSampler.runStart(run);
+                        ds = OrbitSampler.runStart(runOffset + run);
                     }
                     int reps = epochSeeds != null ? 1 : OrbitSampler.RUN;
                     for (int k = 0; k < reps; k++) {
@@ -661,6 +763,7 @@ public final class CrossFind {
                         continue;
                     }
                     found.incrementAndGet();
+                    recordFind(c, grown);
                     synchronized (CrossFind.class) {
                         System.out.printf("%nCONFIRMED height %d at %d,%d,%d%n",
                                 grown, c.px, c.baseY, c.pz);
