@@ -1103,7 +1103,13 @@ public final class ReverseSearcher {
                             long z = toSift[k];
                             int chains = filter.collectChains(z, OCEAN_INDEX, minHeight);
                             if (chains == 0 && !filter.chainsOverflowed()) {
-                                continue;   // cannot happen; the GPU already agreed
+                                // It can happen, and it does: at min 8 the kernel's greedy
+                                // path over-accepts by 12% (FINDINGS 6bi), and those seeds
+                                // arrive here with no chain at all. Re-testing on the CPU is
+                                // what keeps them out of the target set, so this line is load
+                                // bearing rather than defensive -- it used to claim the
+                                // opposite.
+                                continue;
                             }
                             if (!soilPossible(filter, dirt, z, chains)) {
                                 continue;

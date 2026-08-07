@@ -4076,3 +4076,74 @@ of 16 in terrain, and terrain is the whole bill.
 The lever this analysis points at is not throughput. It is to stop letting the RNG name the
 column: find the geometry first, as `spot` does, and let cross-chunk supply the much easier RNG
 that a found column then needs.
+
+## 6bi: the GPU/CPU disagreement was mostly the harness, and the real bug is 0.11%
+
+6bg found the kernel and the ranked filter disagreeing in both directions at min 8 --
+`gpu 2937, cpu 7669, gpu-only 358, cpu-only 5090` -- and left it open, noting it might be the
+parameter mapping. It was. `KernelAgreement` now takes every parameter from one place and hands
+the same numbers to both sides.
+
+### cpu-only 5090 was two different filters
+
+`ChainPrefilter.ranked` leaves `maxSlack` at `Integer.MAX_VALUE`. `ReverseSearcher` runs the whole
+pipeline at `maxSlack = 0` -- the contiguous window of 6ap -- and passes that 0 to the kernel. So
+the old comparison ran an unrestricted CPU filter against a contiguous kernel, and the 5,090
+"cpu-only" seeds are the ones contiguity is *supposed* to reject.
+
+Matched, at min 8 over 4M samples:
+
+```
+  gpu 2937, cpu 2574
+  agreed 2574, gpu-only 363, cpu-only 0
+```
+
+**The CPU is a strict subset of the GPU.** Nothing the builder wants is being dropped at min 8.
+
+### gpu-only 363 is the greedy path, and it is harmless
+
+Those seeds have `tallestPossible = 4` against a min height of 8 -- they cannot make the height at
+all. The greedy walk says so itself ("may over-accept"), and the second pass does not catch all of
+it. It costs nothing but soil-filter work, because `ReverseSearcher` re-tests every seed the kernel
+returns on the CPU. The line that does so carried the comment "cannot happen; the GPU already
+agreed"; it happens 12% of the time and that line is the only thing keeping those seeds out of the
+target set. Comment corrected.
+
+Turning the greedy path off confirms the attribution -- min 7 and min 9 are not divisible by four,
+and neither has a single gpu-only seed.
+
+### What is left is real, and it runs the other way
+
+```
+  min 7 : gpu 14802, cpu 14818, gpu-only 0, cpu-only 16     (0.11%)
+  min 8 : gpu  2937, cpu  2574, gpu-only 363, cpu-only 0
+  min 9 : gpu    46, cpu    46, exact agreement
+```
+
+At min 7 the kernel **drops 16 seeds the filter keeps**, and this is the direction that costs
+finds: a dropped seed is never re-tested, so a GPU-built target set is missing it and nothing
+downstream can recover it. Four of the sixteen have `tallestPossible = 8`.
+
+They share a shape:
+
+```
+  x=8  z=13  cols=2  baseShift=0  maxShift=1  y32+3 y35+4   run 7
+  x=5  z=10  cols=2  baseShift=0  maxShift=1  y22+3 y25+4   run 7
+  x=3  z=4   cols=2  baseShift=0  maxShift=1  y22+4 y26+3   run 7
+  x=2  z=7   cols=2  baseShift=0  maxShift=1  y26+4 y30+4   run 8
+  x=10 z=3   cols=2  baseShift=0  maxShift=1  y30+3 y33+4   run 7
+```
+
+Two columns, base shift 0, max shift 1, bases high in the 13..35 band. The suspect is the
+incremental path: when the previous window rejected, the kernel only looks for a chain **ending in
+the newest invocation**, which is sound under `strictOrder` but is the one place a two-column chain
+spanning a slide could fall through. Not fixed here -- 0.11% did not justify a CUDA debugging
+session against the other things this run was for -- but it is now pinned by
+`KernelAgreementTest` at a 1% bound, and min 9 is pinned to exact equality.
+
+### Why this was worth an hour
+
+The reason to chase it was the possibility that GPU target sets were missing two thirds of their
+targets, which would have made every reverse search since the kernel landed roughly 3x weaker than
+it looked. **They are not.** Sets are missing about 0.1%, and the 66% was an artifact of comparing
+two different filters. That closes the thread rather than opening a rewrite.
