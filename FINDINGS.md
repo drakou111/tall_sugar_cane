@@ -4358,9 +4358,10 @@ So the funnel finally has a floor under it, and the gates can be priced:
   P(stack completes | placeable)   < 2%       0 of 146
 ```
 
-Water was 6bh's wall and it is not a wall: it happens 2% of the time given soil. It only looked
-impossible because 7,871 candidates were ~200 positions wearing different biome maps, and water is
-sister-invariant. Positions were always the currency; this run bought enough of them to see past it.
+Water was 6bh's wall and it is not an absolute one. **But read the 2.0% carefully, and 6bn shows
+why**: it is a rate per *candidate*, and candidates cluster on positions. Water is sister-invariant,
+so the 146 came from some small number of positions, not 146 of them. The per-position rate is what
+governs and this run cannot report it — the same effective-sample trap 6bh fell into, one level up.
 
 ### The bound, which is the run's real product
 
@@ -4381,3 +4382,68 @@ column is failing. Three things it could be, none measured:
 
 That is the question worth instrumenting next. It is also the first time the question has been
 about the *stack* rather than about the ground it stands on.
+
+## 6bn: height 20 at 2e11 seeds — the predictions checked, and one of them was wrong
+
+2e11 seeds, 24 threads, 1,024 sisters, `--floor`. Sized from 6bm's numbers, which makes it a test
+of those numbers as much as a search.
+
+```
+  chains stored           :     139,477
+  joins tried             :  26,449,477
+  past carve + soil       :       1,004      positions
+  candidates              :     181,716
+  generated               :     151,483
+  CONFIRMED               :           0
+  tallest cane grown      :           0
+```
+
+### What was predicted, and what happened
+
+```
+  positions      predicted 1,000-2,000     got 1,004      right
+  expected finds predicted ~0.01           got 0          consistent
+  wall clock     predicted 3.5-4 h         got 7.3 h      wrong by 2x
+```
+
+The timing miss is the flagged weakness turning out to matter. The estimate used a GPU scan rate of
+4.2e7 samples/s measured at **height 17**; backing it out of this run gives **1.63e7**. Accounting
+for the rest confirms it is the scan and nothing else:
+
+```
+  lifts      26.4M joins x 1.45 ms / 24 threads =  1,598 s
+  geometry   0.3966% of 2e11 at ~4.5 us / 24    =    149 s
+  scan       the remaining                       = 24,488 s   (93% of the run)
+```
+
+Height 20's stored side runs the **beginning** filter at min 12, whose band is 11..64 rather than
+13..35. A band three times wider leaves far more candidate groups alive in the kernel's DP, so it
+scans 2.5x slower. The lesson is narrow and worth keeping: **the kernel's rate is a property of the
+filter, not of the card**, and quoting one height's rate at another is what produced a 2x error.
+
+### The water rate, corrected
+
+6bm reported P(water | soil) = 2.0% from 146 placeable candidates. This run got **0 of 3,519**.
+At 2% that is 70 expected, which chance does not explain — so one of the two is not measuring what
+it says.
+
+It is 6bm's, and the reason is the trap this project keeps re-entering. Water comes from the liquid
+carver walk, which is **low-48 and therefore sister-invariant**: every sister of a position has the
+same answer. 6bm ran 256 sisters and produced 53 candidates per position; this run ran 1,024 and
+produced 181. So a candidate-level water rate mostly measures how many sisters were configured,
+and comparing two runs at different sister counts compares nothing.
+
+Per **position** the two agree completely: 6bm's 146 placeable candidates came from some small
+number of its 6,344 positions, and 0 of this run's 1,004 is exactly what a rate of order 1e-3 per
+position predicts. There is no discrepancy, and there was never a 2% water rate.
+
+### The bound
+
+About **8,000 positions across the two runs, no confirmation**: the per-position rate is under
+**3.75e-4** at 95%. The structural estimate for a named column, ~5e-6, remains well inside it.
+
+### And the cost comparison, now measured rather than projected
+
+Height 20 took 6.7x the seeds and 1.8x the wall clock of 6bm's height-17 run to produce **6.3x
+fewer positions** — 1,004 against 6,344. That is the ~146x per-seed penalty quoted when the split
+was chosen, arriving as predicted. Anything aimed at a find belongs at 17.
