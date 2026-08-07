@@ -38,6 +38,17 @@ if errorlevel 1 (
   exit /b 1
 )
 
+REM The two-chunk lift. Once the chain scan moved to the GPU the lift became the whole cost
+REM of a crossfind run -- 6bc had ruled it out for the card when pairs were rare, which stopped
+REM being true. Measured at 4.3x over 24 CPU threads.
+nvcc -O3 -Wno-deprecated-gpu-targets %ARCHS% ^
+  -o "%~dp0two_chunk_lift.exe" "%~dp0two_chunk_lift.cu"
+
+if errorlevel 1 (
+  echo build failed
+  exit /b 1
+)
+
 REM Also refresh the copy that ships inside the jar. Users get the fast path from the jar
 REM alone and never run this script; forgetting to copy would leave the jar shipping a
 REM stale kernel, which has already happened once and cost a real find. BundledKernelTest
@@ -52,6 +63,11 @@ if errorlevel 1 (
   echo could not refresh the bundled noise_column.exe
   exit /b 1
 )
+copy /y "%~dp0two_chunk_lift.exe" "%~dp0..\src\main\resources\cuda\two_chunk_lift.exe" >nul
+if errorlevel 1 (
+  echo could not refresh the bundled two_chunk_lift.exe
+  exit /b 1
+)
 
-echo built both kernels and refreshed the bundled copies
+echo built all three kernels and refreshed the bundled copies
 endlocal

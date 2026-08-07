@@ -4447,3 +4447,74 @@ About **8,000 positions across the two runs, no confirmation**: the per-position
 Height 20 took 6.7x the seeds and 1.8x the wall clock of 6bm's height-17 run to produce **6.3x
 fewer positions** — 1,004 against 6,344. That is the ~146x per-seed penalty quoted when the split
 was chosen, arriving as predicted. Anything aimed at a find belongs at 17.
+
+## 6bo: the lift on the GPU, 4.3x — and the obvious optimisation made it slower
+
+6bl moved the chain scan to the card and 6bn measured what that left: at 2e11 seeds the scan was
+93% of the run, but at height 10 the scan finishes in minutes and the run spends **hours** in
+`TwoChunkLift` with the GPU idle. 6bc had ruled the lift out for the card — "a branchy tree with
+data-dependent survival ... it runs once per candidate pair, not once per seed" — which was right
+when pairs were rare and stopped being right when a run does 288 million of them.
+
+### There was nothing left on the CPU
+
+Measured before writing any CUDA, which is the step worth keeping:
+
+```
+  residual()      3.62 ns each      (~14 cycles: four LCG steps and some masks)
+  one lift      ~400,000 residual calls
+```
+
+The lookahead is 12 and 11 provably fails, the four low bits are already free, and pruning is one
+new bit of constraint per level, which is all there is. ~400k nodes to find ~1 seed is the price
+of the blind prefix, not slack. So the only lever was parallelism.
+
+### The shape
+
+A pair's blind prefix is 2^12 independent starting values, each walking its own subtree: one
+thread per (pair, prefix), no cross-talk, and a thread whose subtree dies just idles. The CPU
+walks levels breadth first and the kernel walks each prefix depth first — same tree, same
+survivors, different order, which is why the test compares sets.
+
+### Three versions, and the middle one is the lesson
+
+```
+  separate ws[] and bit[] arrays, STACK 40        1,554 ms / 50k pairs
+  + carry the residual down the 0-branch          1,938 ms      SLOWER
+  level packed into ws's spare bits, STACK 34     1,110 ms      best
+```
+
+A node's residual does not depend on its level — only the mask widens — so carrying it down the
+0-branch **halves the 48-bit multiplies**. It made the kernel 25% slower. The stack spills to
+local memory and this kernel is bound by that traffic, not by arithmetic; a second 8-byte array
+cost more than the multiplies it saved. Packing the level into the top bits of the 48-bit `ws`
+went the other way and won 1.4x.
+
+Worth stating plainly because the arithmetic argument was compelling and wrong: **on this kernel,
+count the loads, not the multiplies.**
+
+### What it is worth
+
+```
+  GPU marginal    ~14.2 us/pair   70,400 pairs/s   plus ~400 ms fixed CUDA start-up
+  24 CPU threads   1.45 ms/pair   16,550 pairs/s
+                                                    4.3x
+```
+
+The fixed cost means batches want to be large; a few thousand pairs is mostly start-up.
+
+### Held to the CPU, both directions
+
+`GpuLiftTest` builds pairs from a known world seed the way a join does, and requires the kernel to
+return **exactly** `TwoChunkLift.solve`'s set for each, and to recover the planted seed every time.
+Both matter, because 6bb warned that a wrong solver returns most of the answers and looks perfect,
+and 6bc's sign-extension bug did exactly that — every seed it returned satisfied the equation
+while the true one was discarded about half the time. 1,500 pairs over all eight neighbours, zero
+disagreements, zero misses.
+
+### Not yet wired in
+
+`GpuLift` exists and is tested; `crossfind` still lifts on the CPU. Pass 2 calls `examine` per join
+inline, and using the kernel means batching joins, lifting a batch, then continuing — a real
+restructure of the hot loop rather than a flag. That is the next piece of work, and until it lands
+the 4.3x is available only to whatever calls `GpuLift` directly.

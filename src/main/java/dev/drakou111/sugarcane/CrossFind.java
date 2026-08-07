@@ -182,6 +182,32 @@ public final class CrossFind {
         PLACEABLE_BUT_EMPTY
     }
 
+    /**
+     * Everything verification learns, kept across epochs.
+     *
+     * <p>Verification used to run once, after the whole scan. On a six-hour run that means the
+     * diagnostic it exists to produce is trapped behind six hours, which is exactly backwards
+     * for a run whose purpose is the diagnostic. It now runs per epoch, so the totals have to
+     * live somewhere that outlives one call.
+     */
+    private static final class Tally {
+        final AtomicLong ungenerated = new AtomicLong();
+        final AtomicLong tallest = new AtomicLong();
+        final AtomicLong whyNotAir = new AtomicLong();
+        final AtomicLong whyNoSoil = new AtomicLong();
+        final AtomicLong whyNoWater = new AtomicLong();
+        final AtomicLong whyPlaceable = new AtomicLong();
+        final AtomicLong soilWasCarved = new AtomicLong();
+        final AtomicLong soilWasWater = new AtomicLong();
+        final AtomicLong grewSomething = new AtomicLong();
+        final AtomicLong trueCrossChunk = new AtomicLong();
+        final AtomicLong generated = new AtomicLong();
+        final java.util.concurrent.ConcurrentHashMap<String, AtomicLong> stopped =
+                new java.util.concurrent.ConcurrentHashMap<>();
+    }
+
+    private static final Tally TALLY = new Tally();
+
     /** Where confirmed finds are appended, if {@code --out} named one. */
     private static java.nio.file.Path FINDS_FILE;
 
@@ -683,6 +709,10 @@ public final class CrossFind {
             for (Thread th : pool) {
                 th.join();
             }
+            // Per epoch, so a long run answers as it goes instead of holding its whole
+            // diagnostic hostage to the last seed. Also keeps the candidate list from growing
+            // for the length of the run, which is what --max-candidates was guarding against.
+            verify(found, threads);
         }
         progress.interrupt();
         if (gpu != null) {
@@ -690,7 +720,7 @@ public final class CrossFind {
                     kernelKept.get(), seeds, 100.0 * kernelKept.get() / seeds);
         }
 
-        verify(found, threads);
+        verify(found, threads);      // the CPU path runs one epoch, so this is its only call
 
         double secs = (System.currentTimeMillis() - start) / 1000.0;
         System.out.printf("%ndone in %.1f s%n", secs);
@@ -731,6 +761,9 @@ public final class CrossFind {
         java.util.List<Candidate> pending;
         synchronized (CANDIDATES) {
             pending = new java.util.ArrayList<>(CANDIDATES);
+            // Drained, not snapshotted: this now runs once per epoch, and a candidate verified
+            // twice would double every count it lands in.
+            CANDIDATES.clear();
         }
         if (pending.isEmpty()) {
             return;
@@ -749,26 +782,18 @@ public final class CrossFind {
         // Safe to run wide: the region searcher's centre and window are per-Worker fields, and
         // the statics it does have (relaxFilters, allBiomes, centreOverride) are left alone.
         AtomicLong cursor = new AtomicLong();
-        AtomicLong ungenerated = new AtomicLong();
-        AtomicLong tallest = new AtomicLong();
         AtomicLong done = new AtomicLong();
-        // Why each generated candidate failed, at chunk A's bottom column. "Grew no cane" and
-        // "the base was never carved" look identical from the height alone, and they point at
-        // completely different filters: the first is the RNG, the second is the carve probe.
-        AtomicLong whyNotAir = new AtomicLong();
-        AtomicLong whyNoSoil = new AtomicLong();
-        AtomicLong whyNoWater = new AtomicLong();
-        AtomicLong whyPlaceable = new AtomicLong();
-        AtomicLong soilWasCarved = new AtomicLong();
-        AtomicLong soilWasWater = new AtomicLong();
-        // Where the stack actually stops, walked column by column over both chains. The
-        // histogram above only ever read chunk A's bottom base, which cannot say anything about
-        // a candidate whose base was perfect -- and those are the only ones left worth asking
-        // about (FINDINGS 6bm).
-        AtomicLong grewSomething = new AtomicLong();
-        AtomicLong trueCrossChunk = new AtomicLong();
-        java.util.concurrent.ConcurrentHashMap<String, AtomicLong> stopped =
-                new java.util.concurrent.ConcurrentHashMap<>();
+        AtomicLong ungenerated = TALLY.ungenerated;
+        AtomicLong tallest = TALLY.tallest;
+        AtomicLong whyNotAir = TALLY.whyNotAir;
+        AtomicLong whyNoSoil = TALLY.whyNoSoil;
+        AtomicLong whyNoWater = TALLY.whyNoWater;
+        AtomicLong whyPlaceable = TALLY.whyPlaceable;
+        AtomicLong soilWasCarved = TALLY.soilWasCarved;
+        AtomicLong soilWasWater = TALLY.soilWasWater;
+        AtomicLong grewSomething = TALLY.grewSomething;
+        AtomicLong trueCrossChunk = TALLY.trueCrossChunk;
+        java.util.concurrent.ConcurrentHashMap<String, AtomicLong> stopped = TALLY.stopped;
         Thread[] pool = new Thread[threads];
         for (int t = 0; t < threads; t++) {
             pool[t] = new Thread(() -> {
@@ -896,7 +921,8 @@ public final class CrossFind {
         ticker.interrupt();
 
         double secs = (System.currentTimeMillis() - start) / 1000.0;
-        long built = pending.size() - ungenerated.get();
+        TALLY.generated.addAndGet(pending.size());
+        long built = TALLY.generated.get() - ungenerated.get();
         System.out.printf("  %d generated in %.1f s (%.2f/s)%n", built, secs, built / secs);
         if (ungenerated.get() > 0) {
             System.out.printf("  %d of %d were never generated at all (a filter skipped the "
