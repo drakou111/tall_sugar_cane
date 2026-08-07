@@ -3781,3 +3781,58 @@ entirely onto terrain, and left it exactly where it was.
 Candidates are counted separately from confirmations, and chunks that were never built are
 counted separately again -- "grew no cane" and "was never generated" look identical if you only
 count cane, and the difference is whether the candidate is wrong or the check is.
+
+## 6bg: where crossfind's time goes, and what 3,500 candidates say
+
+### The scan is the chain filter, and nothing else
+
+```
+1 thread, filter + shift        : 2.23e5 seeds/s
+1 thread, orbit shift alone     : 4.12e8 seeds/s   (free)
+12 threads, per-seed atomic     : 2.15e6 seeds/s
+12 threads, local counter       : 2.19e6 seeds/s   -> 1.0x
+```
+
+Batching the shared counters buys nothing -- the contention theory was wrong, and 2.23e5 x 12
+accounts for the whole observed rate. `StackPrefilter` was already built and rejected as a cheap
+early-out, so there is no CPU trick left.
+
+At **low** target heights the filter stops being the cost. Height 10 over 20M seeds produced
+3.17M joins, and at 1.45 ms a lift that is 383 s across 12 threads -- the scan fell to 56k
+seeds/s. So the bottleneck swaps: the lift dominates when joins are common, the filter when they
+are rare. Height 16 is filter-bound, height 10 is lift-bound.
+
+### Verification was never the cap
+
+3,339 regions generated in 2.0 s, 1,666/s, parallel. It was assumed to be expensive and is not;
+the parallelism is kept because it is free, not because it was needed.
+
+### 3,500 candidates, zero cane
+
+Across three runs -- 41 at height 16, 154 and 3,339 at height 10 -- **not one candidate grew a
+single cane block**. Two structural explanations were checked and both are wrong:
+
+- the simulator *can* place outside the decorating chunk (`SugarCaneFeature` writes through
+  `world.setBlock` with no bounds test), and
+- both chunks *do* decorate: `regionFor(0)` is 6, not 3, so chunk A at local (1,1) and chunk B at
+  (2,1) are both interior and both pass the all-eight-neighbours test.
+
+So the zero is real. The carve probe accepts something like one candidate per 3,500 that terrain
+could ever support, which is the 6bf failure measured rather than argued.
+
+### The GPU is 12x faster and does not agree with the CPU
+
+On an idle card, 2.02e7 seeds/s at min 8 and 4.15e7 at min 12, against 2.7e6 for 12 CPU threads.
+But against the `ranked` filter the target builder pairs it with, at min 8 over 4M samples:
+
+```
+gpu 2937, cpu 7669, gpu-only 358, cpu-only 5090
+```
+
+Disagreement in **both** directions, so not a subset. Two candidate causes: the kernel takes no
+`maxAnyShift` argument while `ranked` sets it to 3 (explains gpu-only), and min 8 with
+maxColumns 2 takes the greedy path, whose comment claims it "writes the same seeds" as the
+general filter but which no test checks. `BundledKernelTest` only asserts the binary is bundled
+and not stale. **Nothing pins the kernel to the filter**, and the target builder runs on that
+pairing. Not yet resolved -- it may equally be that the parameter mapping reconstructed here is
+wrong.

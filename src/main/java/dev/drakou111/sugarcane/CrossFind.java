@@ -400,7 +400,7 @@ public final class CrossFind {
         }
         progress.interrupt();
 
-        verify(found);
+        verify(found, threads);
 
         double secs = (System.currentTimeMillis() - start) / 1000.0;
         System.out.printf("%ndone in %.1f s%n", secs);
@@ -435,7 +435,7 @@ public final class CrossFind {
      * that survives the probe is rare enough that generating a few thousand regions costs less
      * than the scan that produced them.
      */
-    private static void verify(AtomicLong found) {
+    private static void verify(AtomicLong found, int threads) throws InterruptedException {
         java.util.List<Candidate> pending;
         synchronized (CANDIDATES) {
             pending = new java.util.ArrayList<>(CANDIDATES);
@@ -443,57 +443,101 @@ public final class CrossFind {
         if (pending.isEmpty()) {
             return;
         }
-        System.out.printf("%ngenerating terrain for %d candidates...%n", pending.size());
+        System.out.printf("%ngenerating terrain for %d candidates on %d threads...%n",
+                pending.size(), threads);
+        long start = System.currentTimeMillis();
 
-        int best = 0;
-        int ungenerated = 0;
-        for (Candidate c : pending) {
-            RegionSearcher.Stats stats = new RegionSearcher.Stats();
-            RegionSearcher.Worker worker =
-                    new RegionSearcher.Worker(999, false, 0, stats, 0);
-            int grown;
-            try {
-                worker.prepare(c.ws);
-                worker.searchOneChunk(c.cxa, c.cza);
-                // y=200 is air in every chunk that was actually built, so SOLID there means
-                // nothing was generated -- a filter skipped the chunk, or it fell outside the
-                // window. That is indistinguishable from "grew no cane" if you only count
-                // cane, and it is the difference between a candidate being wrong and the
-                // check being wrong.
-                if (worker.world.getBlock(c.px, 200, c.pz)
-                        == dev.drakou111.sugarcane.world.Blocks.SOLID) {
-                    ungenerated++;
-                    continue;
+        // Parallel because this is now the cost that decides how many candidates the run can
+        // afford to test, and how many it tests is the only way to learn the conversion rate.
+        // Safe to run wide: the region searcher's centre and window are per-Worker fields, and
+        // the statics it does have (relaxFilters, allBiomes, centreOverride) are left alone.
+        AtomicLong cursor = new AtomicLong();
+        AtomicLong ungenerated = new AtomicLong();
+        AtomicLong tallest = new AtomicLong();
+        AtomicLong done = new AtomicLong();
+        Thread[] pool = new Thread[threads];
+        for (int t = 0; t < threads; t++) {
+            pool[t] = new Thread(() -> {
+                RegionSearcher.Stats stats = new RegionSearcher.Stats();
+                RegionSearcher.Worker worker =
+                        new RegionSearcher.Worker(999, false, 0, stats, 0);
+                for (int i = (int) cursor.getAndIncrement(); i < pending.size();
+                        i = (int) cursor.getAndIncrement()) {
+                    Candidate c = pending.get(i);
+                    int grown;
+                    try {
+                        worker.prepare(c.ws);
+                        worker.searchOneChunk(c.cxa, c.cza);
+                        // y=200 is air in every chunk that was actually built, so SOLID there
+                        // means nothing was generated -- a filter skipped the chunk, or it fell
+                        // outside the window. Indistinguishable from "grew no cane" if you only
+                        // count cane, and it is the difference between the candidate being
+                        // wrong and the check being wrong.
+                        if (worker.world.getBlock(c.px, 200, c.pz)
+                                == dev.drakou111.sugarcane.world.Blocks.SOLID) {
+                            ungenerated.incrementAndGet();
+                            continue;
+                        }
+                        grown = tallestAt(worker.world, c.px, c.pz);
+                    } catch (RuntimeException e) {
+                        synchronized (CrossFind.class) {
+                            System.out.printf("  seed %d at %d,%d: generation failed (%s)%n",
+                                    c.ws, c.px, c.pz, e);
+                        }
+                        continue;
+                    } finally {
+                        done.incrementAndGet();
+                    }
+                    tallest.accumulateAndGet(grown, Math::max);
+                    if (grown < c.predicted) {
+                        continue;   // the RNG wanted it; the world did not provide
+                    }
+                    found.incrementAndGet();
+                    synchronized (CrossFind.class) {
+                        System.out.printf("%nCONFIRMED height %d at %d,%d,%d%n",
+                                grown, c.px, c.baseY, c.pz);
+                        System.out.printf("  world seed %d%n", c.ws);
+                        System.out.printf("  chunk A %d,%d gives %d, chunk B %d,%d adds %d "
+                                        + "from y=%d%n",
+                                c.cxa, c.cza, c.runA, c.cxb, c.czb, c.runB, c.joinY);
+                        System.out.println("  grown from generated terrain, so the only thing "
+                                + "left unchecked is decoration order in your world");
+                        System.out.flush();
+                    }
                 }
-                grown = tallestAt(worker.world, c.px, c.pz);
-            } catch (RuntimeException e) {
-                System.out.printf("  seed %d at %d,%d: generation failed (%s)%n",
-                        c.ws, c.px, c.pz, e);
-                continue;
-            }
-            best = Math.max(best, grown);
-            if (grown < c.predicted) {
-                continue;       // the RNG wanted it; the world did not provide
-            }
-            found.incrementAndGet();
-            System.out.printf("%nCONFIRMED height %d at %d,%d,%d%n",
-                    grown, c.px, c.baseY, c.pz);
-            System.out.printf("  world seed %d%n", c.ws);
-            System.out.printf("  chunk A %d,%d gives %d, chunk B %d,%d adds %d from y=%d%n",
-                    c.cxa, c.cza, c.runA, c.cxb, c.czb, c.runB, c.joinY);
-            System.out.println("  the simulator grew this from generated terrain, so the only "
-                    + "thing left unchecked is decoration order in your world");
-            System.out.flush();
+            }, "crossfind-verify-" + t);
+            pool[t].start();
         }
-        if (ungenerated > 0) {
+        Thread ticker = new Thread(() -> {
+            while (!Thread.currentThread().isInterrupted()) {
+                try {
+                    Thread.sleep(30_000L);
+                } catch (InterruptedException e) {
+                    return;
+                }
+                System.out.printf("  verified %d/%d, confirmed %d%n",
+                        done.get(), pending.size(), found.get());
+                System.out.flush();
+            }
+        }, "crossfind-verify-progress");
+        ticker.setDaemon(true);
+        ticker.start();
+        for (Thread th : pool) {
+            th.join();
+        }
+        ticker.interrupt();
+
+        double secs = (System.currentTimeMillis() - start) / 1000.0;
+        long built = pending.size() - ungenerated.get();
+        System.out.printf("  %d generated in %.1f s (%.2f/s)%n", built, secs, built / secs);
+        if (ungenerated.get() > 0) {
             System.out.printf("  %d of %d were never generated at all (a filter skipped the "
                     + "chunk), so they were neither confirmed nor refuted%n",
-                    ungenerated, pending.size());
+                    ungenerated.get(), pending.size());
         }
         if (found.get() == 0) {
-            System.out.printf("  none survived generation; of the %d that DID generate, the "
-                    + "tallest cane actually grown was %d%n",
-                    pending.size() - ungenerated, best);
+            System.out.printf("  none survived; of the %d that DID generate, the tallest cane "
+                    + "actually grown was %d%n", built, tallest.get());
         }
     }
 
