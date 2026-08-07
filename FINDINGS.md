@@ -4313,3 +4313,71 @@ height 17 now produces roughly **340x the positions per hour** it did at the sta
 Still zero confirmed. The bottleneck moves to the lift as positions multiply, which is where 6bg's
 two regimes come back: at 5e9 seeds and up, height 17 becomes lift-bound too, and the next thing
 to price is the 1.45 ms.
+
+## 6bm: 6,344 positions at height 17, and the first cross-chunk cane that ever grew
+
+3e10 seeds, 22 threads, 256 sisters, `--floor`, 4.1 hours. Sisters were traded down from 4,096
+because 6bh established they inflate candidates without adding independent tries; the budget went
+to positions instead.
+
+```
+  chains stored           :     919,173
+  joins tried             : 145,207,288
+  past carve + soil       :       6,344      positions
+  both chunks cane ocean  :     475,533      (x256 sisters)
+  candidates              :     335,093
+  generated               :     270,636
+  CONFIRMED               :           0
+```
+
+**6,344 positions**, against 456 in the 8e9 run and 2 in the first height-17 attempt this morning.
+
+### Two firsts, and they are the point
+
+```
+  tallest cane actually grown : 4        (every previous run: 0)
+
+  not air                     : 153,852   57%
+  air but no soil             : 109,475   of the air, 94%
+  soil but no water beside    :   7,163
+  placeable, RNG did not      :     146   <- every previous run: 0
+```
+
+Cane grew. Not a stack — a single column, four tall — but across every cross-chunk run before this
+one the tallest thing ever produced at a join column was **nothing at all**, and the reason was
+always that the base failed. Now 146 bases were **fully placeable**: air in the block, soil under
+it, water beside it, everything the feature asks for.
+
+So the funnel finally has a floor under it, and the gates can be priced:
+
+```
+  P(air at the base)                  43%     of generated candidates
+  P(soil | air)                      6.3%
+  P(water | soil)                    2.0%     <- was 0 of 7,871
+  P(fully placeable)                5.4e-4    per candidate
+  P(stack completes | placeable)   < 2%       0 of 146
+```
+
+Water was 6bh's wall and it is not a wall: it happens 2% of the time given soil. It only looked
+impossible because 7,871 candidates were ~200 positions wearing different biome maps, and water is
+sister-invariant. Positions were always the currency; this run bought enough of them to see past it.
+
+### The bound, which is the run's real product
+
+Cumulatively about **7,000 positions and no confirmation**, so the per-position rate is under
+**4.3e-4** at 95% — ten times tighter than the 4.6e-3 the morning's data supported. The structural
+estimate for a named column, ~5e-6, is still comfortably inside that and is still the number to
+plan against.
+
+### The new frontier is the last gate, not the first
+
+0 of 146 placeable bases completed their stack, and the histogram cannot say why because it only
+reads chunk A's **bottom** base. The candidates are 17-tall predictions; something above the first
+column is failing. Three things it could be, none measured:
+
+- the upper columns' own bases are not air, or have no water beside them;
+- the chain assumed a shift level the real chunk did not produce, so the draws never line up;
+- decoration order — chunk B decorating before chunk A, which no run has ever verified.
+
+That is the question worth instrumenting next. It is also the first time the question has been
+about the *stack* rather than about the ground it stands on.
