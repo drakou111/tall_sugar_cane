@@ -206,6 +206,7 @@ public final class CrossFind {
             minB = split[1];
         }
         int dx = 1, dz = 0, maxStore = DEFAULT_MAX_STORE, sisterCount = DEFAULT_SISTERS;
+        boolean dirNamed = false;
         int candidateCap = DEFAULT_MAX_CANDIDATES;
         boolean water = false;
         boolean floor = false;
@@ -214,8 +215,10 @@ public final class CrossFind {
                 sisterCount = Integer.parseInt(arg.substring(10));
             } else if (arg.startsWith("--dx=")) {
                 dx = Integer.parseInt(arg.substring(5));
+                dirNamed = true;
             } else if (arg.startsWith("--dz=")) {
                 dz = Integer.parseInt(arg.substring(5));
+                dirNamed = true;
             } else if (arg.startsWith("--max-candidates=")) {
                 candidateCap = Integer.parseInt(arg.substring(17));
             } else if (arg.startsWith("--max-store=")) {
@@ -229,6 +232,18 @@ public final class CrossFind {
         if (dx == 0 && dz == 0) {
             System.err.println("--dx and --dz cannot both be zero: that is one chunk, not two");
             return;
+        }
+        // All eight neighbours unless one was named. Pass 1 keys each side in its own chunk's
+        // frame, so the table it builds is direction-free and every extra direction costs one
+        // frame test and a lookup on the streamed side -- there is no second pass 1 to pay
+        // for. Eight times the positions, and positions are the currency: the terrain filters
+        // are what reject cross-chunk candidates, and they turn on where the chunk IS.
+        final int[][] dirs;
+        if (dirNamed) {
+            dirs = new int[][] {{dx, dz}};
+        } else {
+            dirs = new int[][] {{1, 0}, {-1, 0}, {0, 1}, {0, -1},
+                                {1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
         }
 
         // Store whichever side is rarer, and stream the other. Height is monotone in rarity,
@@ -244,8 +259,13 @@ public final class CrossFind {
 
         System.out.printf("cross-chunk SEARCH for height %d, %d seeds, %d threads%n",
                 target, seeds, threads);
-        System.out.printf("  chunk A contributes >= %d, chunk B at %+d,%+d contributes >= %d%n",
-                minA, dx, dz, minB);
+        if (dirs.length == 1) {
+            System.out.printf("  chunk A contributes >= %d, chunk B at %+d,%+d contributes "
+                    + ">= %d%n", minA, dx, dz, minB);
+        } else {
+            System.out.printf("  chunk A contributes >= %d, chunk B >= %d, over all %d "
+                    + "neighbours (one shared table)%n", minA, minB, dirs.length);
+        }
         System.out.printf("  storing the %s side (>= %d, the rarer), streaming the other%n",
                 storeEndings ? "ending" : "beginning", storedMin);
         System.out.printf("  %d sister%s per solved seed (the upper 16 bits re-roll the "
@@ -279,16 +299,12 @@ public final class CrossFind {
                                 long chain = filter.chain(i);
                                 int x = ChainPrefilter.chainX(chain);
                                 int z = ChainPrefilter.chainZ(chain);
-                                int y;
-                                if (storeEndings) {
-                                    y = ChainPrefilter.chainTop(chain);
-                                } else {
-                                    // Express a beginning in chunk A's frame, so both sides
-                                    // key on the same number.
-                                    y = ChainPrefilter.chainBaseY(chain, 0);
-                                    x += 16 * fdx;
-                                    z += 16 * fdz;
-                                }
+                                // Each side is keyed in its OWN chunk's frame, with no
+                                // direction folded in. That is what lets one table serve all
+                                // eight neighbours: the streamed side does the shifting, once
+                                // per direction, and pass 1 never has to be repeated.
+                                int y = storeEndings ? ChainPrefilter.chainTop(chain)
+                                        : ChainPrefilter.chainBaseY(chain, 0);
                                 if (inFrame(x, z, y)) {
                                     hits.add(key(x, z, y, ds), ds);
                                     stored.incrementAndGet();
@@ -386,28 +402,34 @@ public final class CrossFind {
                         if (!filter.chainsOverflowed()) {
                             for (int i = 0; i < n; i++) {
                                 long chain = filter.chain(i);
-                                int x = ChainPrefilter.chainX(chain);
-                                int z = ChainPrefilter.chainZ(chain);
-                                int y;
-                                if (storeEndings) {
-                                    y = ChainPrefilter.chainBaseY(chain, 0);
-                                    x += 16 * fdx;
-                                    z += 16 * fdz;
-                                } else {
-                                    y = ChainPrefilter.chainTop(chain);
-                                }
-                                if (!inFrame(x, z, y)) {
-                                    continue;
-                                }
-                                int key = key(x, z, y, ds);
-                                for (int p = off[key]; p < off[key + 1]; p++) {
-                                    long dsA = storeEndings ? tab[p] : ds;
-                                    long dsB = storeEndings ? ds : tab[p];
-                                    joins.incrementAndGet();
-                                    examine(dsA, dsB, fdx, fdz, minA, minB, sisters, endA,
-                                            beginB, probe, liquid, dirt, worker, useWater,
-                                            useFloor, maxCandidates, solvedSeeds, inBorder,
-                                            carved, oceanPairs, solidNoise);
+                                int cx = ChainPrefilter.chainX(chain);
+                                int cz = ChainPrefilter.chainZ(chain);
+                                int y = storeEndings ? ChainPrefilter.chainBaseY(chain, 0)
+                                        : ChainPrefilter.chainTop(chain);
+                                // The join is one world block seen from two chunks, so the
+                                // partner's coordinate is this one shifted by the offset
+                                // between them -- towards chunk A when we hold a beginning,
+                                // away from it when we hold an ending. Both must land inside
+                                // the +-4..19 frame a cane column can occupy, which is most
+                                // of the pruning: a direction that pushes it out is skipped
+                                // before a key is even formed.
+                                for (int d = 0; d < dirs.length; d++) {
+                                    int ddx = dirs[d][0], ddz = dirs[d][1];
+                                    int x = storeEndings ? cx + 16 * ddx : cx - 16 * ddx;
+                                    int z = storeEndings ? cz + 16 * ddz : cz - 16 * ddz;
+                                    if (!inFrame(x, z, y)) {
+                                        continue;
+                                    }
+                                    int key = key(x, z, y, ds);
+                                    for (int p = off[key]; p < off[key + 1]; p++) {
+                                        long dsA = storeEndings ? tab[p] : ds;
+                                        long dsB = storeEndings ? ds : tab[p];
+                                        joins.incrementAndGet();
+                                        examine(dsA, dsB, ddx, ddz, minA, minB, sisters, endA,
+                                                beginB, probe, liquid, dirt, worker, useWater,
+                                                useFloor, maxCandidates, solvedSeeds, inBorder,
+                                                carved, oceanPairs, solidNoise);
+                                    }
                                 }
                             }
                         }

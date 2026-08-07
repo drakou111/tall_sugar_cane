@@ -4147,3 +4147,106 @@ The reason to chase it was the possibility that GPU target sets were missing two
 targets, which would have made every reverse search since the kernel landed roughly 3x weaker than
 it looked. **They are not.** Sets are missing about 0.1%, and the 66% was an artifact of comparing
 two different filters. That closes the thread rather than opening a rewrite.
+
+## 6bj: why there is no cane/carver meet in the middle, and the hook that makes it look like there is
+
+The idea, proposed as a hunch: enumerate constraints from the cane side and from the carver side
+and meet in the middle on the world seed. There is a real structural hook under it, and it still
+does not pay. Both halves are worth writing down, because the hook will keep suggesting the idea.
+
+### The hook is real
+
+`setDecorationSeed` and `setLargeFeatureSeed` both begin `setSeed(worldSeed)` and draw **the same
+two `nextLong`s**. They then diverge:
+
+```
+  decoration : a = nextLong()|1, b = nextLong()|1,  D = (16cx*a + 16cz*b) ^ W
+  carver     : l = nextLong(),   m = nextLong(),    C = (sx*l ^ sz*m ^ W)
+```
+
+Same draws, one pair odd-ified, one combining with `+` and the other with `^`. Cane and carver are
+not independent, which is exactly the shape a meet in the middle feeds on.
+
+### It does not pay, for two independent reasons
+
+**The cane side already pins the seed.** A cross-chunk pair is 44 bits of constraint on 44 free
+bits of `W` -- 6be measured one solution per pair, 32,127 world seeds from 32,359 joins. There is
+no residual freedom for a carver constraint to cut into, so there is no product space to split.
+A meet in the middle wants an under-determined system; this one is exactly determined.
+
+**And the second condition is cheap, which is the more general objection.** A MITM pays when
+checking condition B against a solution of condition A is expensive. Here, given `W`, the carver
+seeds at the relevant chunks are one LCG step each and the whole walk is ~49 us, against the
+1.45 ms lift that produced `W`. **Checking is already 30x cheaper than solving.** There is nothing
+to meet in the middle about.
+
+### The version that is a MITM dies on position
+
+Enumerate `W` from the cane side (that is `crossfind`), enumerate `W` from the carver side (that is
+`CarverReverser`, ~2^16 starts plus lifting), and intersect. Both sets are enumerable and both live
+in 2^48, so a collision needs `|A|*|B| = 2.8e14` -- 1.7e7 each, which is hours rather than years.
+
+It fails on the coordinate. A collision in the `W` **value** puts the ravine at whatever `(sx, sz)`
+the carver side happened to reverse at, which has nothing to do with where the cane column is. Add
+back "the ravine must be within carve radius of the column" and the carver side stops being a free
+enumeration: for a given `W` the carver seeds near the column are determined, and testing them is
+the `AirCarveProbe` walk the search already runs. The MITM collapses into the existing probe.
+
+### What this says about where the cost is
+
+The bottleneck was never *checking* terrain. It is that terrain rejects 99.99% of positions and the
+search cannot mint world seeds fast enough to absorb that. Anything that makes checking cheaper --
+a MITM, a better probe, carver reversal -- attacks a term that is already small. The term that is
+large is positions per second, which is why the ranked lever is throughput: `crossfind`'s pass 2
+runs at 3.26e6 seeds/s on 22 CPU threads against the kernel's 4.47e7, and joins go as the **square**
+of seeds scanned, so 14x the rate is ~196x the positions.
+
+## 6bk: one table, eight neighbours -- 3.5x positions for 3% of the time, and a discard nobody noticed
+
+6bj put the cost in the right place: positions per second, not the price of checking one. The
+cheapest position multiplier available was sitting in pass 1.
+
+### The table never needed to know the direction
+
+Pass 1 keyed a stored **beginning** after shifting it into chunk A's frame (`x += 16*dx`), which
+baked the neighbour offset into the table and meant a table could serve exactly one direction.
+Keying each side in its **own** chunk's frame instead makes the table direction-free, and the
+streamed side does the shifting -- once per direction, as a frame test and a lookup. So all eight
+neighbours share one pass 1 rather than needing eight.
+
+### The shift was also silently discarding most of the table
+
+`inFrame` was applied *after* the shift. A cane column occupies relative -4..19, so requiring
+`x + 16 <= 19` kept only `x <= 3` -- a third of the range thrown away before anything looked at
+it, and thrown away for a reason that was an artifact of the keying rather than a property of the
+geometry. Unshifted, the whole range stores.
+
+Height 17, 1e9 seeds, 22 threads, 4,096 sisters, `--floor`, identical otherwise:
+
+```
+                        one direction    eight directions
+  chains stored                5,563              31,374     5.6x
+  joins tried                 40,709             160,627     3.9x
+  pairs inside the border     24,788              97,014     3.9x
+  past carve + soil                2                   7     3.5x
+  candidates                   1,899               6,258     3.3x
+  wall clock                    667 s               685 s    1.03x
+```
+
+**3.5x the surviving positions for 3% more time.** Less than the 8x the direction count suggests,
+because a chain near one edge of the frame cannot reach a neighbour on that side -- the frame test
+prunes most directions for most chains, which is exactly the constraint that was previously being
+applied once and destructively.
+
+Still zero confirmed, and at this height nothing even reaches the water gate: 4,900 generated,
+3,167 with no air at the base, 1,733 with air and no soil, 0 with soil. Seven positions cannot
+populate the tail that 6bh's 200 could.
+
+### What is left
+
+The remaining lever is the one 6bj named. Pass 2 streams at 3.15e6 seeds/s on 22 CPU threads
+against the kernel's 4.47e7 on one 4080, and joins go as the **square** of seeds scanned, so
+moving the chain scan to the GPU is worth ~200x positions rather than 14x. The kernel already
+emits accepted decoration seeds; it would additionally have to emit each chain's join coordinate
+`(x, z, y)` so the key can be formed on the host. That is the next thing worth building, and it is
+a bigger change than anything in 6bh through 6bk.
