@@ -4670,3 +4670,59 @@ what stood in the way (6bp, 6bq).
 The one thing that would change the picture is not speed. It is a way to choose the column instead
 of letting the RNG name it — the terrain-first direction — because 2e-4 is the price of not
 choosing, and no amount of scanning buys it down.
+
+## 6bs: two chunks built one stack, for the first time
+
+Height 17, 2e11 seeds, 9.3 hours, GPU scan and GPU lift, 64 sisters, `--floor`. 285,202 positions
+and 3,023,731 candidates — an order of magnitude past anything before it.
+
+```
+  389  reached chain A column 0
+   24  completed chain A                 <- first time ever
+    2  ran taller than any one chunk built
+  tallest cane actually grown: 8         (was 4)
+```
+
+6bp's finding was that the join had never once been exercised in ~750,000 candidates. It has now.
+`B col 0` appears in a histogram for the first time, chain A completed 24 times, and **two
+candidates produced a run that neither chunk could have built alone** — which is the mechanism
+this whole command exists for, observed at last. The tallest run reached 8, equal to the project's
+confirmed single-chunk find.
+
+### And it measures the factor everything hinged on
+
+6br and the odds estimate both turned on a per-column continuation probability that nothing had
+ever observed, because nothing had ever passed column 1:
+
+```
+  P(col 1 | col 0)                6.2%    (24 of 389)
+  P(B col 0 | chain A complete)   8.3%    (2 of 24)
+```
+
+About **7%**, and it holds across the chain A / chunk B boundary rather than collapsing there —
+which is the encouraging part, since chunk B needs no soil and might have gone either way.
+
+Priced beforehand at 5% per column the night was a 1% shot and at 10% a 13% shot; 7% puts it at
+2-5%, and zero was the expected outcome. The estimate stood up, which is worth as much as the
+result.
+
+### What a 17 costs, now that it is arithmetic
+
+```
+  P(full 17 | candidate)     3.6e-9
+  expected per 9.3h night    0.011
+  nights per 17, one machine   ~93
+```
+
+Three months of nightly runs on one machine, or about ten nights across ten collaborators —
+which is what `--table` and `crossmerge` were built for, and the first time the answer has been a
+number rather than a shrug.
+
+### The bug this exposed
+
+Those two cross-chunk stacks were **counted and then discarded**. `--out` only ever recorded
+`CONFIRMED` finds, so a run that beats one chunk but falls short of its predicted height left no
+seed and no coordinate — the rarest and most interesting output of the search, unrecoverable.
+Fixed: every one is now printed and appended with its seed, position, both chunks, and what one
+chunk alone would have managed. At two a night they are cheap to log and there is no excuse for
+losing them.

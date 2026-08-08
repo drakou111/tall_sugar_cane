@@ -235,6 +235,39 @@ public final class CrossFind {
         }
     }
 
+    /**
+     * Appends a stack two chunks built together, whatever height it reached.
+     *
+     * <p>Separate from {@link #recordFind}: that wants the predicted height, this wants the
+     * mechanism. A run of 8 that only one chunk could not have made is worth more to this
+     * project right now than a run of 8 that one chunk did, and it is the thing to look at in
+     * game — so it gets a seed and a coordinate rather than a tally mark.
+     */
+    private static synchronized void recordCrossChunk(Candidate c, int grown, int alone) {
+        synchronized (CrossFind.class) {
+            System.out.printf("%nCROSS-CHUNK %d tall at %d,%d,%d (one chunk alone would give "
+                            + "%d), seed %d, chunks %d,%d and %d,%d%n",
+                    grown, c.px(), c.baseY(), c.pz(), alone, c.ws(), c.cxa(), c.cza(),
+                    c.cxb(), c.czb());
+            System.out.flush();
+        }
+        if (FINDS_FILE == null) {
+            return;
+        }
+        String line = String.format(
+                "crosschunk height=%d aloneWouldBe=%d seed=%d x=%d y=%d z=%d chunkA=%d,%d "
+                        + "chunkB=%d,%d predicted=%d at=%s%n",
+                grown, alone, c.ws(), c.px(), c.baseY(), c.pz(), c.cxa(), c.cza(),
+                c.cxb(), c.czb(), c.predicted(), java.time.Instant.now());
+        try {
+            Files.writeString(FINDS_FILE, line, java.nio.charset.StandardCharsets.UTF_8,
+                    java.nio.file.StandardOpenOption.CREATE,
+                    java.nio.file.StandardOpenOption.APPEND);
+        } catch (java.io.IOException e) {
+            System.out.printf("  could not append to %s: %s%n", FINDS_FILE, e);
+        }
+    }
+
     private static final java.util.List<Candidate> CANDIDATES =
             java.util.Collections.synchronizedList(new java.util.ArrayList<>());
 
@@ -960,9 +993,14 @@ public final class CrossFind {
                     if (grown > 0) {
                         grewSomething.incrementAndGet();
                         // A run taller than any one chunk built is the thing this command is
-                        // for, even when it falls short of the prediction.
-                        if (worker.world.caneRunFromOneChunk(c.px, c.baseY, c.pz) < grown) {
+                        // for, even when it falls short of the prediction. These are rare
+                        // enough to be precious -- two in a nine-hour night -- and used to be
+                        // counted and then thrown away, leaving no seed and no coordinate for
+                        // the only genuine two-chunk stacks the search has ever produced.
+                        int alone = worker.world.caneRunFromOneChunk(c.px, c.baseY, c.pz);
+                        if (alone < grown) {
                             trueCrossChunk.incrementAndGet();
+                            recordCrossChunk(c, grown, alone);
                         }
                     }
                     if (grown < c.predicted) {

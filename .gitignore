@@ -93,3 +93,7 @@ contrib/
 
 __pycache__/
 *.pyc
+h17.table
+h17.finds
+*.table
+*.finds
