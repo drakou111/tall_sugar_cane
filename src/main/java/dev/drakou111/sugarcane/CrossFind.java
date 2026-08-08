@@ -609,8 +609,12 @@ public final class CrossFind {
         // for a whole run; the kernel is asked for it an epoch at a time. The CPU path is one
         // epoch with a null list, which makes the worker below read from the orbit walk.
         final AtomicLong epochCursor = new AtomicLong();
-        final long epochSize = 1_000_000_000L;
-        long epochCount = gpu == null ? 1 : (seeds + epochSize - 1) / epochSize;
+        // Sized against the kernel's output buffer, not against the seed count, and adaptive
+        // because acceptance swings by two orders of magnitude with the streamed side's
+        // minimum: a >=12 chain keeps 0.003% of seeds and a >=4 one -- an ordinary cane column
+        // -- keeps most of them. A fixed 1e9 is fine for the first and overflows on the second,
+        // which is how a light chunk A used to fail outright instead of running.
+        long epochSize = 1_000_000_000L;
         AtomicLong kernelKept = new AtomicLong();
 
         Thread progress = progressThread(pass2Start, streamed, joins, solvedSeeds, inBorder,
@@ -618,16 +622,34 @@ public final class CrossFind {
         progress.setDaemon(true);
         progress.start();
 
-        for (long e = 0; e < epochCount; e++) {
+        for (long epochFrom = 0; epochFrom < (gpu == null ? 1 : seeds); ) {
             final long[] epochSeeds;
             if (gpu == null) {
                 epochSeeds = null;
+                epochFrom = seeds;          // the CPU path streams the whole range in one go
             } else {
-                long epochFrom = e * epochSize;
-                epochSeeds = gpuEpoch(gpu, streamedMin, !storeEndings, scanFrom + epochFrom,
-                        Math.min(epochSize, seeds - epochFrom));
+                long[] got = null;
+                while (got == null) {
+                    try {
+                        got = gpuEpoch(gpu, streamedMin, !storeEndings, scanFrom + epochFrom,
+                                Math.min(epochSize, seeds - epochFrom));
+                    } catch (java.io.IOException ex) {
+                        // The kernel says when it dropped seeds rather than returning a short
+                        // list, so this is recoverable exactly once it is heard: halve and
+                        // retry. Silently keeping the short list would look like a barren epoch.
+                        if (epochSize <= 1_000_000L
+                                || !String.valueOf(ex.getMessage()).contains("smaller epoch")) {
+                            throw ex;
+                        }
+                        epochSize /= 4;
+                        System.out.printf("  epoch too large for the kernel's buffer; "
+                                + "retrying at %d seeds%n", epochSize);
+                    }
+                }
+                epochSeeds = got;
                 kernelKept.addAndGet(epochSeeds.length);
                 epochCursor.set(0);
+                epochFrom += Math.min(epochSize, seeds - epochFrom);
             }
             for (int t = 0; t < threads; t++) {
                 pool[t] = new Thread(() -> {
@@ -721,6 +743,7 @@ public final class CrossFind {
         }
 
         verify(found, threads);      // the CPU path runs one epoch, so this is its only call
+        printTally(found.get());
 
         double secs = (System.currentTimeMillis() - start) / 1000.0;
         System.out.printf("%ndone in %.1f s%n", secs);
@@ -783,7 +806,9 @@ public final class CrossFind {
         // the statics it does have (relaxFilters, allBiomes, centreOverride) are left alone.
         AtomicLong cursor = new AtomicLong();
         AtomicLong done = new AtomicLong();
-        AtomicLong ungenerated = TALLY.ungenerated;
+        // Per epoch, so the line below can say what THIS batch did. Everything else is
+        // cumulative in TALLY, and mixing the two printed "7869 of 3617 were never generated".
+        AtomicLong ungenerated = new AtomicLong();
         AtomicLong tallest = TALLY.tallest;
         AtomicLong whyNotAir = TALLY.whyNotAir;
         AtomicLong whyNoSoil = TALLY.whyNoSoil;
@@ -921,37 +946,56 @@ public final class CrossFind {
         ticker.interrupt();
 
         double secs = (System.currentTimeMillis() - start) / 1000.0;
-        TALLY.generated.addAndGet(pending.size());
-        long built = TALLY.generated.get() - ungenerated.get();
+        long built = pending.size() - ungenerated.get();
+        TALLY.generated.addAndGet(built);
+        TALLY.ungenerated.addAndGet(ungenerated.get());
         System.out.printf("  %d generated in %.1f s (%.2f/s)%n", built, secs, built / secs);
         if (ungenerated.get() > 0) {
             System.out.printf("  %d of %d were never generated at all (a filter skipped the "
                     + "chunk), so they were neither confirmed nor refuted%n",
                     ungenerated.get(), pending.size());
         }
-        if (found.get() == 0) {
-            System.out.printf("  none survived; of the %d that DID generate, the tallest cane "
-                    + "actually grown was %d%n", built, tallest.get());
+    }
+
+    /**
+     * Everything verification learned, over every epoch.
+     *
+     * <p>Printed once at the end rather than per epoch. These are running totals, and a running
+     * total labelled as though it belonged to one batch is how "7869 of 3617 were never
+     * generated" got printed.
+     */
+    private static void printTally(long found) {
+        long built = TALLY.generated.get();
+        if (built == 0 && TALLY.ungenerated.get() == 0) {
+            return;
+        }
+        System.out.printf("%nover every epoch: %d candidates generated, %d skipped by a "
+                        + "filter (neither confirmed nor refuted)%n",
+                built, TALLY.ungenerated.get());
+        if (found == 0) {
+            System.out.printf("  none survived; the tallest cane actually grown was %d%n",
+                    TALLY.tallest.get());
         }
         System.out.printf("  %d grew some cane, of which %d ran taller than any one chunk "
-                        + "built%n", grewSomething.get(), trueCrossChunk.get());
-        if (!stopped.isEmpty()) {
+                        + "built%n", TALLY.grewSomething.get(), TALLY.trueCrossChunk.get());
+        if (!TALLY.stopped.isEmpty()) {
             System.out.println("  where the predicted stack stops, first column with no cane:");
-            stopped.entrySet().stream()
+            TALLY.stopped.entrySet().stream()
                     .sorted((x, y) -> Long.compare(y.getValue().get(), x.getValue().get()))
                     .limit(12)
                     .forEach(e -> System.out.printf("    %-32s %d%n", e.getKey(),
                             e.getValue().get()));
         }
-        System.out.printf("  why they failed, at chunk A's bottom base: not air %d, "
-                        + "air but no soil under it %d, soil but no water beside %d, "
-                        + "placeable and the RNG still did not %d%n",
-                whyNotAir.get(), whyNoSoil.get(), whyNoWater.get(), whyPlaceable.get());
-        if (whyNoSoil.get() > 0) {
+        System.out.printf("  at chunk A's bottom base: not air %d, air but no soil under it %d, "
+                        + "soil but no water beside %d, placeable and the RNG still did not %d%n",
+                TALLY.whyNotAir.get(), TALLY.whyNoSoil.get(), TALLY.whyNoWater.get(),
+                TALLY.whyPlaceable.get());
+        if (TALLY.whyNoSoil.get() > 0) {
             System.out.printf("  of the %d with no soil: the block under the base was carved "
                             + "away %d, was water %d, was stone the blobs missed %d%n",
-                    whyNoSoil.get(), soilWasCarved.get(), soilWasWater.get(),
-                    whyNoSoil.get() - soilWasCarved.get() - soilWasWater.get());
+                    TALLY.whyNoSoil.get(), TALLY.soilWasCarved.get(), TALLY.soilWasWater.get(),
+                    TALLY.whyNoSoil.get() - TALLY.soilWasCarved.get()
+                            - TALLY.soilWasWater.get());
         }
     }
 
