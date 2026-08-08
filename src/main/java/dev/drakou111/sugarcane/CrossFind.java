@@ -867,7 +867,7 @@ public final class CrossFind {
             // Per epoch, so a long run answers as it goes instead of holding its whole
             // diagnostic hostage to the last seed. Also keeps the candidate list from growing
             // for the length of the run, which is what --max-candidates was guarding against.
-            verify(found, threads);
+            verify(found, threads, target);
             // A compact running picture after each epoch. The full tally prints once at the
             // end, but a run that takes hours should not keep its diagnostic to itself for all
             // of them -- that was the whole point of verifying per epoch.
@@ -879,7 +879,7 @@ public final class CrossFind {
                     kernelKept.get(), seeds, 100.0 * kernelKept.get() / seeds);
         }
 
-        verify(found, threads);      // the CPU path runs one epoch, so this is its only call
+        verify(found, threads, target);   // the CPU path runs one epoch, so this is its only call
         printTally(found.get());
 
         double secs = (System.currentTimeMillis() - start) / 1000.0;
@@ -917,7 +917,8 @@ public final class CrossFind {
      * that survives the probe is rare enough that generating a few thousand regions costs less
      * than the scan that produced them.
      */
-    private static void verify(AtomicLong found, int threads) throws InterruptedException {
+    private static void verify(AtomicLong found, int threads, int target)
+            throws InterruptedException {
         java.util.List<Candidate> pending;
         synchronized (CANDIDATES) {
             pending = new java.util.ArrayList<>(CANDIDATES);
@@ -960,8 +961,15 @@ public final class CrossFind {
         for (int t = 0; t < threads; t++) {
             pool[t] = new Thread(() -> {
                 RegionSearcher.Stats stats = new RegionSearcher.Stats();
+                // Report at the target height rather than at 999, which is a threshold nothing
+                // reaches. The region search already walks every cane column in the 3x3 it
+                // builds and already compares the full run against caneRunFromOneChunk -- that
+                // is exactly the cross-chunk test -- and this command was suppressing all of it
+                // and then reading one column by hand. 6bs's two stacks were incidental rather
+                // than the predicted chain, so looking only where the prediction pointed is
+                // looking in the wrong place by construction.
                 RegionSearcher.Worker worker =
-                        new RegionSearcher.Worker(999, false, 0, stats, 0);
+                        new RegionSearcher.Worker(target, false, 0, stats, 0);
                 for (int i = (int) cursor.getAndIncrement(); i < pending.size();
                         i = (int) cursor.getAndIncrement()) {
                     Candidate c = pending.get(i);

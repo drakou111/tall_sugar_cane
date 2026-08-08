@@ -4726,3 +4726,39 @@ seed and no coordinate — the rarest and most interesting output of the search,
 Fixed: every one is now printed and appended with its seed, position, both chunks, and what one
 chunk alone would have managed. At two a night they are cheap to log and there is no excuse for
 losing them.
+
+## 6bt: the region search was already finding cross-chunk stacks, and crossfind was muting it
+
+6bs's two stacks were **incidental**: every one of the 3,023,731 candidates appears in the
+"first column with no cane" histogram, so both had their predicted chain fail and grew a
+cross-chunk stack anyway. The mechanism does not need the prediction.
+
+Which makes it worth asking what else was being ignored. `RegionSearcher` walks every cane column
+in the 3x3 it builds, computes the full run, compares it against `caneRunFromOneChunk` and prints
+`cross-chunk ...` when the two differ. **That is exactly the test**, over the whole region, and it
+has been there since long before `crossfind` existed.
+
+`crossfind` built its verification worker as `new Worker(999, ...)`. The first argument is the
+report threshold, and 999 is a height nothing reaches — so the region search did all of that work
+and reported none of it, and the command then read a single column by hand. Looking only where
+the prediction points is looking in the wrong place by construction, given the prediction is not
+what produces the stacks.
+
+Now built with the target height, so any run of that height anywhere in the region is reported,
+cross-chunk or not.
+
+### What it is honestly worth
+
+Less than it sounds, and worth doing anyway. A 3x3 is 2,304 columns against the one that was
+being read, but 2,303 of them were selected for nothing — cane runs about one column per thousand
+chunks on unselected ground, so most regions have none at all. The gain is not 2,304x; it is that
+a tall stack landing somewhere other than the predicted block is no longer invisible, and both
+stacks seen so far were of exactly that kind.
+
+It costs nothing: the placement already happens and only the reporting was gated.
+
+### One caution
+
+With `--report` on, these now reach the shared spreadsheet, including incidental cross-chunk runs
+that are not finds. That is a behaviour change for anyone running `crossfind` with reporting
+enabled, and the sheet is shared.
