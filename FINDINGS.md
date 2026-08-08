@@ -4572,3 +4572,57 @@ remains is one question about the neighbour's decoration seed, which is pure RNG
 
 It also explains why 17 as 9+8 looked so attractive in 6be and has never materialised: it still
 needs a 9-tall to exist first.
+
+## 6bq: the split does not matter, because everything dies on the first column
+
+6bp showed every cross-chunk candidate failing inside chunk A, and suggested the split was
+mis-chosen: `bestSplit` maximises `rate(a) * rate(b)`, which is symmetric in a and b, while the
+two sides are not remotely symmetric in terrain — chunk B needs no soil and stands in the ravine
+chunk A already occupies. So a lighter chunk A ought to convert better. It does not.
+
+Height 10, 24 threads, 64 sisters, `--floor`, the automatic split against the lightest possible
+chunk A:
+
+```
+              positions  generated   BLOCKED  NO_SUPPORT  NO_WATER  past col 0
+  auto 5+5          757      9,742     58.4%       39.5%      2.1%           1
+  light 4+6       1,198     15,195     58.8%       39.0%      2.2%           0
+```
+
+**The distributions are the same to a few tenths of a percent.** Lowering `minA` bought 1.2x the
+positions per second and changed the conversion not at all.
+
+### Which is obvious once seen
+
+Chain A's *first* column asks for exactly the same three things whatever the chain's length: air
+in the base, soil under it, water beside. `minA` governs how many columns come **after** that, and
+essentially nothing survives to find out. So the split cannot matter while ~100% of failures are
+at column 0, and no re-weighting of `bestSplit` will change anything.
+
+### What actually binds
+
+```
+  P(a cane column places at an RNG-chosen position)  ~2e-4     (48 of 236,729, 6bp)
+```
+
+That is `crossfind`'s ceiling, and it is a property of letting the RNG name the column rather than
+of any parameter. The filters are the reason it is not higher — 58.8% of positions have a base the
+carve probe called carved and terrain calls solid, 39.0% have soil the blob filter allowed and
+terrain does not have. But sharpening them would not raise throughput, only reduce wasted
+generation, and generation runs at ~2,900/s against a search that is lift-bound. **The filters are
+not the bottleneck; the architecture is.**
+
+### So, for 20 and above
+
+- **Exactly 20** is reachable by one chunk — five shift levels, five columns of four — and
+  `reverse` is the right tool because it keeps free choice of world seed, which is the thing
+  `crossfind` gives up and 6bp shows it cannot afford to. It needs a five-level target set, which
+  nothing has built; every existing set is four-level and 6al's note that "heights up to 16 need
+  four and get four" is why.
+- **21 and above** is cross-chunk only: `minimumColumns(21)` is 6 against a five-entry `SHIFTS`
+  table, and `reverse 21` stops with `find_targets: shiftLevels must be 1..5, got 6`. `crossfind`
+  is unaffected because each side runs its own four-level filter, capping a chain at 16 and a pair
+  at 32.
+- And 21+ therefore inherits the 2e-4 ceiling above, on top of needing chunk A to complete a stack
+  that has never once been observed to complete. That is the honest position: **not a tuning
+  problem, and not one more run away.**

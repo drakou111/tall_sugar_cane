@@ -735,6 +735,10 @@ public final class CrossFind {
             // diagnostic hostage to the last seed. Also keeps the candidate list from growing
             // for the length of the run, which is what --max-candidates was guarding against.
             verify(found, threads);
+            // A compact running picture after each epoch. The full tally prints once at the
+            // end, but a run that takes hours should not keep its diagnostic to itself for all
+            // of them -- that was the whole point of verifying per epoch.
+            printRunningTally();
         }
         progress.interrupt();
         if (gpu != null) {
@@ -955,6 +959,24 @@ public final class CrossFind {
                     + "chunk), so they were neither confirmed nor refuted%n",
                     ungenerated.get(), pending.size());
         }
+    }
+
+    /** One line of where stacks are stopping, for a run long enough to want to be asked. */
+    private static void printRunningTally() {
+        long built = TALLY.generated.get();
+        if (built == 0) {
+            return;
+        }
+        String worst = TALLY.stopped.entrySet().stream()
+                .sorted((x, y) -> Long.compare(y.getValue().get(), x.getValue().get()))
+                .limit(3)
+                .map(e -> e.getKey() + " " + e.getValue().get())
+                .reduce((x, y) -> x + ", " + y)
+                .orElse("none");
+        System.out.printf("  so far: %d generated, %d grew cane, %d beat one chunk; "
+                        + "stopping at %s%n",
+                built, TALLY.grewSomething.get(), TALLY.trueCrossChunk.get(), worst);
+        System.out.flush();
     }
 
     /**
