@@ -244,13 +244,13 @@ public final class CrossFind {
      * game — so it gets a seed and a coordinate rather than a tally mark.
      */
     private static synchronized void recordCrossChunk(Candidate c, int grown, int alone) {
-        synchronized (CrossFind.class) {
-            System.out.printf("%nCROSS-CHUNK %d tall at %d,%d,%d (one chunk alone would give "
-                            + "%d), seed %d, chunks %d,%d and %d,%d%n",
-                    grown, c.px(), c.baseY(), c.pz(), alone, c.ws(), c.cxa(), c.cza(),
-                    c.cxb(), c.czb());
-            System.out.flush();
-        }
+        // static synchronized already holds CrossFind.class, which is the same monitor the
+        // find printer uses, so the two cannot interleave mid-line.
+        System.out.printf("%nCROSS-CHUNK %d tall at %d,%d,%d (one chunk alone would give "
+                        + "%d), seed %d, chunks %d,%d and %d,%d%n",
+                grown, c.px(), c.baseY(), c.pz(), alone, c.ws(), c.cxa(), c.cza(),
+                c.cxb(), c.czb());
+        System.out.flush();
         if (FINDS_FILE == null) {
             return;
         }
