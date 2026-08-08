@@ -4626,3 +4626,47 @@ not the bottleneck; the architecture is.**
 - And 21+ therefore inherits the 2e-4 ceiling above, on top of needing chunk A to complete a stack
   that has never once been observed to complete. That is the honest position: **not a tuning
   problem, and not one more run away.**
+
+## 6br: the five-level path runs, and prices height 17 out of reach single-chunk
+
+6bq left one route to beating 16 untested: a single chunk at height 17, which needs five shift
+levels and five columns. Every target set the project has is four-level, because 6al's note that
+"heights up to 16 need four and get four" meant nothing ever asked for more. The kernel accepts
+`shiftLevels` up to 5, so `reverse 17` should simply work. It does:
+
+```
+  reverse 17, 24 threads, one 4080
+  filter: base shift <= 0, columns <= 5, depth band y 13..35, slack <= 0
+  22.5M decoration seeds/s        (half of height 11's 44.7M -- the fifth shift-view costs it)
+  0 of 20000 targets after 5.45 BILLION seeds
+```
+
+So `q(17) < 1.8e-10`, and that is only a bound — zero events. Priced at the bound, which flatters
+it:
+
+```
+    100 targets    0.3 GPU-days
+  1,000 targets    2.8 GPU-days
+  20,000 targets   56 GPU-days
+```
+
+And the bound is generous. 6al measured height 16 at 980x height 12 per member, and this run adds
+both a fifth column and a fifth shift level on top of 16, so the true figure is plausibly nearer
+1e-12 — at which even 100 targets is months of one card, and a useful set is out of the question.
+
+### What that settles
+
+Both routes above 16 are now priced rather than guessed:
+
+- **single chunk** — runs correctly, and the target set costs GPU-months to GPU-years;
+- **cross-chunk** — needs no target set at all, and is capped by 6bq's 2e-4 per position on top of
+  a chunk A that has never once completed in ~750,000 candidates.
+
+Neither is one more run away, and neither is a tuning problem. The honest summary of this session
+is that it made the search **~340x faster per position at height 17** (6bk, 6bl), built a lift
+4.3x faster than the CPU (6bo), and then established with the diagnostic that throughput was never
+what stood in the way (6bp, 6bq).
+
+The one thing that would change the picture is not speed. It is a way to choose the column instead
+of letting the RNG name it — the terrain-first direction — because 2e-4 is the price of not
+choosing, and no amount of scanning buys it down.
