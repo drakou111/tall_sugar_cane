@@ -241,6 +241,83 @@ public final class CrossFind {
     /** Set once the candidate cap is reached, so the run can say it searched less ground. */
     private static volatile boolean candidatesTruncated;
 
+    /**
+     * Joins held back so the lift can run on the card instead of one pair at a time.
+     *
+     * <p>The lift is the whole cost of a run once the scan is on the GPU (6bo), and the kernel
+     * is 4.3x the 24-thread CPU rate — but only in bulk: it carries ~400 ms of CUDA start-up per
+     * invocation, against 14.2 us per pair. So joins accumulate per thread and go over in one
+     * batch, which is why {@code examine} was split at the lift.
+     *
+     * <p>Only one thread runs the kernel at a time. They would otherwise queue on the card
+     * anyway, and serialising here keeps 24 processes from being spawned at once.
+     */
+    private static final class LiftBatch {
+        /** ~2.8 s of kernel work, so the fixed start-up is under 15% of the call. */
+        private static final int CAP = 200_000;
+        private static final Object GPU_TURN = new Object();
+
+        private final dev.drakou111.sugarcane.gen.GpuLift lift;
+        private final long[] d1 = new long[CAP];
+        private final long[] d2 = new long[CAP];
+        private final int[] dx = new int[CAP];
+        private final int[] dz = new int[CAP];
+        private int n;
+
+        LiftBatch(dev.drakou111.sugarcane.gen.GpuLift lift) {
+            this.lift = lift;
+        }
+
+        void add(long a, long b, int x, int z) {
+            d1[n] = a;
+            d2[n] = b;
+            dx[n] = x;
+            dz[n] = z;
+            n++;
+        }
+
+        boolean full() {
+            return n == CAP;
+        }
+
+        void flush(int minA, int minB, int sisters, ChainPrefilter endA, ChainPrefilter beginB,
+                AirCarveProbe probe, LiquidCarveProbe liquid, DirtBlobFilter dirt,
+                RegionSearcher.Worker worker, boolean useWater, boolean floorOnly,
+                int maxCandidates, AtomicLong solvedSeeds, AtomicLong inBorder,
+                AtomicLong carved, AtomicLong oceanPairs, AtomicLong solidNoise) {
+            if (n == 0) {
+                return;
+            }
+            dev.drakou111.sugarcane.gen.GpuLift.Solved solved;
+            try {
+                synchronized (GPU_TURN) {
+                    solved = lift.solve(d1, d2, dx, dz, n);
+                }
+            } catch (Exception e) {
+                // Falling back keeps a run alive rather than losing the batch, and the CPU
+                // path returns the same seeds -- GpuLiftTest pins that.
+                synchronized (CrossFind.class) {
+                    System.out.printf("  GPU lift failed (%s); this batch goes to the CPU%n", e);
+                }
+                for (int i = 0; i < n; i++) {
+                    examine(d1[i], d2[i], dx[i], dz[i], minA, minB, sisters, endA, beginB, probe,
+                            liquid, dirt, worker, useWater, floorOnly, maxCandidates,
+                            solvedSeeds, inBorder, carved, oceanPairs, solidNoise);
+                }
+                n = 0;
+                return;
+            }
+            solvedSeeds.addAndGet(solved.count());
+            for (int i = 0; i < solved.count(); i++) {
+                int p = solved.pair()[i];
+                examineSolved(solved.worldSeed()[i], d1[p], d2[p], dx[p], dz[p], minA, minB,
+                        sisters, endA, beginB, probe, liquid, dirt, worker, useWater, floorOnly,
+                        maxCandidates, inBorder, carved, oceanPairs, solidNoise);
+            }
+            n = 0;
+        }
+    }
+
     /** Growable (key, seed) pairs, per thread, so collection never synchronises. */
     private static final class Hits {
         int[] keys = new int[1024];
@@ -446,6 +523,11 @@ public final class CrossFind {
         // side and 2e-2 on the streamed one.
         dev.drakou111.sugarcane.gen.GpuChainFilter gpu = forceCpu ? null
                 : dev.drakou111.sugarcane.gen.GpuChainFilter.detect();
+        final dev.drakou111.sugarcane.gen.GpuLift gpuLift = forceCpu ? null
+                : dev.drakou111.sugarcane.gen.GpuLift.detect();
+        if (gpuLift != null) {
+            System.out.println("  lifting on the GPU too, in batches of " + LiftBatch.CAP);
+        }
         if (gpu != null) {
             System.out.printf("  scanning on the GPU (%s); the CPU re-derives geometry for "
                     + "what it keeps%n", gpu.binary());
@@ -656,6 +738,7 @@ public final class CrossFind {
                 ChainPrefilter filter = storeEndings ? beginningFilter() : endingFilter();
                 ChainPrefilter endA = endingFilter();
                 ChainPrefilter beginB = beginningFilter();
+                LiftBatch batch = gpuLift == null ? null : new LiftBatch(gpuLift);
                 AirCarveProbe probe = new AirCarveProbe().ravinesOnly(true);
                 LiquidCarveProbe liquid = useWater ? new LiquidCarveProbe() : null;
                 DirtBlobFilter dirt = new DirtBlobFilter();
@@ -710,10 +793,22 @@ public final class CrossFind {
                                         long dsA = storeEndings ? tab[p] : ds;
                                         long dsB = storeEndings ? ds : tab[p];
                                         joins.incrementAndGet();
-                                        examine(dsA, dsB, ddx, ddz, minA, minB, sisters, endA,
-                                                beginB, probe, liquid, dirt, worker, useWater,
-                                                useFloor, maxCandidates, solvedSeeds, inBorder,
-                                                carved, oceanPairs, solidNoise);
+                                        if (batch == null) {
+                                            examine(dsA, dsB, ddx, ddz, minA, minB, sisters,
+                                                    endA, beginB, probe, liquid, dirt, worker,
+                                                    useWater, useFloor, maxCandidates,
+                                                    solvedSeeds, inBorder, carved, oceanPairs,
+                                                    solidNoise);
+                                        } else {
+                                            batch.add(dsA, dsB, ddx, ddz);
+                                            if (batch.full()) {
+                                                batch.flush(minA, minB, sisters, endA, beginB,
+                                                        probe, liquid, dirt, worker, useWater,
+                                                        useFloor, maxCandidates, solvedSeeds,
+                                                        inBorder, carved, oceanPairs,
+                                                        solidNoise);
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -724,6 +819,11 @@ public final class CrossFind {
                         }
                         streamed.incrementAndGet();
                     }
+                }
+                if (batch != null) {
+                    batch.flush(minA, minB, sisters, endA, beginB, probe, liquid, dirt, worker,
+                            useWater, useFloor, maxCandidates, solvedSeeds, inBorder, carved,
+                            oceanPairs, solidNoise);
                 }
                 }, "crossfind-solve-" + t);
                 pool[t].start();
@@ -1075,23 +1175,41 @@ public final class CrossFind {
             return;
         }
         solvedSeeds.addAndGet(worldSeeds.length);
-
         for (long ws : worldSeeds) {
-            DecorationLattice lattice = new DecorationLattice(ws);
+            examineSolved(ws, dsA, dsB, dx, dz, minA, minB, sisters, endA, beginB, probe,
+                    liquid, dirt, worker, useWater, floorOnly, maxCandidates, inBorder,
+                    carved, oceanPairs, solidNoise);
+        }
+    }
+
+    /**
+     * Everything after the lift, for one solved world seed.
+     *
+     * <p>Split out so the seed can arrive from {@link TwoChunkLift} or from the GPU kernel
+     * without the rest of the pipeline knowing which. The lift is the whole cost of a run once
+     * the scan is on the card (6bo), and it batches — which the inline call could not.
+     */
+    private static void examineSolved(long ws, long dsA, long dsB, int dx, int dz, int minA,
+            int minB, int sisters, ChainPrefilter endA, ChainPrefilter beginB, AirCarveProbe probe,
+            LiquidCarveProbe liquid, DirtBlobFilter dirt, RegionSearcher.Worker worker,
+            boolean useWater, boolean floorOnly, int maxCandidates, AtomicLong inBorder,
+            AtomicLong carved, AtomicLong oceanPairs, AtomicLong solidNoise) {
+        DecorationLattice lattice = new DecorationLattice(ws);
+        {
             int[] chunk = lattice.solve(dsA);
             if (chunk == null) {
-                continue;
+                return;
             }
             int cxa = chunk[0], cza = chunk[1];
             int cxb = cxa + dx, czb = cza + dz;
             if (Math.abs(cxb) > DecorationLattice.BORDER_CHUNKS
                     || Math.abs(czb) > DecorationLattice.BORDER_CHUNKS) {
-                continue;
+                return;
             }
             // The lift solved an equation; this asks setDecorationSeed itself. If they ever
             // disagree the lift is wrong, and it should be caught here rather than believed.
             if (lattice.decorationSeedOf(cxb, czb) != dsB) {
-                continue;
+                return;
             }
             inBorder.incrementAndGet();
 
@@ -1100,11 +1218,11 @@ public final class CrossFind {
             // where one stops and the other starts.
             int na = endA.collectChains(dsA, OCEAN_INDEX, minA);
             if (endA.chainsOverflowed()) {
-                continue;
+                return;
             }
             int nb = beginB.collectChains(dsB, OCEAN_INDEX, minB);
             if (beginB.chainsOverflowed()) {
-                continue;
+                return;
             }
             for (int i = 0; i < na; i++) {
                 long ca = endA.chain(i);
