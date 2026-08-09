@@ -723,7 +723,10 @@ public final class CrossFind {
         final long kCount = !useEnum ? 0
                 : Math.max(0, Math.min(enumK >= 0 ? enumK : Long.MAX_VALUE,
                         dev.drakou111.sugarcane.gen.GpuStackEnum.K_LIMIT - kFrom));
-        if (useEnum && kCount == 0) {
+        // Not when pass 1 is skipped: --no-grow never enumerates anything, so a table that
+        // already covers the whole k range is the normal state of a streaming campaign, not a
+        // reason to refuse to run.
+        if (useEnum && !skipPass1 && kCount == 0) {
             System.err.printf("nothing left to enumerate: k starts at %d and the limit is %d. "
                     + "Raise --enum-lows for more coverage of the same k, or pass "
                     + "--enum-from=0 to sweep it again.%n",
