@@ -36,10 +36,11 @@ class CrossChunkLogTest {
         // ws, cxa, cza, cxb, czb, px, pz, baseY, joinY, runA, runB, predicted, chainA, chainB
         Object c = ctor.newInstance(1500050556L, 5, 4, 6, 4, 91, 65, 16, 24, 8, 9, 17, 0L, 0L);
 
-        Method record = cf.getDeclaredMethod("recordCrossChunk", cand, int.class, int.class);
+        Method record = cf.getDeclaredMethod("recordCrossChunk", cand, int.class, int.class,
+                int.class);
         record.setAccessible(true);
-        record.invoke(null, c, 12, 8);
-        record.invoke(null, c, 9, 4);
+        record.invoke(null, c, 12, 8, 16);
+        record.invoke(null, c, 9, 4, 16);
 
         String text = Files.readString(out);
         assertEquals(2, text.lines().count(), "one line per stack, appended not overwritten");

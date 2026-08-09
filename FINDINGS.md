@@ -4671,7 +4671,7 @@ The one thing that would change the picture is not speed. It is a way to choose 
 of letting the RNG name it — the terrain-first direction — because 2e-4 is the price of not
 choosing, and no amount of scanning buys it down.
 
-## 6bs: two chunks built one stack, for the first time
+## 6bs: two chunks built one stack, for the first time  **[WRONG -- see 6bu]**
 
 Height 17, 2e11 seeds, 9.3 hours, GPU scan and GPU lift, 64 sisters, `--floor`. 285,202 positions
 and 3,023,731 candidates — an order of magnitude past anything before it.
@@ -4683,9 +4683,14 @@ and 3,023,731 candidates — an order of magnitude past anything before it.
   tallest cane actually grown: 8         (was 4)
 ```
 
+**The two-chunk claim in this section is wrong; 6bu has the retraction.** What survives is the
+rest: `B col 0` appears in a histogram for the first time and chain A completed 24 times, both of
+which come from the column walk and are unaffected. The sentence below stood on a broken
+comparison.
+
 6bp's finding was that the join had never once been exercised in ~750,000 candidates. It has now.
-`B col 0` appears in a histogram for the first time, chain A completed 24 times, and **two
-candidates produced a run that neither chunk could have built alone** — which is the mechanism
+`B col 0` appears in a histogram for the first time, chain A completed 24 times, and ~~two
+candidates produced a run that neither chunk could have built alone~~ — which is the mechanism
 this whole command exists for, observed at last. The tallest run reached 8, equal to the project's
 confirmed single-chunk find.
 
@@ -4762,3 +4767,58 @@ It costs nothing: the placement already happens and only the reporting was gated
 With `--report` on, these now reach the shared spreadsheet, including incidental cross-chunk runs
 that are not finds. That is a behaviour change for anyone running `crossfind` with reporting
 enabled, and the sheet is shared.
+
+## 6bu: the three cross-chunk stacks were a bug, and 6bs's headline is retracted
+
+6bs reported two candidates that "ran taller than any one chunk built", and 6bt reasoned from
+them that the mechanism fires without the predicted chain. A logged line from the next run showed
+the claim was false:
+
+```
+crosschunk height=3 aloneWouldBe=0 seed=1811690846776577 x=-26392401 y=17 z=-27389929
+          chunkA=-1649526,-1711871 chunkB=-1649525,-1711871 predicted=18
+```
+
+`aloneWouldBe=0` with a three-tall run present is impossible if the two numbers describe the same
+cane. If a run stands at y=17, one chunk built at least part of it.
+
+### The comparison was between two different blocks
+
+```java
+grown = tallestAt(px, pz)                              // tallest run ANYWHERE in the column
+alone = caneRunFromOneChunk(px, c.baseY, pz)           // one chunk's run at the PREDICTED base
+```
+
+`caneRunFromOneChunk` looks the position up in the placer map and returns 0 when nothing stands
+there. So whenever cane grew anywhere other than the predicted base — which is the normal case,
+since the prediction almost never holds — `alone` was 0, `alone < grown` was true, and the
+candidate was flagged. **The test detected "cane grew somewhere unexpected", not "two chunks
+cooperated".**
+
+All three reported stacks, two in 6bs and one after, are false positives. Nothing has yet been
+observed that two chunks built together.
+
+### Fixed
+
+`tallestRun` now returns the run's base packed with its height, and `caneRunFromOneChunk` is asked
+about **that** base. `TallestRunTest` pins it: a three-tall run at y=40 reports base 40, the taller
+of two runs wins with its own base, and an empty column reports nothing.
+
+### What still stands from 6bs
+
+The column walk was never involved in the bug, so its output is unaffected: `B col 0` appearing in
+a histogram, chain A completing 24 times, and the per-column continuation factor — 6.2% then, 7.4%
+in the run after, 6.6% combined over 593 placements. `P(17|candidate)` at 2.6e-9 is unchanged,
+because it was derived from the continuation factor and not from the phantom stacks.
+
+What is retracted is the headline: the join has been **reached** — chain A completes and chunk B
+gets asked — but no stack has been observed that one chunk could not have built.
+
+### The lesson, which is the same one as 6bg and 6bn
+
+Three times now a number has been compared against another number measured under different
+conditions: the kernel against a differently-configured filter (6bg), a candidate-level water rate
+against one taken at a different sister count (6bn), and now a run height against a one-chunk
+height at a different block. Each time the mistake produced a *positive* result, and each time it
+survived until something external contradicted it — here, a logged line that could not be true.
+The logging added in 6bs is what caught the bug 6bs introduced.

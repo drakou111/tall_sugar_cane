@@ -243,12 +243,13 @@ public final class CrossFind {
      * project right now than a run of 8 that one chunk did, and it is the thing to look at in
      * game — so it gets a seed and a coordinate rather than a tally mark.
      */
-    private static synchronized void recordCrossChunk(Candidate c, int grown, int alone) {
+    private static synchronized void recordCrossChunk(Candidate c, int grown, int alone,
+            int base) {
         // static synchronized already holds CrossFind.class, which is the same monitor the
         // find printer uses, so the two cannot interleave mid-line.
         System.out.printf("%nCROSS-CHUNK %d tall at %d,%d,%d (one chunk alone would give "
                         + "%d), seed %d, chunks %d,%d and %d,%d%n",
-                grown, c.px(), c.baseY(), c.pz(), alone, c.ws(), c.cxa(), c.cza(),
+                grown, c.px(), base, c.pz(), alone, c.ws(), c.cxa(), c.cza(),
                 c.cxb(), c.czb());
         System.out.flush();
         if (FINDS_FILE == null) {
@@ -257,7 +258,7 @@ public final class CrossFind {
         String line = String.format(
                 "crosschunk height=%d aloneWouldBe=%d seed=%d x=%d y=%d z=%d chunkA=%d,%d "
                         + "chunkB=%d,%d predicted=%d at=%s%n",
-                grown, alone, c.ws(), c.px(), c.baseY(), c.pz(), c.cxa(), c.cza(),
+                grown, alone, c.ws(), c.px(), base, c.pz(), c.cxa(), c.cza(),
                 c.cxb(), c.czb(), c.predicted(), java.time.Instant.now());
         try {
             Files.writeString(FINDS_FILE, line, java.nio.charset.StandardCharsets.UTF_8,
@@ -974,6 +975,7 @@ public final class CrossFind {
                         i = (int) cursor.getAndIncrement()) {
                     Candidate c = pending.get(i);
                     int grown;
+                    int grownBase = -1;
                     try {
                         worker.prepare(c.ws);
                         worker.searchOneChunk(c.cxa, c.cza);
@@ -987,7 +989,9 @@ public final class CrossFind {
                             ungenerated.incrementAndGet();
                             continue;
                         }
-                        grown = tallestAt(worker.world, c.px, c.pz);
+                        long run = tallestRun(worker.world, c.px, c.pz);
+                        grown = (int) run;
+                        grownBase = (int) (run >> 32);
                     } catch (RuntimeException e) {
                         synchronized (CrossFind.class) {
                             System.out.printf("  seed %d at %d,%d: generation failed (%s)%n",
@@ -1005,10 +1009,15 @@ public final class CrossFind {
                         // enough to be precious -- two in a nine-hour night -- and used to be
                         // counted and then thrown away, leaving no seed and no coordinate for
                         // the only genuine two-chunk stacks the search has ever produced.
-                        int alone = worker.world.caneRunFromOneChunk(c.px, c.baseY, c.pz);
+                        // At the run's OWN base, not at the predicted one. Asking
+                        // caneRunFromOneChunk about a y where no cane stands returns 0, which
+                        // beats any positive height and flags every column whose cane grew
+                        // somewhere other than predicted -- three phantom stacks before this
+                        // was noticed (6bu).
+                        int alone = worker.world.caneRunFromOneChunk(c.px, grownBase, c.pz);
                         if (alone < grown) {
                             trueCrossChunk.incrementAndGet();
-                            recordCrossChunk(c, grown, alone);
+                            recordCrossChunk(c, grown, alone, grownBase);
                         }
                     }
                     if (grown < c.predicted) {
@@ -1193,13 +1202,30 @@ public final class CrossFind {
         return ColumnFate.PLACEABLE_BUT_EMPTY;
     }
 
+    /**
+     * The tallest contiguous cane run in this column, packed as {@code base << 32 | height}.
+     *
+     * <p>The base is the point. Comparing a run's height against
+     * {@code caneRunFromOneChunk} at some <em>other</em> y compares two different columns of
+     * cane and means nothing -- which is exactly the bug that produced three phantom
+     * cross-chunk stacks (FINDINGS 6bu). The two must be measured at the same block.
+     */
+    private static long tallestRun(dev.drakou111.sugarcane.world.ArrayWorld world, int x, int z) {
+        int best = 0;
+        int base = -1;
+        for (int y = 1; y < Y; y++) {
+            int h = world.caneHeightAt(x, y, z);
+            if (h > best) {
+                best = h;
+                base = y;
+            }
+        }
+        return ((long) base << 32) | (best & 0xFFFFFFFFL);
+    }
+
     /** The tallest contiguous cane run standing anywhere in this column. */
     private static int tallestAt(dev.drakou111.sugarcane.world.ArrayWorld world, int x, int z) {
-        int best = 0;
-        for (int y = 1; y < Y; y++) {
-            best = Math.max(best, world.caneHeightAt(x, y, z));
-        }
-        return best;
+        return (int) tallestRun(world, x, z);
     }
 
     /**
