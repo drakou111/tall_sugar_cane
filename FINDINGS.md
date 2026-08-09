@@ -5394,3 +5394,63 @@ nothing else.
 None of that is measured. It is a chain of estimates on top of a one-accept `q`, and it wants a
 real run before anyone believes the exponent. But it is the largest single lever this file has
 turned up, and it costs one constant and one biome predicate to test.
+
+## 6cd: desert is a single-chunk play, not a crossfind one
+
+Asked whether 6cc's desert result can be carried into `crossfind`. It can be implemented cheaply
+and it would not be faster. The reason is structural and worth keeping.
+
+### Implementing it is easy
+
+Desert's feature index is 5, the same as ocean's, so the salt, the lattice, the lift and the whole
+join machinery are untouched. Only `SugarCaneFeature.COUNT_DEFAULT` appears, at five call sites,
+plus the biome gate. An afternoon.
+
+### The GPU scan cannot do count 60
+
+`find_targets` is compiled with `MAX_COUNT 10` and refuses higher — verified, not assumed:
+
+```
+  $ find_targets 10 60 5 ...
+  count 60 exceeds the compiled maximum 10
+```
+
+Not an arbitrary cap. `MAX_CANDIDATES = MAX_COUNT * shiftLevels * TRIES` sizes seven per-thread
+arrays; at 10 that is 6.4 KB of local memory and the file already records that 800 bytes of it
+cost **6.67e6 seeds/s against 14.2e6**. At 60 it would be 38 KB per thread. So count 60 falls back
+to the CPU, measured at **4.35e5 seeds/s against the kernel's 4.15e7** — 95x slower per seed.
+
+### The rare side gains, the common side loses
+
+The count-60 bonus is combinatorial in column count, so it is huge where chains are rare and
+small where they are common. Against ocean-on-GPU, using measured q:
+
+```
+                        ocean (GPU)     desert (CPU)     ratio
+  stored, height 10        423/s          1,366/s        3.2x
+  streamed, height 8    79,700/s         31,600/s        0.40x
+```
+
+Joins go as the product, so **1.3x** — the gain on the rare side is very nearly cancelled by the
+6x-per-seed cost on the common side, where q was already near saturation and cannot rise to meet
+it.
+
+### And then the biome gate takes what is left
+
+This is the part that decides it. **`crossfind` does not choose where its chunks are.** The world
+seed is solved from the pair and `lattice.solve` reports the coordinates; the sister sweep re-rolls
+the biome map at those fixed coordinates and the gate accepts or rejects. There is no steering.
+
+Ocean pairs pass that gate about 20% of the time. Desert-bordering-ocean is ~0.5% of chunks, so a
+pair passes about 0.25% — an **80x** loss of sister rolls, multiplied by desert shoreline's 0.49x
+terrain rate. Net against plain ocean: **0.02x on the CPU, and 0.31x even with a hypothetical
+count-60 kernel.** Worse either way.
+
+### Why the single-chunk search keeps its 1,139x
+
+Because it *picks its chunks*. A biome pass over everything, terrain generated only for the 0.5%
+that qualify — 6cc measured that cost at 4.1x more wall time per generated chunk, and the full
+per-chunk advantage survives it.
+
+**So the lever is real and it is attached to the wrong machine.** Rarity is a filter you exploit
+by choosing, and a tax you pay by rejecting. `crossfind` can only reject.
