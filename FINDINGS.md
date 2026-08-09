@@ -5454,3 +5454,57 @@ per-chunk advantage survives it.
 
 **So the lever is real and it is attached to the wrong machine.** Rarity is a filter you exploit
 by choosing, and a tax you pay by rejecting. `crossfind` can only reject.
+
+## 6ce: --desert on the reverse search, and a correction to 6cd
+
+`reverse --desert` switches the count to 60 and the biome gate to desert-that-borders-ocean.
+Desert's feature index is 5, the same as ocean's, so the salt, the orbit sampler, the lattice and
+the target cache are all untouched — it really is one number. The base-y band moves too: 6cc
+measured desert shoreline spots at mean soil y **34.6** against ocean's 23.9, and the default
+band's ceiling is 35, so ocean's band clips almost exactly where the quarry lives. `--desert`
+uses 24..50.
+
+### Correcting 6cd
+
+6cd said the desert advantage survives in "the single-chunk search" because it picks its chunks.
+That is true of `search`, which scans a box and filters by biome before generating anything. It
+is **not** true of `reverse`, and I wrote it as though it covered both.
+
+`reverse` gets its chunk from `lattice.solve(target)` — the coordinates fall out of the target and
+the world seed, exactly as `crossfind`'s do. So `reverse --desert` pays the same rarity tax:
+desert-bordering-ocean is ~0.5% of chunks against ocean's 22%, so its biome gate rejects ~44x
+more often, and that gate is most of the cost of a rejected candidate.
+
+Against ~306x more targets per seed at three columns, the net is single-digit rather than
+thousand-fold. **Only `search` collects the full 1,139x**, and `search` is the slow vehicle 6ac
+measured `reverse` at ~95x.
+
+### What it costs to run
+
+`--desert` is CPU-only by construction: `find_targets` is compiled with `MAX_COUNT 10` and its
+per-thread arrays scale as `MAX_COUNT * shiftLevels * TRIES`, so 60 would be 38 KB a thread.
+Measured at height 12: **0.29M seeds/s, q = 5.0e-6** through chain-and-soil.
+
+For scale, ocean at the same height on the kernel: 4.15e7 seeds/s against a chain q of 2.5e-7, so
+about 0.66 targets/s where desert-on-CPU makes ~1.45. **Desert on one CPU out-produces ocean on
+the GPU, at the target-set stage** — before the biome gate takes its 44x back.
+
+### --epoch, and why it was needed
+
+The target count is only checked between epochs, and `EPOCH_SAMPLES` was a fixed billion —
+half a minute of kernel time, 46 minutes of CPU time, whatever height was asked for and however
+early the set filled. A height-8 `--desert` build asked for 2,000 targets and had collected
+1.45 million when it was stopped, still inside epoch one. `--epoch=<n>` makes it settable.
+
+The constant was fixed on purpose, so that GPU- and CPU-built sets sample the same boundaries and
+their q figures stay comparable. Two sets built with different epochs are both valid; their q
+figures are not directly comparable. Hence a flag rather than something adapted automatically.
+
+### Where this leaves the desert idea
+
+The measured per-chunk advantage is real and large. The vehicles are the problem: `search` can
+exploit it and is slow, `reverse` is fast and cannot. The thing that would resolve it is a
+**count-60 chain filter on the GPU**, and `find_targets`' candidate-array design cannot be
+stretched there. `stack_enum` could: it holds no candidate list, and its contribution table at
+60 invocations is 3 bits x 119 slots = six registers rather than 38 KB of local memory. That is
+the piece of work this points at, and it is not a small one.

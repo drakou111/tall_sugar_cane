@@ -177,7 +177,7 @@ public final class RegionSearcher {
     }
 
     /** Whether any chunk within {@code reach} of this one is ocean. */
-    private static boolean oceanWithin(kaptainwutax.biomeutils.source.OverworldBiomeSource biomes,
+    static boolean oceanWithin(kaptainwutax.biomeutils.source.OverworldBiomeSource biomes,
             int cx, int cz, int reach) {
         for (int dx = -reach; dx <= reach; dx++) {
             for (int dz = -reach; dz <= reach; dz++) {

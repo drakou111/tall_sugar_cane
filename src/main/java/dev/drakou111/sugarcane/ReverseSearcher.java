@@ -57,9 +57,31 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public final class ReverseSearcher {
 
-    /** Every ocean biome is count 10, index 5, so one target set covers all of them. */
-    private static final int OCEAN_COUNT = SugarCaneFeature.COUNT_DEFAULT;
+    /**
+     * Every ocean biome is count 10, index 5, so one target set covers all of them.
+     *
+     * <p>Desert is index 5 as well — only its count differs, at 60 — so {@code --desert}
+     * changes this one number and nothing else in the reversal. The salt, the orbit sampler,
+     * the lattice and the target cache all key off the index, which does not move.
+     */
+    private static int caneCount = SugarCaneFeature.COUNT_DEFAULT;
     private static final int OCEAN_INDEX = 5;
+
+    /**
+     * Hunt desert that borders ocean, rather than ocean.
+     *
+     * <p>6cc: desert's 60 invocations are worth {@code C(60,C)/C(10,C)} — measured at 37.9x for
+     * two columns, 306x for three, 0.0556-against-0.0562 for four — and its interior is useless
+     * because {@code maxRun} needs water beside every column's base and there is none above sea
+     * level. Coastline is the exception: carvers are registered per biome but walk across chunk
+     * boundaries, so an ocean canyon cuts the desert beside it. Measured R 3.632e-4 against
+     * ocean's 7.407e-4, for a net ~1,139x per chunk at height 16.
+     *
+     * <p>6cd: this only pays for a search that <em>chooses</em> its chunks. {@code crossfind}
+     * takes its coordinates from the lift and can only reject, which is why this is here and
+     * not there.
+     */
+    private static boolean desertShore = false;
 
     private static long updateMs = 60_000L;
     private static final String UPDATE_FLAG = "--update=";
@@ -359,6 +381,15 @@ public final class ReverseSearcher {
                 cacheOverride = java.nio.file.Path.of(arg.substring(CACHE_FLAG.length()));
             } else if (arg.equals(CPU_FLAG)) {
                 forceCpu = true;
+            } else if (arg.startsWith(EPOCH_FLAG)) {
+                epochSamples = Long.parseLong(arg.substring(EPOCH_FLAG.length()));
+                if (epochSamples <= 0) {
+                    System.err.println("--epoch must be positive, got " + epochSamples);
+                    System.exit(2);
+                }
+            } else if (arg.equals("--desert")) {
+                desertShore = true;
+                caneCount = 60;
             } else if (arg.startsWith(REPORT_FLAG)) {
                 reportHeight = Integer.parseInt(arg.substring(REPORT_FLAG.length()));
             } else if (arg.equals(RAVINES_FLAG)) {
@@ -482,8 +513,7 @@ public final class ReverseSearcher {
                 minHeight, reportHeight, threads, targets, firstSeed);
         System.out.printf("  filter: base shift <= %d, columns <= %d, depth band y %d..%d, "
                         + "slack <= %d (%s)%n",
-                maxBaseShift(), maxColumns(minHeight),
-                ChainPrefilter.DEFAULT_BASE_MIN_Y, ChainPrefilter.DEFAULT_BASE_MAX_Y,
+                maxBaseShift(), maxColumns(minHeight), baseMinY(), baseMaxY(),
                 maxSlack, maxSlack == 0 ? "contiguous placements" : "foreign placements allowed");
         System.out.printf("  carvers: %s%n", ravinesOnly(minHeight)
                 ? "ravines only -- every find at height 8+ is ravine-carved, and a cave "
@@ -616,8 +646,7 @@ public final class ReverseSearcher {
                                         keepX[i] * 4 + 2, keepZ[i] * 4 + 2);
                                 long tg2 = System.nanoTime();
                                 nsGate.addAndGet(tg2 - tg);
-                                if (!RegionSearcher.isSearchableOcean(biome)
-                                        || !BiomeCaneConfig.hasSugarCane(biome)) {
+                                if (!biomeWanted(worker, keepX[i], keepZ[i], biome)) {
                                     continue;
                                 }
                                 oceans.incrementAndGet();
@@ -663,8 +692,7 @@ public final class ReverseSearcher {
                                 chunk[0] * 4 + 2, chunk[1] * 4 + 2);
                         long t2 = System.nanoTime();
                         nsGate.addAndGet(t2 - t1);
-                        if (!RegionSearcher.isSearchableOcean(biome)
-                                || !BiomeCaneConfig.hasSugarCane(biome)) {
+                        if (!biomeWanted(worker, chunk[0], chunk[1], biome)) {
                             continue;
                         }
                         boolean biomeOcean = BiomeSourceValidator.isOcean(biome);
@@ -793,7 +821,23 @@ public final class ReverseSearcher {
      * same boundaries and stay comparable. That is the reason this is fixed rather than
      * adapted to whatever rate a machine happens to measure.
      */
-    private static final long EPOCH_SAMPLES = 1_000_000_000L;
+    private static long epochSamples = 1_000_000_000L;
+
+    /**
+     * {@code --epoch=<n>} exists because that constant is sized for the kernel.
+     *
+     * <p>The target count is only checked between epochs, so an epoch is the granularity of
+     * "have I got enough yet". At the kernel's 4.15e7 seeds/s a billion samples is half a
+     * minute; on the CPU filter at 3.6e5 it is 46 minutes, whatever height is asked for and
+     * however soon the set filled up. A {@code --desert} build is CPU-only by construction
+     * (6cd), so it hits that every time.
+     *
+     * <p>Changing it changes which boundaries a set sampled, so two sets built with different
+     * epochs are still valid but their q figures are not directly comparable. That is the whole
+     * reason the constant was fixed, and it is why this is a flag rather than something adapted
+     * automatically to whatever rate a machine happens to measure.
+     */
+    private static final String EPOCH_FLAG = "--epoch=";
 
     /**
      * The ranked target filter: a chain may assume no earlier placement, and use no more
@@ -847,7 +891,7 @@ public final class ReverseSearcher {
         // than one chain, and the one that slides off first need not be the only one.
         for (int dir = 0; dir < 2; dir++) {
             long s = z;
-            for (int j = 1; j < OCEAN_COUNT; j++) {
+            for (int j = 1; j < caneCount; j++) {
                 s = dir == 0
                         ? OrbitSampler.unshift(s, OCEAN_INDEX,
                                 SugarCaneFeature.VEGETAL_DECORATION)
@@ -865,21 +909,55 @@ public final class ReverseSearcher {
         return n;
     }
 
+    /**
+     * Whether this chunk is the kind we are hunting.
+     *
+     * <p>Ocean by default. With {@code --desert}, desert-family that has ocean within two
+     * chunks — near enough that a canyon started over water reached here, which is the only
+     * way a land chunk gets the tall water face a stack needs.
+     */
+    private static boolean biomeWanted(RegionSearcher.Worker worker, int chunkX, int chunkZ,
+            int biome) {
+        if (!BiomeCaneConfig.hasSugarCane(biome)) {
+            return false;
+        }
+        if (desertShore) {
+            return BiomeCaneConfig.count(biome) == 60
+                    && RegionSearcher.oceanWithin(worker.biomeSource(), chunkX, chunkZ, 2);
+        }
+        return RegionSearcher.isSearchableOcean(biome);
+    }
+
     private static int maxColumns(int minHeight) {
         return maxColumnsOverride >= 0 ? maxColumnsOverride
                 : ChainPrefilter.minimumColumns(minHeight);
     }
 
+    /**
+     * The band a chain's base may start in.
+     *
+     * <p>The default 13..35 was fitted to ocean, whose stackable spots sit at mean soil y 23.9.
+     * Desert shoreline sits at 34.6 — against a ceiling of 35 — so the ocean band clips almost
+     * exactly where the thing being hunted lives. 6cc measured both.
+     */
+    private static int baseMinY() {
+        return desertShore ? 24 : ChainPrefilter.DEFAULT_BASE_MIN_Y;
+    }
+
+    private static int baseMaxY() {
+        return desertShore ? 50 : ChainPrefilter.DEFAULT_BASE_MAX_Y;
+    }
+
     private static TargetCache.Header header(int minHeight, long tested, long sampledThrough) {
-        return new TargetCache.Header(minHeight, OCEAN_COUNT, OCEAN_INDEX,
-                ChainPrefilter.DEFAULT_BASE_MIN_Y, ChainPrefilter.DEFAULT_BASE_MAX_Y, true,
+        return new TargetCache.Header(minHeight, caneCount, OCEAN_INDEX,
+                baseMinY(), baseMaxY(), true,
                 maxBaseShift(), maxColumns(minHeight), maxSlack, tested, sampledThrough);
     }
 
     private static ChainPrefilter rankedFilter(int minHeight) {
         int levels = shiftLevels(minHeight);
-        return new ChainPrefilter(OCEAN_COUNT, ChainPrefilter.DEFAULT_BASE_MIN_Y,
-                ChainPrefilter.DEFAULT_BASE_MAX_Y, maxBaseShift(), maxColumns(minHeight),
+        return new ChainPrefilter(caneCount, baseMinY(), baseMaxY(),
+                maxBaseShift(), maxColumns(minHeight),
                 levels - 1, levels)
                 .maxSlack(maxSlack);
     }
@@ -975,6 +1053,15 @@ public final class ReverseSearcher {
         // the same as a device that works, and every way of not having one -- no CUDA, no
         // driver, wrong toolkit, missing file -- should fall back quietly rather than
         // fail the run.
+        // find_targets is compiled with MAX_COUNT 10 and rejects anything higher: its
+        // per-thread candidate arrays are sized MAX_COUNT * shiftLevels * TRIES, and 6cd
+        // measured what that costs. So count 60 is a CPU search, loudly rather than by a
+        // confusing kernel error mid-run.
+        if (caneCount > SugarCaneFeature.COUNT_DEFAULT && !forceCpu) {
+            System.out.printf("  count %d exceeds the kernel's compiled maximum of %d, so this "
+                    + "runs on the CPU%n", caneCount, SugarCaneFeature.COUNT_DEFAULT);
+            forceCpu = true;
+        }
         GpuChainFilter gpu = forceCpu ? null : GpuChainFilter.detect();
         if (forceCpu) {
             System.out.println("target set: --cpu given, using the CPU chain filter");
@@ -1058,7 +1145,7 @@ public final class ReverseSearcher {
         int epoch = 0;
         while (all.length < targets) {
             final long epochFrom = sampleAt;
-            final long epochTo = sampleAt + EPOCH_SAMPLES;
+            final long epochTo = sampleAt + epochSamples;
             final java.util.concurrent.atomic.AtomicLong next =
                     new java.util.concurrent.atomic.AtomicLong(epochFrom);
             final List<long[]> collected = new ArrayList<>();
@@ -1069,19 +1156,19 @@ public final class ReverseSearcher {
                 // the soil filter to the ~1.6% it hands back, in parallel.
                 phase.set("gpu chain filter");
                 epochDone.set(0);
-                long[] chainPassed = gpu.run(minHeight, OCEAN_COUNT, OCEAN_INDEX,
-                        ChainPrefilter.DEFAULT_BASE_MIN_Y, ChainPrefilter.DEFAULT_BASE_MAX_Y,
+                long[] chainPassed = gpu.run(minHeight, caneCount, OCEAN_INDEX,
+                        baseMinY(), baseMaxY(),
                         maxBaseShift(), maxColumns(minHeight), maxSlack,
                         shiftLevels(minHeight), -1, -1,
-                        epochFrom, EPOCH_SAMPLES, epochDone::set);
-                epochDone.set(EPOCH_SAMPLES);
+                        epochFrom, epochSamples, epochDone::set);
+                epochDone.set(epochSamples);
                 phase.set("cpu soil filter");
                 if (System.currentTimeMillis() - lastPrintAt.get() >= updateMs) {
                     lastPrintAt.set(System.currentTimeMillis());
                     System.out.printf("  epoch %d: gpu passed %d of %d seeds (%.2f%%), "
                                     + "sifting soil%n",
-                            epoch + 1, chainPassed.length, EPOCH_SAMPLES,
-                            100.0 * chainPassed.length / EPOCH_SAMPLES);
+                            epoch + 1, chainPassed.length, epochSamples,
+                            100.0 * chainPassed.length / epochSamples);
                     System.out.flush();
                 }
                 final long[] toSift = chainPassed;
@@ -1093,7 +1180,7 @@ public final class ReverseSearcher {
                         ChainPrefilter filter = rankedFilter(minHeight);
                         DirtBlobFilter dirt = new DirtBlobFilter();
                         long[] mine = new long[64];
-                        long[] kin = new long[2 * OCEAN_COUNT];
+                        long[] kin = new long[2 * caneCount];
                         int n = 0;
                         while (true) {
                             int k = cursor.getAndIncrement();
@@ -1139,7 +1226,7 @@ public final class ReverseSearcher {
                     ChainPrefilter filter = rankedFilter(minHeight);
                     DirtBlobFilter dirt = new DirtBlobFilter();
                     long[] mine = new long[64];
-                    long[] kin = new long[2 * OCEAN_COUNT];
+                    long[] kin = new long[2 * caneCount];
                     int n = 0;
                     while (true) {
                         long from = next.getAndAdd(chunk);
@@ -1214,7 +1301,7 @@ public final class ReverseSearcher {
                 merged = java.util.Arrays.copyOf(merged, unique);
             }
             all = merged;
-            totalTested += EPOCH_SAMPLES;
+            totalTested += epochSamples;
             testedBase.set(totalTested);
             epochDone.set(0);
             foundNow.set(all.length);
