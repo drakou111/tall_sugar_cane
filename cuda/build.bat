@@ -49,6 +49,17 @@ if errorlevel 1 (
   exit /b 1
 )
 
+REM The state enumerator. Constructs the states that yield a wanted y instead of scanning
+REM decoration seeds for it: 415 confirmed chains/s at height 10 against the chain scan's ~107,
+REM and every hit is a real chain where the scan's are a third real.
+nvcc -O3 -Wno-deprecated-gpu-targets %ARCHS% ^
+  -o "%~dp0stack_enum.exe" "%~dp0stack_enum.cu"
+
+if errorlevel 1 (
+  echo build failed
+  exit /b 1
+)
+
 REM Also refresh the copy that ships inside the jar. Users get the fast path from the jar
 REM alone and never run this script; forgetting to copy would leave the jar shipping a
 REM stale kernel, which has already happened once and cost a real find. BundledKernelTest
@@ -69,5 +80,11 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo built all three kernels and refreshed the bundled copies
+copy /y "%~dp0stack_enum.exe" "%~dp0..\src\main\resources\cuda\stack_enum.exe" >nul
+if errorlevel 1 (
+  echo could not refresh the bundled stack_enum.exe
+  exit /b 1
+)
+
+echo built all four kernels and refreshed the bundled copies
 endlocal

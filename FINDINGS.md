@@ -4967,3 +4967,88 @@ The water probe took two full arms and an hour of runtime to say "no effect". Th
 ordinary run, because it instrumented the mechanism instead of A/B-testing the wrapper. Every
 question of the form "would restricting X help" can be asked that way, by recording X alongside
 the outcome and reading the conditional -- no rebuild, no second arm, and a much sharper answer.
+
+## 6by: the enumerator runs on the GPU, and its sampling was hiding in a power of two
+
+`StackEnumerator` (6bx's companion) inverts the scan: a chain's y is `nextInt(126)`, so instead of
+testing seeds for a wanted y you construct the states that yield one —
+
+```
+upper31 = k*126 + wantedY;   afterY = (upper31 << 17) | low17
+```
+
+— and the y costs nothing. `cuda/stack_enum.cu` is that on the card, validated the way
+`GpuLiftTest` validates the lift: **every hit re-run through the Java `StackEnumerator.runAt`,
+required to return exactly the height reported, not merely something tall.** 531,797 hits across
+four targets and three coverage settings, zero mismatches.
+
+### It is not exhaustive, and the header said it was
+
+`k` and the y band are swept in full, but the 17 low bits are *sampled* — `lows` of 131,072, 8 by
+default — and those bits drive everything downstream. A default sweep sees **6.1e-5** of the
+states in its band. `lows` is now a parameter; at 131,072 the sweep really is exhaustive, at
+16,384x the time. The original comment claiming exhaustive coverage was mine and was wrong.
+
+### The sampling was picking bad states
+
+`low17 = low * (131072 / lows)` reads as even spacing. The stride is a power of two, so at the
+default every sampled state had its **bottom 14 bits zero** — and the bottom bits of a
+`java.util.Random` state are its weakest, bit *i* having period 2^i.
+
+It showed up as a scaling anomaly: 4x the samples gave 5.59x the chains. Sub-linear yield at low
+density means the sampled slice was below average. Replacing the stride with multiplication by an
+odd constant (81001, nearest odd to 2^17/φ) is still a bijection mod 2^17 — so exhaustive at
+`lows=131072` — and unstructured for any prefix:
+
+```
+lows      before      after
+   8      18,107     27,643     +53% for identical work
+  32     101,269    105,646
+ 128         n/a    398,508
+```
+
+Scaling is now 3.82x and 3.77x for 4x the samples. **The default was giving up a third of its
+yield to a power of two**, and the only symptom was a ratio that should have been 4.
+
+### Where the time goes
+
+The neighbour walk is the kernel: 1.8 s without it against 27.3 s with. Two changes, measured
+interleaved because run-to-run spread is ±25%:
+
+  - **y before origin** in both walks. The y test rejects 125 invocations in 126 and `baseX`/`baseZ`
+    are worthless when it does. Worth **1.13x** — far less than the op count suggests, because
+    nvcc had already sunk most of it.
+  - **the contribution table into one register**, 3 bits per slot. As `signed char added[20]` it
+    was local memory, and the window loop read it 100 times *per call* whether or not anything had
+    stacked. With it packed, "nothing stacked" is one register compare. Worth **1.44x**, stack
+    frame 24 bytes → 0, registers 62 → 38.
+
+Same lesson 6bc learned on the lift: these kernels are bound by local memory traffic, not by
+arithmetic.
+
+### What it is worth
+
+At height 10 over the full k range: **415 confirmed chains/s, 309 with the edge filter.**
+
+The scan route it replaces lands around 107/s. That figure is part measured and part not, and the
+split matters: q = 1.088e-5 is a direct count over 200M seeds, and the 32.7% precision below is
+directly counted too, but the kernel's seed rate is *interpolated* from 6bj's 2.02e7 at min 8 and
+4.15e7 at min 12 rather than measured at min 10. So ~4x on rate, with that caveat attached.
+
+Rate is the smaller half. **Every hit here is a real chain; 32.7% of the scan's accepts are.**
+`ChainPrefilter` enumerates shift levels independently — its own javadoc calls the test
+deliberately loose — so it grants chains needing an unrelated placement elsewhere in the chunk,
+which 6bx just measured as the thing that mostly does not happen. Joins go as the **square** of
+the candidate count, so feeding the lift only real chains compounds.
+
+And the scan caps a chain at its shift-level count: four levels stop at height 16, a fifth halves
+throughput. This tracks placements exactly and has no cap, so the gap widens exactly where the
+search is going.
+
+### What it does not yet do
+
+It is not wired into `crossfind`. It produces decoration seeds with confirmed chains, which is
+what pass 1 produces, so the join and lift downstream should take them unchanged — but that is an
+expectation, not a measurement, and nothing here has been run end to end. A full sweep at
+`lows=8` finds **0** chains of 16 in 20 s; reaching 16 means raising `lows`, and the yield curve
+per full sweep (4,706 at 10, 136 at 12, 1 at 14, 0 at 16) is what to extrapolate from.

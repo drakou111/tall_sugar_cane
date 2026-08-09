@@ -85,11 +85,20 @@ cuda/*.obj
 vc140.pdb
 contrib/
 
-# ...except the kernel that ships inside the jar, which is tracked on purpose so a
-# clone builds a jar that needs nothing else installed. Without this negation the
-# *.exe rule above drops it silently: the jar still builds, and every user of it
+# ...except the kernels that ship inside the jar, which are tracked on purpose so a
+# clone builds a jar that needs nothing else installed. Without these negations the
+# *.exe rule above drops them silently: the jar still builds, and every user of it
 # quietly gets the 4.5x slower CPU path.
+#
+# This had already happened to three of the four. Only find_targets was ever negated, so
+# noise_column and two_chunk_lift were dropped from every clone from the day they were
+# written -- the lift being the one 6bc measured at 4.3x over 24 CPU threads and 6bl found
+# to be the whole cost of a crossfind run. Nothing fails when they are missing, which is
+# why it went unnoticed. Any new kernel needs a line here.
 !src/main/resources/cuda/find_targets.exe
+!src/main/resources/cuda/noise_column.exe
+!src/main/resources/cuda/two_chunk_lift.exe
+!src/main/resources/cuda/stack_enum.exe
 
 __pycache__/
 *.pyc

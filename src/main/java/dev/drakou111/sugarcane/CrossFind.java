@@ -227,6 +227,8 @@ public final class CrossFind {
         final AtomicLong soilWasWater = new AtomicLong();
         final AtomicLong grewSomething = new AtomicLong();
         final AtomicLong trueCrossChunk = new AtomicLong();
+        /** Stacks only visible once chunk B is decorated after chunk A rather than before. */
+        final AtomicLong neededReorder = new AtomicLong();
         /**
          * Whether a chain's assumed base shift predicts its first column actually placing.
          * The ranked filter caps shift at 0 on 6ah's measurement -- 94.1% of real finds against
@@ -1052,6 +1054,7 @@ public final class CrossFind {
         AtomicLong whyPlaceable = TALLY.whyPlaceable;
         AtomicLong soilWasCarved = TALLY.soilWasCarved;
         AtomicLong soilWasWater = TALLY.soilWasWater;
+        AtomicLong neededReorder = TALLY.neededReorder;
         AtomicLong grewSomething = TALLY.grewSomething;
         AtomicLong trueCrossChunk = TALLY.trueCrossChunk;
         java.util.concurrent.ConcurrentHashMap<String, AtomicLong> stopped = TALLY.stopped;
@@ -1073,6 +1076,7 @@ public final class CrossFind {
                     Candidate c = pending.get(i);
                     int grown;
                     int grownBase = -1;
+                    dev.drakou111.sugarcane.world.ArrayWorld orderedWorld = null;
                     try {
                         worker.prepare(c.ws);
                         worker.searchOneChunk(c.cxa, c.cza);
@@ -1089,6 +1093,33 @@ public final class CrossFind {
                         long run = tallestRun(worker.world, c.px, c.pz);
                         grown = (int) run;
                         grownBase = (int) (run >> 32);
+                        // The region decorates in raster order, x-major, so chunk B only runs
+                        // after chunk A when dx > 0, or dx == 0 and dz > 0. For the other four
+                        // neighbours B decorates FIRST, finds no cane to stand on, and the
+                        // stack it would have built is invisible -- half of every candidate
+                        // this command produces (FINDINGS 6by). A real 18-tall reads as 14
+                        // here for exactly that reason: its neighbour is at dx = -1.
+                        //
+                        // So B is re-run against the finished world, which is the order the
+                        // candidate actually needs. Re-running is safe at this column: B's
+                        // raster-order pass could not place here, because what it would stand
+                        // on did not exist yet.
+                        if (c.cxb < c.cxa || (c.cxb == c.cxa && c.czb < c.cza)) {
+                            dev.drakou111.sugarcane.world.ArrayWorld ordered =
+                                    worker.world.copy();
+                            ordered.setDecoratingChunk(c.cxb, c.czb);
+                            SugarCaneFeature.place(ordered,
+                                    new DecorationLattice(c.ws).decorationSeedOf(c.cxb, c.czb),
+                                    OCEAN_INDEX, SugarCaneFeature.COUNT_DEFAULT,
+                                    c.cxb, c.czb);
+                            long reordered = tallestRun(ordered, c.px, c.pz);
+                            if ((int) reordered > grown) {
+                                grown = (int) reordered;
+                                grownBase = (int) (reordered >> 32);
+                                orderedWorld = ordered;
+                                neededReorder.incrementAndGet();
+                            }
+                        }
                     } catch (RuntimeException e) {
                         synchronized (CrossFind.class) {
                             System.out.printf("  seed %d at %d,%d: generation failed (%s)%n",
@@ -1134,7 +1165,9 @@ public final class CrossFind {
                         // beats any positive height and flags every column whose cane grew
                         // somewhere other than predicted -- three phantom stacks before this
                         // was noticed (6bu).
-                        int alone = worker.world.caneRunFromOneChunk(c.px, grownBase, c.pz);
+                        dev.drakou111.sugarcane.world.ArrayWorld measured =
+                                orderedWorld != null ? orderedWorld : worker.world;
+                        int alone = measured.caneRunFromOneChunk(c.px, grownBase, c.pz);
                         if (alone < grown) {
                             trueCrossChunk.incrementAndGet();
                             recordCrossChunk(c, grown, alone, grownBase);
@@ -1279,6 +1312,11 @@ public final class CrossFind {
         }
         System.out.printf("  %d grew some cane, of which %d ran taller than any one chunk "
                         + "built%n", TALLY.grewSomething.get(), TALLY.trueCrossChunk.get());
+        if (TALLY.neededReorder.get() > 0) {
+            System.out.printf("  %d only stood up once chunk B decorated after chunk A, which "
+                    + "raster order does not do for four of the eight neighbours%n",
+                    TALLY.neededReorder.get());
+        }
         if (!TALLY.stopped.isEmpty()) {
             System.out.println("  where the predicted stack stops, first column with no cane:");
             TALLY.stopped.entrySet().stream()
