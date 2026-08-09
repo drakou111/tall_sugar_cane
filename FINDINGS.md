@@ -5344,3 +5344,53 @@ been taken at all.
 ocean's 23.9, and `DEFAULT_BASE_MAX_Y` is **35** — the band was tuned on ocean and clips almost
 exactly where these spots live. Any desert run wants it raised, or it will reject most of what it
 came for.
+
+### 6cc addendum: the scaling holds at four columns, measured
+
+Testing `q(60)/q(10)` at four columns directly is hopeless — `q(10)` at height 13 is around 2e-9,
+so pinning it wants 1e10 seeds. But the claim is about the *functional form*, and that can be
+tested among counts where q is large: if `q` goes as `C(N,C)`, then `q(N)/q(60) = C(N,C)/C(60,C)`
+for any N. Ratios between two measurable numbers rather than one measurable and one not.
+
+At height 13, the first height needing four columns, 20M seeds each:
+
+```
+  count   q          q/q(60) measured   C(N,4)/C(60,4)
+    30    3.0e-7       0.0556             0.0562
+    40    1.1e-6       0.2037             0.1874        (22 accepts, ~21% Poisson)
+    60    5.4e-6       1.0000             1.0000
+```
+
+So the form is now confirmed at **two, three and four columns**. Height 16 is also a four-column
+height, so the 2,322x multiplier for heights 13–16 rests on measurement rather than extrapolation.
+Five columns (height 17+) remains extrapolated: `q(60)` there is around 1e-8, so the ratio wants
+a few billion seeds per count, which is a GPU job rather than a CPU one.
+
+Directly at the height that would beat the record: **q(60, 16) = 2.0e-8** — one accept in 50M, so
+an order of magnitude and not a figure. Implied `q(10, 16)` is 8.6e-12, and per chunk searched:
+
+```
+  ocean         R 7.407e-4 x q 8.6e-12 = 6.4e-15
+  desert shore  R 3.632e-4 x q 2.0e-8  = 7.3e-12      1,139x
+```
+
+**That is 1,139x better than a very bad baseline, not an easy search.** 1.4e11 desert-shore chunks
+per height-16 find on those numbers, and `q` is `ChainPrefilter`'s loose upper bound — 6bz
+measured its precision at 32.7%, so the truth is roughly 3x worse again.
+
+### The part worth acting on: crossfind does not know about count 60
+
+Desert's feature index is **5, the same as ocean's**. Only the count differs. So the decoration
+seed, its salt, the lattice, the lift and the whole join machinery are untouched — `crossfind`
+hardcodes `SugarCaneFeature.COUNT_DEFAULT` and would need that one number changed, plus a biome
+gate that wants desert-with-ocean-nearby instead of ocean.
+
+The prize is large because joins go as the **product** of the two sides. At height 10 each side is
+307x more likely, so pairs are ~94,000x, against a terrain term of 0.49x. The offset is that both
+chunks must now be shoreline desert — roughly 0.5% of chunks each rather than ocean's 22% — but
+that is exactly what the sister sweep re-rolls, since the upper 16 bits move the biome map and
+nothing else.
+
+None of that is measured. It is a chain of estimates on top of a one-accept `q`, and it wants a
+real run before anyone believes the exponent. But it is the largest single lever this file has
+turned up, and it costs one constant and one biome predicate to test.
