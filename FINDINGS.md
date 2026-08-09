@@ -4867,3 +4867,103 @@ A find was reported when `grown >= predicted`, and `predicted` is `runA + runB`,
 least the target. So a candidate predicting 18 that grew 17 was filed as a failure -- discarding
 exactly the runs worth having. The bar is the target height now. It has cost nothing yet, because
 nothing has grown past 8, and it would have cost the first success.
+
+## 6bw: the water probe is a net loss, and the continuation factor is drifting down
+
+Water is 53% of chain A's second-column failures, and second-and-later columns carry the fourth
+power in `P(17)`. 6bh had judged `--water-probe` barely useful, but only ever at the bottom base,
+so its value higher up was untested. Tested now, same table, same `--sample-from`, `--no-grow` so
+both arms are pure streaming:
+
+```
+             positions  candidates  col 0  P(col 0)   positions/s
+  off           22,785     241,506     73  3.02e-04          11.8
+  on            12,648     134,516     42  3.12e-04           6.8
+
+  P(col 0)           1.03x   -- no effect at all
+  positions/s        0.57x   -- it trims 43%, exactly as 6bh measured
+  col 0 per second   0.60x   -- a net loss
+```
+
+**It stays off.** And the upper-column question it was meant to answer is still open, because
+neither arm put a single candidate past column 1.
+
+### An early reading that was wrong, again
+
+Mid-run I reported the "on" arm at 1.6x on P(col 0). That compared its *partial* count, 42 of
+87,838, against the "off" arm's *finished* one. By the end "on" had the same 42 over 134,516 and
+the rate had fallen to parity. Partial against complete is the same error as 6bg's kernel against
+a differently-configured filter and 6bn's water rate across sister counts: two numbers gathered
+under conditions that were not the same. Third time in a day.
+
+### The continuation factor is smaller than it looked
+
+Neither arm completed chain A -- 0 of 73 and 0 of 42. Pooled over every run that has measured it:
+
+```
+  39 / 782 = 5.0%      (6bs said 6.2% on 389, 6bn 7.4%, pooled 6.6% on 593)
+```
+
+It has moved down every time the sample has grown, which is what a handful of events does. With
+P(col 0) pooled at 1.54e-4 over 4.6M candidates:
+
+```
+  P(17 | candidate)   9.6e-10      (was 2.6e-9)
+```
+
+**2.7x worse than yesterday.** Nothing broke; the estimate simply had too few events under it, and
+the honest direction of travel today has been consistently downward.
+
+### What actually helped
+
+`--no-grow`, which is dull and measured. The two clever ideas this round -- larger lift batches and
+the water probe -- were both worse than the default, and both were argued from a model before being
+measured.
+
+## 6bx: half of every run was chains that cannot place
+
+`crossfind` has always run `maxBaseShift = 3`; the ranked filter uses 0, on 6ah's measurement that
+shift 0 holds 94.1% of real finds against 60.7% of the accepted set. Testing that directly means
+building a table at each setting, so instead the question was put to the pipeline as it stands:
+does a chain's assumed base shift predict its first column actually placing? Every candidate
+already carries the shift, so one ordinary run answers it.
+
+```
+  chain A's first column, by the base shift it assumed:
+    shift 0:  120,211 candidates,  44 placed   3.66e-04
+    shift 1:   82,178 candidates,   0 placed
+    shift 2:   40,066 candidates,   0 placed
+```
+
+**Every placement came from shift 0.** Across 122,244 shift>=1 candidates, where the shift-0 rate
+predicts 45, the count is zero -- so the two rates are certainly not equal (P(0) at the shift-0
+rate is 4e-20).
+
+**But "never places" overstates it, and contradicts 6ah.** Zero of 122,244 bounds the shift>=1 rate
+at 2.45e-5 with 95% confidence, which is 6.7% of shift 0's 3.66e-4 -- an enrichment of **at least
+15x**, not an impossibility. 6ah measured shift 0 holding 94.1% of real single-chunk finds, so 5.9%
+of finds do have base shift above 0; at that share this sample would expect 2.8 and seeing none has
+p = 0.06, which is unremarkable. The two measurements are compatible. Restricting to shift 0 may
+therefore cost up to ~6% of placements, which is worth the 2.02x and is not the free lunch the
+first reading of this made it sound.
+
+Which makes sense on reflection and should have been predicted. A chain at shift s assumes s
+earlier successful cane placements in its own chunk before its own first column. Cane runs about
+one column per thousand chunks, so assuming even one prior success is assuming something that
+mostly does not happen -- and the chain's geometry is derived under that assumption, so when it
+fails the draws never line up.
+
+**50.4% of every run so far has been spent on chains that place at most a fifteenth as often.**
+`--max-shift` now defaults to 0, worth 2.02x on chain A alone and plausibly ~4x once chain B is
+included, against a coverage cost bounded at ~6%.
+
+The evidence is chain A's; chain B is inferred from the same mechanism rather than measured,
+because reaching chain B is rare -- six candidates in this run. `--max-shift` can raise it if that
+inference ever needs testing.
+
+### The method is the transferable part
+
+The water probe took two full arms and an hour of runtime to say "no effect". This took one
+ordinary run, because it instrumented the mechanism instead of A/B-testing the wrapper. Every
+question of the form "would restricting X help" can be asked that way, by recording X alongside
+the outcome and reading the conditional -- no rebuild, no second arm, and a much sharper answer.

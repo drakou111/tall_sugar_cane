@@ -146,8 +146,18 @@ public final class CrossFind {
      * <p>The histogram says the same thing from the other end: 41% of chain A's second-column
      * failures are PLACEABLE_BUT_EMPTY, terrain willing and the placement absent, which is
      * exactly a shift assumption that did not hold.
+     *
+     * <p><b>Measured, and it is not a tendency but a wall</b> (FINDINGS 6bx). Over 242,455
+     * candidates, every one of the 44 first columns that placed came from a shift-0 chain;
+     * shift 1 and 2 placed nothing at all across 122,244 candidates where the shift-0 rate
+     * predicts 45. So half of every run was being spent on chains that cannot place, and 0 is
+     * the default.
+     *
+     * <p>The evidence is chain A's. Chain B is inferred from the same mechanism rather than
+     * measured, because reaching chain B at all is rare -- six candidates in that run. Raise it
+     * with {@code --max-shift} if that inference ever needs testing.
      */
-    private static int maxBaseShift = 3;
+    private static int maxBaseShift = 0;
 
     /** Chains that END here keep the depth band: the bottom column stands on soil. */
     private static ChainPrefilter endingFilter() {
@@ -217,6 +227,35 @@ public final class CrossFind {
         final AtomicLong soilWasWater = new AtomicLong();
         final AtomicLong grewSomething = new AtomicLong();
         final AtomicLong trueCrossChunk = new AtomicLong();
+        /**
+         * Whether a chain's assumed base shift predicts its first column actually placing.
+         * The ranked filter caps shift at 0 on 6ah's measurement -- 94.1% of real finds against
+         * 60.7% of the set -- and crossfind has always run 3. Measuring it settles --max-shift
+         * without rebuilding a table at each setting to find out.
+         */
+        final AtomicLong[] shiftSeen = new AtomicLong[4];
+        final AtomicLong[] shiftPlaced = new AtomicLong[4];
+        /**
+         * The same question one level up. A chain's own placements consume shift levels -- its
+         * second column necessarily sits at least one above its first -- so what matters is the
+         * SLACK: how many foreign placements the chain assumes land between its own columns.
+         * Slack 0 is `ReverseSearcher`'s contiguous window (6ao), which crossfind has never
+         * applied. Indexed by slack, counted where column 0 placed, so the conditional is
+         * "given the chain got started, did the slack it assumed predict it continuing".
+         */
+        final AtomicLong[] slackSeen = new AtomicLong[8];
+        final AtomicLong[] slackContinued = new AtomicLong[8];
+
+        Tally() {
+            for (int i = 0; i < 4; i++) {
+                shiftSeen[i] = new AtomicLong();
+                shiftPlaced[i] = new AtomicLong();
+            }
+            for (int i = 0; i < 8; i++) {
+                slackSeen[i] = new AtomicLong();
+                slackContinued[i] = new AtomicLong();
+            }
+        }
         final AtomicLong generated = new AtomicLong();
         final java.util.concurrent.ConcurrentHashMap<String, AtomicLong> stopped =
                 new java.util.concurrent.ConcurrentHashMap<>();
@@ -1060,6 +1099,29 @@ public final class CrossFind {
                         done.incrementAndGet();
                     }
                     tallest.accumulateAndGet(grown, Math::max);
+                    int shift = ChainPrefilter.chainBaseShift(c.chainA());
+                    boolean col0Grew = fateOf(worker.world, c.px, c.pz,
+                            ChainPrefilter.chainBaseY(c.chainA(), 0)) == ColumnFate.GREW;
+                    if (shift >= 0 && shift < 4) {
+                        TALLY.shiftSeen[shift].incrementAndGet();
+                        if (col0Grew) {
+                            TALLY.shiftPlaced[shift].incrementAndGet();
+                        }
+                    }
+                    if (col0Grew) {
+                        // Foreign placements the chain assumes between its own columns: its
+                        // own contribute one level each, so anything above that is slack.
+                        int cols = ChainPrefilter.chainColumns(c.chainA());
+                        int slack = ChainPrefilter.chainMaxShift(c.chainA())
+                                - ChainPrefilter.chainBaseShift(c.chainA()) - (cols - 1);
+                        if (slack >= 0 && slack < 8) {
+                            TALLY.slackSeen[slack].incrementAndGet();
+                            if (cols > 1 && fateOf(worker.world, c.px, c.pz,
+                                    ChainPrefilter.chainBaseY(c.chainA(), 1)) == ColumnFate.GREW) {
+                                TALLY.slackContinued[slack].incrementAndGet();
+                            }
+                        }
+                    }
                     if (grown > 0) {
                         grewSomething.incrementAndGet();
                         // A run taller than any one chunk built is the thing this command is
@@ -1224,6 +1286,30 @@ public final class CrossFind {
                     .limit(12)
                     .forEach(e -> System.out.printf("    %-32s %d%n", e.getKey(),
                             e.getValue().get()));
+        }
+        System.out.println("  chain A's first column, by the base shift it assumed:");
+        for (int i = 0; i < 4; i++) {
+            long seen = TALLY.shiftSeen[i].get();
+            if (seen > 0) {
+                System.out.printf("    shift %d: %,12d candidates, %5d placed  (%.2e)%n",
+                        i, seen, TALLY.shiftPlaced[i].get(),
+                        TALLY.shiftPlaced[i].get() / (double) seen);
+            }
+        }
+        boolean anySlack = false;
+        for (int i = 0; i < 8; i++) {
+            anySlack |= TALLY.slackSeen[i].get() > 0;
+        }
+        if (anySlack) {
+            System.out.println("  of the chains that started, by the foreign placements they "
+                    + "assume between their own columns:");
+            for (int i = 0; i < 8; i++) {
+                long seen = TALLY.slackSeen[i].get();
+                if (seen > 0) {
+                    System.out.printf("    slack %d: %,7d started, %4d continued to column 1%n",
+                            i, seen, TALLY.slackContinued[i].get());
+                }
+            }
         }
         System.out.printf("  at chunk A's bottom base: not air %d, air but no soil under it %d, "
                         + "soil but no water beside %d, placeable and the RNG still did not %d%n",
