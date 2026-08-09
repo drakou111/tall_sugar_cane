@@ -5186,3 +5186,67 @@ unreachable at any k. Recorded because the 4.3x is tempting and the trade is not
 
 Joins go as `rate1 x t1 x rate2 x t2`, so a 6.6x in one half is **sqrt(6.6) ~ 2.6x** on wall clock
 for equal joins, not 6.6x. That is the honest end-to-end figure.
+
+## 6cb: nextInt(16) is a shift, and for height 20 the bottleneck has moved
+
+Two more files from the collaborator, `rng.cuh` and `speeeed.cu`.
+
+`rng.cuh` holds a **correct** `next_int` — power-of-two branch *and* rejection loop. So the
+`nextIntFast` that 6by flagged was a choice in that kernel, not a missing implementation.
+
+`speeeed.cu` is a different search: brute force over the upper 44 bits of a decoration seed with
+the low nibble pinned, hunting one fixed position. Its transferable idea is gating on the **dirt
+blob before the cane walk** — 3 draws to reject against up to 1,230 to walk. Not liftable into
+crossfind as it stands: 6bf established that asking only the decorating chunk's blob loses 18% of
+coverage, and crossfind can only ask the neighbours once the lift has given it a world seed.
+Worth revisiting if the pipeline ever gains a decoration-seed-space terrain gate.
+
+Two things in it are worth the author's eye: `run_check` builds `dirt_offset_x` and
+`dirt_offset_y` as ranges but tests `dirt_dz == 0` on the raw value, and `get_dirt` reads only the
+first blob and approximates its shape with a box. The salt and draw order agree with
+`DirtBlobFilter` exactly (`setFeatureSeed(ds, 0, 6)`, then `nextInt(16)` x, `nextInt(16)` z,
+`nextInt(256)` y), so the mechanism is agreed; theirs is a narrower slice of it.
+
+### The one extractable speedup: `rand4 >> 44`
+
+`nextInt(16)` takes the power-of-two path, `(16 * next31) >> 31`, which is `next31 >> 27`; and
+`next31` is the post-draw state `>> 17`. The two shifts collapse: **`nextInt(16)` is just
+`postDraw >> 44`**, no multiply at all. Walking backwards hands us those post-draw states
+directly, so the chunk origin never has to be reconstructed. Five multiply-adds down to two per
+state, and the `M3` step disappears from both walks.
+
+Worth **1.02x**. Recorded because the idea is better than the measurement: it is free, it is
+lossless, and it removes a whole class of "reconstruct the origin" code. Moving the origin
+computation *after* the continuation gate, so the three quarters of states the gate rejects never
+pay for it at all, is folded into the same change.
+
+> Beware absolute timings across this session. The same binary measured 16.5 s and 9.6 s on the
+> same sweep an hour apart — the card was thermally loaded from back-to-back sweeps. Every ratio
+> quoted here was measured with the two binaries interleaved in one loop, which survives that;
+> absolute rates should be re-taken on a cold card before being quoted.
+
+### For height 20, chain production is no longer the constraint
+
+Measured, target 20 (split 8+12, storing the beginning side at min 12):
+
+  - chains: **84 per unit of `lows`**, **1.25 s per unit**, over the full k range
+  - pass 2 streams **13.5M seeds/s**
+  - joins scale as **8.96e-10 x chains x seeds** (17,330 joins from 9,668 chains and 2e9 seeds)
+  - about 55% of joins land inside the border and become candidates
+
+Put those together and `--max-candidates`, default 4,000,000, is reached at
+`chains x seeds = 8.1e15`. A balanced 18-hour run would be **118x past that**. Even a 20-minute
+table and a few hours of streaming saturates it.
+
+**So the enumerator has moved the bottleneck.** Pass 1 was the expensive half; it is now minutes,
+and the run is limited by how many candidates can be held and verified. The lever that matters
+for height 20 is `--max-candidates` and the verification behind it, not chain production — which
+is worth knowing before spending another day making pass 1 faster.
+
+### A trap in --no-grow that this exposed
+
+`--no-grow` skips pass 1, so the table is never rewritten, so its ranges never advance — and the
+next run's start comes from `nextFrom()` over those ranges. **Repeated `--no-grow` runs therefore
+stream the identical sample slice every time.** It is consistent with the flag's contract (it must
+not claim ground it did not cover) but it means a streaming campaign has to pass `--sample-from`
+explicitly, or spend every night redoing the first one.

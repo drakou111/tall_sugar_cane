@@ -234,9 +234,9 @@ __device__ void expand(uint64_t afterY, int finalX, int finalY, int finalZ,
                 yState = SKIP(yState, P123);
                 continue;
             }
-            uint64_t origin = SKIP(yState, M3);
-            int baseX = nextIntOf(origin, 16);
-            int baseZ = nextIntOf(SKIP(origin, P1), 16);
+            /* postDraw >> 44 again, so the origin itself is never reconstructed */
+            int baseX = (int) (SKIP(yState, M2) >> 44);
+            int baseZ = (int) (SKIP(yState, M1) >> 44);
             uint64_t s = yState;              /* the tries begin here, 3 draws past the origin */
             bool placed = false;
             for (int t = 0; t < TRIES; t++) {
@@ -272,9 +272,8 @@ __device__ void expand(uint64_t afterY, int finalX, int finalY, int finalZ,
                 yState = SKIP(yState, M123);
                 continue;
             }
-            uint64_t atOrigin = SKIP(yState, M3);
-            int baseX = nextIntOf(atOrigin, 16);
-            int baseZ = nextIntOf(SKIP(atOrigin, P1), 16);
+            int baseX = (int) (SKIP(yState, M2) >> 44);
+            int baseZ = (int) (SKIP(yState, M1) >> 44);
             uint64_t q = yState;              /* origin + 3 draws: exactly where the tries begin */
             bool placed = false;
             for (int t = 0; t < TRIES; t++) {
@@ -375,17 +374,23 @@ __global__ void enumerate(unsigned long long kOffset, unsigned long long kCount,
          */
         uint64_t afterY = ((upper31 << 17) | ((low * 81001ULL) & 0x1FFFFULL)) & MASK48;
 
-        /* origin x and z sit one and two draws before the y draw */
-        uint64_t s1 = SKIP(afterY, M1);
-        int baseZ = nextIntOf(SKIP(s1, M1), 16);
-        int baseX = nextIntOf(SKIP(SKIP(s1, M1), M1), 16);
-
         // Nothing can stack on this invocation's y, so none of its twenty tries can start a
-        // chain and the whole state is dead. Independent of the try, hence hoisted here.
+        // chain and the whole state is dead. Independent of the try, hence hoisted here -- and
+        // ahead of the origin below, which three quarters of states now never pay for.
         int mask = continuationMask(afterY, wantY);
         if (mask == 0) {
             continue;
         }
+        /*
+         * The origin's x and z, one and two draws back, with no multiply beyond the step.
+         *
+         * nextInt(16) takes the power-of-two path, (16 * next31) >> 31, which is next31 >> 27;
+         * and next31 is itself the post-draw state >> 17. The two shifts collapse into one, and
+         * walking backwards hands us exactly those post-draw states. Lifted from the original
+         * kernel, which spells it `rand4 >> 44` -- five multiply-adds down to two.
+         */
+        int baseZ = (int) (SKIP(afterY, M1) >> 44);
+        int baseX = (int) (SKIP(afterY, M2) >> 44);
         uint64_t state = afterY;
         for (int t = 0; t < TRIES; t++) {
             uint64_t jitter = state;
