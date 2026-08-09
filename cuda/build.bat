@@ -50,8 +50,9 @@ if errorlevel 1 (
 )
 
 REM The state enumerator. Constructs the states that yield a wanted y instead of scanning
-REM decoration seeds for it: 415 confirmed chains/s at height 10 against the chain scan's ~107,
-REM and every hit is a real chain where the scan's are a third real.
+REM decoration seeds for it: 871 confirmed chains/s at height 10, and 621 chains stored per
+REM second through crossfind's pass 1 against the seed scan's 94. Every hit is a real chain
+REM where the scan's are a third real.
 nvcc -O3 -Wno-deprecated-gpu-targets %ARCHS% ^
   -o "%~dp0stack_enum.exe" "%~dp0stack_enum.cu"
 

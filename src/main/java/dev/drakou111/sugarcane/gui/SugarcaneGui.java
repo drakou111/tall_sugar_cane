@@ -665,7 +665,7 @@ public final class SugarcaneGui {
                 + "Pool the results in the crossmerge tab");
         JCheckBox useEnum = f.check("--enum", "fill pass 1 by CONSTRUCTING the RNG states that "
                 + "yield a wanted y, instead of scanning decoration seeds hoping to find one. "
-                + "415 confirmed chains/s at height 10 against roughly 107 for the scan -- and "
+                + "621 chains stored per second at height 10 against the scan's 94 -- and "
                 + "more importantly every chain it returns is real, where a third of the scan's "
                 + "are, which compounds because joins go as the SQUARE of the table size. "
                 + "Pass 1 only, that being the rarer and dearer side. Needs a GPU");

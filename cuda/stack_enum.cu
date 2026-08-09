@@ -14,13 +14,13 @@
  * downstream, so a default sweep sees 6.1e-5 of the states in its y band. Raising `lows` to
  * 131072 does cover the band exhaustively, at 16,384x the time.
  *
- * Measured at height 10 over the full k range: 415 confirmed chains/s, 309 with the edge filter.
- * The seed-scanning route it replaces lands around 107/s -- q is 1.088e-5 by direct count over
- * 200M seeds, only 32.7% of those accepts are real chains, and the kernel rate is interpolated
- * from FINDINGS' measured 2.02e7 seeds/s at min 8 and 4.15e7 at min 12. So call it ~4x on rate,
- * and every hit here is real where the scan's are a third real: its shift levels grant chains
- * that need an unrelated placement elsewhere in the chunk. Since joins go as the square of the
- * candidate count, that precision compounds downstream.
+ * Measured at height 10 over the full k range, edge filter on: 871 confirmed chains/s. Driven
+ * through crossfind's pass 1, which adds the CPU geometry step, that is 621 chains stored per
+ * second against the seed scan's 94 -- 6.6x, on the same card and the same command.
+ *
+ * Every hit here is a real chain where 32.7% of the scan's accepts are, its shift levels
+ * granting chains that need an unrelated placement elsewhere in the chunk. Since joins go as the
+ * square of the candidate count, that precision compounds downstream.
  *
  * The scan also caps a chain at its shift-level count -- four levels stop at height 16, and a
  * fifth halves its throughput -- where this tracks placements exactly and has no cap. The gap
@@ -62,6 +62,8 @@
 #define ADD_P6 0x17617168255EULL
 #define MUL_P120 0x6EE5EEC36E1ULL
 #define ADD_P120 0x9C4720814738ULL
+#define MUL_P122 0xDC4F1674C49ULL
+#define ADD_P122 0xC6400AFC4CB2ULL
 #define MUL_P123 0x6A8C38D11115ULL
 #define ADD_P123 0x5DB66A6C93D5ULL
 #define MUL_P125 0xF5C4A44AD39DULL
@@ -146,13 +148,53 @@ __device__ int runAt(uint64_t decorationSeed, int rootX, int rootY, int rootZ) {
 }
 
 /*
+ * Could ANY neighbouring invocation extend a 4-tall column at this y, in either direction?
+ *
+ * Cheap for the same reason the walks are: the cursor sits on each invocation's post-y state, so
+ * a test is one shift, one modulo and one multiply-add. It depends only on the state and the y,
+ * not on which try landed where, so it is paid once per state instead of once per surviving try.
+ *
+ * LOSSLESS, which is the whole point of testing both directions. A chain's first contribution in
+ * a given direction happens before any placement in that direction, so the no-placement offsets
+ * used here are exactly the offsets the walk would use to find it. The forward-only version --
+ * which is what the original kernel had -- is 4.3x rather than 2.1x, but it cannot see a chain
+ * whose single 4-tall column is its topmost, and that was measured at a flat 40.6% of chains at
+ * both height 10 and 12. Trading 40% of the population for 1.24x more throughput is a bad deal
+ * when the search covers 6.1e-5 of the space and the loss is systematic rather than sampled.
+ */
+#define UP_BIT 1
+#define DOWN_BIT 2
+
+__device__ __forceinline__ int continuationMask(uint64_t afterY, int y) {
+    uint64_t up = SKIP(afterY, P125);
+    uint64_t down = SKIP(afterY, M125);
+    int wantUp = y + 4;                    /* the anchor is 4 tall, so the next starts here */
+    int mask = 0;
+    /* No early exit: both bits are wanted, and a straight-line 9 unrolls without divergence. */
+    #pragma unroll
+    for (int i = 0; i < 9; i++) {
+        if ((int) ((up >> 17) % Y_BOUND) == wantUp) {
+            mask |= UP_BIT;
+        }
+        /* below: some column of height 2..4 whose top is exactly this base */
+        int d = (int) ((down >> 17) % Y_BOUND);
+        if (d + 4 >= y && d + 2 <= y) {
+            mask |= DOWN_BIT;
+        }
+        up = SKIP(up, P123);
+        down = SKIP(down, M123);
+    }
+    return mask;
+}
+
+/*
  * One state, assumed to be an invocation's post-y draw with a placement in this invocation.
  * Walks the neighbouring invocations both ways, filling the height each would contribute at the
  * same column, then slides a 10-wide window -- the chunk's real invocation count -- over the
  * table to find any alignment whose total reaches the target.
  */
 __device__ void expand(uint64_t afterY, int finalX, int finalY, int finalZ,
-                       int placedHeight, int target, Hit *out, unsigned int *count,
+                       int placedHeight, int target, int mask, Hit *out, unsigned int *count,
                        unsigned int cap) {
     /*
      * The contribution table lives in one register, three bits per slot.
@@ -166,25 +208,36 @@ __device__ void expand(uint64_t afterY, int finalX, int finalY, int finalZ,
     uint64_t added = (uint64_t) placedHeight << (3 * 9);
 
     /* forwards: invocations after this one, stacking upward */
-    {
+    if (mask & UP_BIT) {
         int targetY = finalY + placedHeight;
-        uint64_t state = SKIP(afterY, P125);       /* 123 for the invocation, 2 for the placement */
+        /*
+         * The cursor sits on the state AFTER each invocation's y draw, not on its origin.
+         *
+         * That is what makes the reject path cheap: y is then just (cursor >> 17) % 126, one
+         * shift and one modulo, where holding the origin costs SKIP(P2) + next31 + SKIP(P123)
+         * -- three 64-bit multiplies to answer the same question. This walk is 94% of the
+         * kernel and 125 invocations in 126 answer "no", so it is the whole cost.
+         *
+         * It also fixes an off-by-three. The next origin is 123 + 2 draws from THIS origin, but
+         * only 122 from afterY, which is already 3 draws in. The old code reasoned the distance
+         * from the origin and applied it to afterY, so the forward walk read the wrong draws
+         * and almost never found a continuation. Nothing looked wrong: every candidate is
+         * confirmed by runAt before it is emitted, so a broken walk loses recall in silence --
+         * measured at 2.27x the chains once corrected. In this form the arithmetic is the
+         * identity afterY + 125 = the next invocation's post-y state, with nothing to get
+         * backwards, which is also how the backward walk below was right all along.
+         */
+        uint64_t yState = SKIP(afterY, P125);
         for (int idx = 10; idx < 19; idx++) {
-            /*
-             * y first, origin second. The y test rejects 125 invocations in 126, and baseX and
-             * baseZ are worthless when it does -- reading them up front spent three next31 per
-             * invocation to use one. This walk is 94% of the kernel (1.8 s without it against
-             * 27.3 s with), so the order is the whole cost.
-             */
-            uint64_t s = SKIP(state, P2);
-            int y = nextIntOf(s, Y_BOUND);
+            int y = (int) ((yState >> 17) % Y_BOUND);
             if (y != targetY) {
-                state = SKIP(state, P123);
+                yState = SKIP(yState, P123);
                 continue;
             }
-            int baseX = nextIntOf(state, 16);
-            int baseZ = nextIntOf(SKIP(state, P1), 16);
-            s = SKIP(s, P1);
+            uint64_t origin = SKIP(yState, M3);
+            int baseX = nextIntOf(origin, 16);
+            int baseZ = nextIntOf(SKIP(origin, P1), 16);
+            uint64_t s = yState;              /* the tries begin here, 3 draws past the origin */
             bool placed = false;
             for (int t = 0; t < TRIES; t++) {
                 int px = baseX + nextIntOf(s, 5);
@@ -203,26 +256,26 @@ __device__ void expand(uint64_t afterY, int finalX, int finalY, int finalZ,
                 }
             }
             /* SKIP pastes its argument as a token, so the branch cannot live inside it. */
-            state = placed ? SKIP(state, P125) : SKIP(state, P123);
+            yState = placed ? SKIP(yState, P125) : SKIP(yState, P123);
         }
     }
 
     /* backwards: invocations before it, which built what we landed on */
-    {
+    if (mask & DOWN_BIT) {
         int targetY = finalY;
-        uint64_t state = SKIP(afterY, M125);
+        /* Already on the post-y state -- this walk was written in terms of the previous
+         * invocation's afterY, which is why it never had the forward walk's off-by-three. */
+        uint64_t yState = SKIP(afterY, M125);
         for (int idx = 8; idx >= 0; idx--) {
-            /* Same reordering as the forward walk, and here the y draw sits one step back from
-             * the cursor, so the origin is only reconstructed on the 3-in-126 that survive. */
-            int y = nextIntOf(SKIP(state, M1), Y_BOUND);
+            int y = (int) ((yState >> 17) % Y_BOUND);
             if (y + 4 < targetY || y + 2 > targetY) {
-                state = SKIP(state, M123);
+                yState = SKIP(yState, M123);
                 continue;
             }
-            uint64_t atOrigin = SKIP(state, M3);
+            uint64_t atOrigin = SKIP(yState, M3);
             int baseX = nextIntOf(atOrigin, 16);
             int baseZ = nextIntOf(SKIP(atOrigin, P1), 16);
-            uint64_t q = state;               /* origin + 3 draws: exactly where the tries begin */
+            uint64_t q = yState;              /* origin + 3 draws: exactly where the tries begin */
             bool placed = false;
             for (int t = 0; t < TRIES; t++) {
                 int px = baseX + nextIntOf(q, 5);
@@ -242,7 +295,7 @@ __device__ void expand(uint64_t afterY, int finalX, int finalY, int finalZ,
                     }
                 }
             }
-            state = placed ? SKIP(state, M125) : SKIP(state, M123);
+            yState = placed ? SKIP(yState, M125) : SKIP(yState, M123);
         }
     }
 
@@ -327,6 +380,12 @@ __global__ void enumerate(unsigned long long kOffset, unsigned long long kCount,
         int baseZ = nextIntOf(SKIP(s1, M1), 16);
         int baseX = nextIntOf(SKIP(SKIP(s1, M1), M1), 16);
 
+        // Nothing can stack on this invocation's y, so none of its twenty tries can start a
+        // chain and the whole state is dead. Independent of the try, hence hoisted here.
+        int mask = continuationMask(afterY, wantY);
+        if (mask == 0) {
+            continue;
+        }
         uint64_t state = afterY;
         for (int t = 0; t < TRIES; t++) {
             uint64_t jitter = state;
@@ -353,7 +412,7 @@ __global__ void enumerate(unsigned long long kOffset, unsigned long long kCount,
             if (edgeOnly && px >= 4 && px <= 11 && pz >= 4 && pz <= 11) {
                 continue;
             }
-            expand(afterY, px, wantY, pz, 4, target, out, count, cap);
+            expand(afterY, px, wantY, pz, 4, target, mask, out, count, cap);
         }
     }
 }

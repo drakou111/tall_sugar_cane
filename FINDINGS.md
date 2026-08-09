@@ -5117,3 +5117,72 @@ each time.
 Whether the precision advantage (every chain real, against a third of the scan's) shows up as
 finds rather than joins. Joins are cheap to count and finds are not; nothing here ran long enough
 to produce one.
+
+## 6ca: the forward walk had been reading the wrong draws since it was written
+
+Auditing my transcription against the collaborator's original found their forward walk starting at
+`javaLcgSkip<122>` where mine used `P125`. Theirs is right.
+
+`afterY` sits **three draws into** its invocation, past x, z and y. The next invocation's origin
+is 123 + 2 draws from *this* invocation's origin — but only 122 from `afterY`. I reasoned the
+distance from the origin and applied it to `afterY`.
+
+**Nothing looked wrong.** Every candidate is confirmed by `runAt` before it is emitted, so a walk
+reading three draws off does not produce a single false hit — it just stops finding things. The
+kernel agreed with the Java oracle on 531,797 hits while the entire forward direction was dead;
+the oracle only validates what is emitted, never what was missed. Every chain the search had ever
+returned was found by the backward walk alone, which was written in terms of the previous
+invocation's `afterY` and so never had the bug.
+
+Corrected, at height 10 over the full k range: **6,304 hits → 14,538, 2.31x.** Confirmed against
+the oracle, 716,295 hits and no mismatches.
+
+> A silent-recall bug is the failure mode this project keeps meeting — 6bb's wrong solver, 6bc's
+> sign extension, 6bu's phantom stacks. The pattern: a verifier that checks output cannot see a
+> producer that under-produces. Nothing here would have caught this except reading the two
+> implementations side by side.
+
+### Cursor on the y draw, not the origin
+
+Their walk holds each invocation's **post-y state**, so testing y is `(cursor >> 17) % 126` — one
+shift, one modulo. Holding the origin, as mine did, costs `SKIP(P2)` + `next31` + `SKIP(P123)`:
+three 64-bit multiplies for the same answer, on a path 125 invocations in 126 take. Restructured,
+identical hits, **1.09x** — less than the arithmetic suggests, since nvcc had already found some
+of it. It also makes the off-by-three above unstateable: the identity is `afterY + 125 = the next
+invocation's post-y state`, with nothing to get backwards.
+
+### The prefilter, and why the original's version is the wrong trade
+
+Theirs gates on "does any of the next 9 invocations draw y == anchor+4", before the expensive
+walk. Hoisted out of the try loop — it depends only on the state and the y — it is **4.3x**.
+
+It is also forward-only, so it cannot see a chain whose single 4-tall column is its topmost.
+Measured: **40.6% of chains lost, flat at both height 10 and 12** (14,538 → 8,642; 675 → 403). I
+had expected the loss to shrink as targets rose, since a taller chain has more 4-tall columns to
+anchor on. It does not, at least not by 12.
+
+Testing **both directions** is lossless — a chain's first contribution in a direction happens
+before any placement in that direction, so the no-placement offsets are exactly the ones the walk
+would use — and it is only **1.28x**, because expand's cost is dominated by invocations that
+*match*, which is precisely what the gate selects for. A lossless gate can only skip the cheap
+states. Carrying the two direction bits into the walk, so each side is skipped when it provably
+finds nothing, recovers a little of the difference.
+
+**1.28x lossless beats 4.3x for 40% of the population** when the search covers 6.1e-5 of the space
+and the loss is systematic rather than sampled — those chains are not deferred, they are
+unreachable at any k. Recorded because the 4.3x is tempting and the trade is not obvious.
+
+### Where that leaves it
+
+```
+                       pass 1 chains   pass 1 time   chains/s   joins    total
+  scan                     2,227          23.8 s         94     2,412    59.0 s
+  --enum, before 6ca       1,803           7.6 s        237     3,293    35.4 s
+  --enum, now              4,532           7.3 s        621     8,465    39.2 s
+```
+
+**6.6x on pass 1 against the scan**, up from 2.2x. Joins are noisy — the scan produced 3,141 and
+2,412 on two runs of the same command — so read the joins column as "clearly more", not as 3.5x.
+
+Joins go as `rate1 x t1 x rate2 x t2`, so a 6.6x in one half is **sqrt(6.6) ~ 2.6x** on wall clock
+for equal joins, not 6.6x. That is the honest end-to-end figure.

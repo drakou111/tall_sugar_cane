@@ -18,14 +18,14 @@ import java.util.List;
  * seed holds. This constructs the states that yield a wanted y instead, so the y costs nothing
  * and most states die two draws later on the height check.
  *
- * <p><b>Measured at height 10</b> over the full k range: <b>415 confirmed chains/s</b>, 309 with
- * the edge filter on. The seed-scanning route it replaces lands around 107/s — q is 1.088e-5 by
- * direct count over 200M seeds, only 32.7% of those accepts are real chains, and the kernel rate
- * is interpolated from FINDINGS' measured 2.02e7 seeds/s at min 8 and 4.15e7 at min 12 rather
- * than measured at min 10. So roughly 4x on rate, and the rate is the smaller half of it: every
- * hit here is a real chain where the scan's are a third real, its shift levels granting chains
- * that need an unrelated placement elsewhere in the chunk. Since joins go as the square of the
- * candidate count, that precision compounds downstream.
+ * <p><b>Measured at height 10</b> over the full k range with the edge filter on: <b>871
+ * confirmed chains/s</b>. Driven through {@code crossfind}'s pass 1, which adds the CPU geometry
+ * step, that is <b>621 chains stored per second against the seed scan's 94</b> — 6.6x, same card,
+ * same command one flag apart.
+ *
+ * <p>Rate is the smaller half of it. Every hit here is a real chain where 32.7% of the scan's
+ * accepts are, its shift levels granting chains that need an unrelated placement elsewhere in the
+ * chunk. Since joins go as the square of the candidate count, that precision compounds.
  *
  * <p>The scan also caps a chain at its shift-level count — four levels stop at height 16, and a
  * fifth halves its throughput — where this tracks placements exactly and has no cap. So the gap
