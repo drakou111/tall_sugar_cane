@@ -135,9 +135,25 @@ public final class CrossFind {
         return ChainPrefilter.chainTop(chain) - ChainPrefilter.chainBaseY(chain, 0);
     }
 
+    /**
+     * How many earlier placements a chain's first column may assume.
+     *
+     * <p>3 is unrestricted for four shift levels and is what this command has always used.
+     * `ReverseSearcher`'s ranked filter uses 0, because 6ah measured shift 0 holding 94.1% of
+     * real finds against 60.7% of the accepted set — a chain assuming three prior successes in
+     * its own chunk is assuming something that mostly does not happen.
+     *
+     * <p>The histogram says the same thing from the other end: 41% of chain A's second-column
+     * failures are PLACEABLE_BUT_EMPTY, terrain willing and the placement absent, which is
+     * exactly a shift assumption that did not hold.
+     */
+    private static int maxBaseShift = 3;
+
     /** Chains that END here keep the depth band: the bottom column stands on soil. */
     private static ChainPrefilter endingFilter() {
-        return new ChainPrefilter(SugarCaneFeature.COUNT_DEFAULT);
+        return new ChainPrefilter(SugarCaneFeature.COUNT_DEFAULT,
+                ChainPrefilter.DEFAULT_BASE_MIN_Y, ChainPrefilter.DEFAULT_BASE_MAX_Y,
+                maxBaseShift, 4);
     }
 
     /**
@@ -146,7 +162,7 @@ public final class CrossFind {
      * construction. This was the bug in the first cross-chunk measurement.
      */
     private static ChainPrefilter beginningFilter() {
-        return new ChainPrefilter(SugarCaneFeature.COUNT_DEFAULT, 11, 64, 3, 4);
+        return new ChainPrefilter(SugarCaneFeature.COUNT_DEFAULT, 11, 64, maxBaseShift, 4);
     }
 
     /**
@@ -414,6 +430,7 @@ public final class CrossFind {
         String tablePath = null;
         String outPath = null;
         long sampleFrom = -1L;
+        boolean noGrow = false;
         int candidateCap = DEFAULT_MAX_CANDIDATES;
         boolean water = false;
         boolean floor = false;
@@ -432,6 +449,10 @@ public final class CrossFind {
                 maxStore = Integer.parseInt(arg.substring(12));
             } else if (arg.equals("--water-probe")) {
                 water = true;
+            } else if (arg.startsWith("--max-shift=")) {
+                maxBaseShift = Integer.parseInt(arg.substring(12));
+            } else if (arg.equals("--no-grow")) {
+                noGrow = true;
             } else if (arg.equals("--floor")) {
                 floor = true;
             } else if (arg.equals("--cpu")) {
@@ -574,7 +595,21 @@ public final class CrossFind {
         final Hits[] collected = new Hits[threads];
         AtomicLong nextRun = new AtomicLong();
         AtomicLong stored = new AtomicLong();
-        final long[] accepted1 = gpu == null ? null
+        // --no-grow: the table is the expensive half only while it is small. Once it holds
+        // millions of chains the marginal one is worth far less than the streaming time spent
+        // making it -- joins go as |table| x streamed, so with the table fixed, joins go as
+        // streamed alone. The last run spent 44% of its wall clock in pass 1 to grow a 1.8M
+        // table to 4.9M, which is time that could have been streaming against 4.9M throughout.
+        final boolean skipPass1 = noGrow && prior != null;
+        if (noGrow && prior == null) {
+            System.err.println("--no-grow needs a --table that already has chains in it");
+            return;
+        }
+        if (skipPass1) {
+            System.out.printf("  --no-grow: skipping pass 1, streaming against the %d chains "
+                    + "already in the table%n", prior.keys().length);
+        }
+        final long[] accepted1 = (gpu == null || skipPass1) ? null
                 : gpuEpoch(gpu, storedMin, storeEndings, scanFrom, seeds);
         final AtomicLong cursor1 = new AtomicLong();
         if (accepted1 != null) {
@@ -582,7 +617,7 @@ public final class CrossFind {
                     accepted1.length, seeds, 100.0 * accepted1.length / seeds);
         }
         Thread[] pool = new Thread[threads];
-        for (int t = 0; t < threads; t++) {
+        for (int t = 0; skipPass1 ? false : t < threads; t++) {
             final int id = t;
             final int cap = maxStore;
             pool[t] = new Thread(() -> {
@@ -641,7 +676,7 @@ public final class CrossFind {
 
         // Written before pass 2, which is the long half: a run killed there still leaves its
         // pass 1 banked, which is the whole point of having the file.
-        if (table != null) {
+        if (table != null && !skipPass1) {
             int[] flatKeys = new int[(int) total];
             long[] flatSeeds = new long[(int) total];
             int at2 = 0;
