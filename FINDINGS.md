@@ -5187,7 +5187,7 @@ unreachable at any k. Recorded because the 4.3x is tempting and the trade is not
 Joins go as `rate1 x t1 x rate2 x t2`, so a 6.6x in one half is **sqrt(6.6) ~ 2.6x** on wall clock
 for equal joins, not 6.6x. That is the honest end-to-end figure.
 
-## 6cb: nextInt(16) is a shift, and for height 20 the bottleneck has moved
+## 6cb: nextInt(16) is a shift, and a funnel stage I misread
 
 Two more files from the collaborator, `rng.cuh` and `speeeed.cu`.
 
@@ -5234,14 +5234,29 @@ Measured, target 20 (split 8+12, storing the beginning side at min 12):
   - joins scale as **8.96e-10 x chains x seeds** (17,330 joins from 9,668 chains and 2e9 seeds)
   - about 55% of joins land inside the border and become candidates
 
-Put those together and `--max-candidates`, default 4,000,000, is reached at
-`chains x seeds = 8.1e15`. A balanced 18-hour run would be **118x past that**. Even a 20-minute
-table and a few hours of streaming saturates it.
+I first read those into a claim that `--max-candidates` now binds and that the bottleneck had
+moved off chain production. **That was wrong, and it was wrong because I never checked what the
+cap counts.** It is not in-border pairs: `CANDIDATES` is appended only after carve, soil, ocean
+and the noise gate have every one of them passed. The same measured run says so plainly —
 
-**So the enumerator has moved the bottleneck.** Pass 1 was the expensive half; it is now minutes,
-and the run is limited by how many candidates can be held and verified. The lever that matters
-for height 20 is `--max-candidates` and the verification behind it, not chain production — which
-is worth knowing before spending another day making pass 1 faster.
+```
+  2e9 seeds, 9,668 chains
+  -> 17,330 joins -> 17,214 solved -> 9,511 in border -> 6 past carve -> 0 ocean -> 0 noise
+```
+
+— **zero candidates out of 17,330 joins.** The default 4,000,000 is nowhere near binding, and a
+run has to manufacture joins in enormous quantity before terrain yields even one. So joins remain
+the currency, pass 1 speed still matters, and the balanced split still applies:
+
+```
+  joins = 0.813 x t1 x t2      (seconds, from the three constants above)
+```
+
+maximised at `t1 = t2`. For 18 hours that is `--enum-lows=16384` — 5.7 h and 1.38M chains —
+against roughly 4.5e11 streamed seeds, leaving about 3 h of the streaming half for the lift.
+
+The lesson is the cheap one, learned twice now: a number called "candidates" in a funnel with six
+stages needs its stage identified before anything is reasoned from it.
 
 ### A trap in --no-grow that this exposed
 
