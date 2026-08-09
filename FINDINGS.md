@@ -4822,3 +4822,48 @@ against one taken at a different sister count (6bn), and now a run height agains
 height at a different block. Each time the mistake produced a *positive* result, and each time it
 survived until something external contradicted it — here, a logged line that could not be true.
 The logging added in 6bs is what caught the bug 6bs introduced.
+
+## 6bv: --no-grow, and a batch size that is already right
+
+### Skipping pass 1
+
+Once the table is large the marginal chain is worth much less than the streaming time spent making
+it: joins go as `|table| x streamed`, so with the table fixed, joins go as streamed alone. The
+2026-08-08 run gave 8,940 s of its 20,394 s -- 44% -- to growing 1.8M chains into 4.9M.
+
+`--no-grow` skips pass 1 and streams against the table as it stands. Measured against the 4.9M
+table: **442 positions from 400M seeds in 44 s**, all of it streaming.
+
+It broke twice before it worked, both times the same way. Skipping the thread-creation loop leaves
+`pool[]` and `collected[]` full of nulls, and every downstream loop over them is a separate
+dereference; guarding the first found the second. The fix is to fill `collected` with empty
+results so a skipped pass 1 is a no-op rather than a special case. Both failures survived a
+"verification" that read the banner line and then let a timeout kill the run before it reached the
+crash -- the banner prints before the code that fails. `NoGrowTest` now drives a whole run with
+the flag and checks the table is unchanged afterwards.
+
+### Bigger lift batches are worse, which the model got backwards
+
+Each kernel call costs ~375 ms of CUDA start-up and only one thread holds the card, so 10.4M joins
+at 200,000 a batch looked like 52 spawns and ~19.5 s of serialised overhead. Raising the batch
+should have recovered most of that. Measured on identical seeds:
+
+```
+  --lift-batch=200000    69.7 s
+  --lift-batch=1000000   83.7 s
+```
+
+**Slower.** The overlap matters more than the fixed cost: while one thread runs the kernel the
+other 23 keep collecting, and a larger batch means the card idles longer while they fill it and
+then blocks everyone on one long call. Small batches keep it fed. 200,000 stays the default and
+`--lift-batch` exists for tuning rather than because it wants raising.
+
+The model that predicted otherwise also claimed the lift alone would take 148 s inside a 44 s run,
+which should have been the tell: the arithmetic assumed serial execution of work that overlaps.
+
+### Confirming against the target rather than the prediction
+
+A find was reported when `grown >= predicted`, and `predicted` is `runA + runB`, which is always at
+least the target. So a candidate predicting 18 that grew 17 was filed as a failure -- discarding
+exactly the runs worth having. The bar is the target height now. It has cost nothing yet, because
+nothing has grown past 8, and it would have cost the first success.

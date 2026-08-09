@@ -303,15 +303,21 @@ public final class CrossFind {
      * anyway, and serialising here keeps 24 processes from being spawned at once.
      */
     private static final class LiftBatch {
-        /** ~2.8 s of kernel work, so the fixed start-up is under 15% of the call. */
-        private static final int CAP = 200_000;
+        /**
+         * Pairs per kernel call. Each call costs ~375 ms of CUDA start-up whatever its size,
+         * and only one thread holds the card at a time, so that cost is serialised: at 200,000
+         * a ten-million-join run spends 52 spawns, and the other threads cannot lift while any
+         * one of them is happening. Bigger batches trade memory for fewer spawns --
+         * {@code cap * 24 bytes * threads}, so a million costs about 576 MB across 24 threads.
+         */
+        static int cap = 200_000;
         private static final Object GPU_TURN = new Object();
 
         private final dev.drakou111.sugarcane.gen.GpuLift lift;
-        private final long[] d1 = new long[CAP];
-        private final long[] d2 = new long[CAP];
-        private final int[] dx = new int[CAP];
-        private final int[] dz = new int[CAP];
+        private final long[] d1 = new long[cap];
+        private final long[] d2 = new long[cap];
+        private final int[] dx = new int[cap];
+        private final int[] dz = new int[cap];
         private int n;
 
         LiftBatch(dev.drakou111.sugarcane.gen.GpuLift lift) {
@@ -327,7 +333,7 @@ public final class CrossFind {
         }
 
         boolean full() {
-            return n == CAP;
+            return n == d1.length;
         }
 
         void flush(int minA, int minB, int sisters, ChainPrefilter endA, ChainPrefilter beginB,
@@ -451,6 +457,8 @@ public final class CrossFind {
                 water = true;
             } else if (arg.startsWith("--max-shift=")) {
                 maxBaseShift = Integer.parseInt(arg.substring(12));
+            } else if (arg.startsWith("--lift-batch=")) {
+                LiftBatch.cap = Integer.parseInt(arg.substring(13));
             } else if (arg.equals("--no-grow")) {
                 noGrow = true;
             } else if (arg.equals("--floor")) {
@@ -581,7 +589,7 @@ public final class CrossFind {
         final dev.drakou111.sugarcane.gen.GpuLift gpuLift = forceCpu ? null
                 : dev.drakou111.sugarcane.gen.GpuLift.detect();
         if (gpuLift != null) {
-            System.out.println("  lifting on the GPU too, in batches of " + LiftBatch.CAP);
+            System.out.println("  lifting on the GPU too, in batches of " + LiftBatch.cap);
         }
         if (gpu != null) {
             System.out.printf("  scanning on the GPU (%s); the CPU re-derives geometry for "
@@ -617,7 +625,17 @@ public final class CrossFind {
                     accepted1.length, seeds, 100.0 * accepted1.length / seeds);
         }
         Thread[] pool = new Thread[threads];
-        for (int t = 0; skipPass1 ? false : t < threads; t++) {
+        if (skipPass1) {
+            // Empty results rather than nulls. Skipping the thread creation left both this
+            // array and the pool full of nulls, and every downstream loop over them is a
+            // separate NullPointerException waiting to be guarded one at a time -- two of them
+            // found the hard way. Filling it once makes the whole of pass 1 a no-op instead of
+            // a special case.
+            for (int t = 0; t < threads; t++) {
+                collected[t] = new Hits();
+            }
+        }
+        for (int t = 0; !skipPass1 && t < threads; t++) {
             final int id = t;
             final int cap = maxStore;
             pool[t] = new Thread(() -> {
@@ -653,8 +671,13 @@ public final class CrossFind {
             }, "crossfind-collect-" + t);
             pool[t].start();
         }
-        for (Thread th : pool) {
-            th.join();
+        // Only the threads that were actually started. Guarding the creation loop and not this
+        // one left the array full of nulls and --no-grow died here on its first real run; the
+        // check that "verified" it only read the banner line before a timeout killed it.
+        if (!skipPass1) {
+            for (Thread th : pool) {
+                th.join();
+            }
         }
 
         long fresh = 0;
@@ -1055,7 +1078,11 @@ public final class CrossFind {
                             recordCrossChunk(c, grown, alone, grownBase);
                         }
                     }
-                    if (grown < c.predicted) {
+                    // The bar is the height being hunted, not the chain's own prediction.
+                    // predicted is minA + minB or more, so it is always at least target, and
+                    // testing against it throws away exactly the runs worth having: a candidate
+                    // predicting 18 that grows 17 was being filed as a failure.
+                    if (grown < target) {
                         // First column that has no cane, over chain A then chain B in the order
                         // they must be built.
                         String where = null;
@@ -1074,7 +1101,7 @@ public final class CrossFind {
                         stopped.computeIfAbsent(where == null ? "every column grew, run short"
                                 : where, k -> new AtomicLong()).incrementAndGet();
                     }
-                    if (grown < c.predicted) {
+                    if (grown < target) {
                         // The world did not provide. Which part of it did not is the whole
                         // question, so read the base back rather than only counting the miss.
                         // The chunk is decorated by now, but a base that never got cane still
@@ -1104,7 +1131,7 @@ public final class CrossFind {
                         continue;
                     }
                     found.incrementAndGet();
-                    recordFind(c, grown);
+                    recordFind(c, grown);   // grown >= target, whatever the chain predicted
                     synchronized (CrossFind.class) {
                         System.out.printf("%nCONFIRMED height %d at %d,%d,%d%n",
                                 grown, c.px, c.baseY, c.pz);
