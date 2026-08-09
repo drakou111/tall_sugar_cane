@@ -41,6 +41,7 @@ public final class CrossMerge {
 
         CrossTable.Header shape = null;
         List<CrossTable.Range> ranges = new ArrayList<>();
+        List<CrossTable.EnumSweep> sweeps = new ArrayList<>();
         List<long[]> pairs = new ArrayList<>();
         long rawEntries = 0;
 
@@ -66,6 +67,13 @@ public final class CrossMerge {
                     dup > 0 ? String.format("  (%d samples overlap what is already merged)", dup)
                             : "");
             ranges.addAll(loaded.header().ranges());
+            // Carried through rather than dropped: a sweep is how somebody covered their k,
+            // and losing it would hand the next contributor ground already worked.
+            sweeps.addAll(loaded.header().enumSweeps());
+            if (!loaded.header().enumSweeps().isEmpty()) {
+                System.out.printf("    plus %d enum sweep(s) over %d states%n",
+                        loaded.header().enumSweeps().size(), loaded.header().enumStates());
+            }
             for (int k = 0; k < loaded.keys().length; k++) {
                 pairs.add(new long[] {loaded.keys()[k], loaded.seeds()[k]});
             }
@@ -92,7 +100,7 @@ public final class CrossMerge {
         }
 
         CrossTable.Header merged = new CrossTable.Header(shape.storeEndings(), shape.storedMin(),
-                shape.count(), shape.featureIndex(), ranges);
+                shape.count(), shape.featureIndex(), ranges, sweeps);
         CrossTable.save(out, merged, keys, seeds, n);
         System.out.printf("%nwrote %s: %d chains (%d before dedupe), %d range(s) covering "
                         + "%d samples%n",
@@ -109,5 +117,16 @@ public final class CrossMerge {
                     rawEntries - n);
         }
         System.out.printf("  next unclaimed start is --sample-from=%d%n", merged.nextFrom());
+        // Per shape, because lows and the y band decide what a k covers -- one number across
+        // sweeps that swept differently would send somebody over ground already done.
+        java.util.LinkedHashSet<String> shown = new java.util.LinkedHashSet<>();
+        for (CrossTable.EnumSweep e : sweeps) {
+            String line = String.format(
+                    "  next unclaimed k for --enum-lows=%d --enum-y=%d:%d is --enum-from=%d",
+                    e.lows(), e.minY(), e.maxY(), merged.nextEnumFrom(e));
+            if (shown.add(line)) {
+                System.out.println(line);
+            }
+        }
     }
 }

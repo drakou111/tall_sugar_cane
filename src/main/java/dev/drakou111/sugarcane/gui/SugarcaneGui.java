@@ -663,6 +663,29 @@ public final class SugarcaneGui {
                 + "people are building one table: starting everyone at 0 has them rediscover "
                 + "the same chains, and duplicates inflate the table without adding a join. "
                 + "Pool the results in the crossmerge tab");
+        JCheckBox useEnum = f.check("--enum", "fill pass 1 by CONSTRUCTING the RNG states that "
+                + "yield a wanted y, instead of scanning decoration seeds hoping to find one. "
+                + "415 confirmed chains/s at height 10 against roughly 107 for the scan -- and "
+                + "more importantly every chain it returns is real, where a third of the scan's "
+                + "are, which compounds because joins go as the SQUARE of the table size. "
+                + "Pass 1 only, that being the rarer and dearer side. Needs a GPU");
+        JTextField enumLows = f.text("--enum-lows", "", "blank for 8. How many of the 131,072 "
+                + "low-bit values to sample. This is the coverage knob and the reason --enum is "
+                + "a sample rather than a sweep: k and the y band are covered in full, but the "
+                + "default sees only 6.1e-5 of the band. Raising it costs time linearly and "
+                + "finds proportionally more, and sweeps NEST -- a wider one redoes everything "
+                + "a narrower one did");
+        JTextField enumY = f.text("--enum-y", "", "blank for 16:36. The ANCHOR invocation's y, "
+                + "not the chain's base, so it wants to be wider than the base band -- a chain "
+                + "rooted at 13 has anchors at 13, 17, 21. At the default, 85% of enumerated "
+                + "seeds survive the stored side's geometry filter. Widening costs time "
+                + "linearly in the number of y values");
+        JTextField enumFrom = f.text("--enum-from", "", "where this run's slice of k starts. "
+                + "Blank continues past whatever sweeps of the SAME shape --table already "
+                + "holds -- a different --enum-lows or --enum-y is different ground and gets "
+                + "its own cursor");
+        JTextField enumK = f.text("--enum-k", "", "how many k to sweep; blank takes all that "
+                + "is left. The whole range is 17,043,521");
         return new Tab(f.panel, () -> {
             List<String> a = new ArrayList<>(List.of("crossfind",
                     req(seeds, "seeds"), req(threads, "threads"), req(target, "targetHeight")));
@@ -706,6 +729,16 @@ public final class SugarcaneGui {
             addIf(a, "--table=", tableFile);
             addIf(a, "--out=", outFile);
             addIf(a, "--sample-from=", sampleFrom);
+            // Any of the enum knobs implies --enum on the command line, but the checkbox is
+            // what the user reads as "is this on". Sending a knob without the box ticked would
+            // silently switch modes, so the box has to be the thing that decides.
+            if (useEnum.isSelected()) {
+                a.add("--enum");
+                addIf(a, "--enum-lows=", enumLows);
+                addIf(a, "--enum-y=", enumY);
+                addIf(a, "--enum-from=", enumFrom);
+                addIf(a, "--enum-k=", enumK);
+            }
             return a;
         });
     }

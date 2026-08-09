@@ -481,6 +481,17 @@ public final class CrossFind {
         int candidateCap = DEFAULT_MAX_CANDIDATES;
         boolean water = false;
         boolean floor = false;
+        boolean useEnum = false;
+        int enumLows = 8;
+        // The anchor invocation's y, not the chain's base: a chain rooted at 13 has anchors at
+        // 13, 17, 21... so this band is wider than the base band the stored side filters on.
+        // 16..36 is what the pass-through was measured with -- 84.9% of enumerated seeds
+        // survive the ending filter, 94.2% the beginning one -- so widening it is a knob, not
+        // a fix, and it costs time linearly in the number of y values.
+        int enumMinY = 16;
+        int enumMaxY = 36;
+        long enumFrom = -1L;
+        long enumK = -1L;
         for (String arg : rawArgs) {
             if (arg.startsWith("--sisters=")) {
                 sisterCount = Integer.parseInt(arg.substring(10));
@@ -516,7 +527,36 @@ public final class CrossFind {
                     System.err.println("--sample-from must be >= 0, got " + sampleFrom);
                     return;
                 }
+            } else if (arg.equals("--enum")) {
+                useEnum = true;
+            } else if (arg.startsWith("--enum-lows=")) {
+                enumLows = Integer.parseInt(arg.substring(12));
+                useEnum = true;
+            } else if (arg.startsWith("--enum-y=")) {
+                String[] band = arg.substring(9).split(":");
+                if (band.length != 2) {
+                    System.err.println("--enum-y wants min:max, got " + arg.substring(9));
+                    return;
+                }
+                enumMinY = Integer.parseInt(band[0]);
+                enumMaxY = Integer.parseInt(band[1]);
+                useEnum = true;
+            } else if (arg.startsWith("--enum-from=")) {
+                enumFrom = Long.parseLong(arg.substring(12));
+                useEnum = true;
+            } else if (arg.startsWith("--enum-k=")) {
+                enumK = Long.parseLong(arg.substring(9));
+                useEnum = true;
             }
+        }
+        if (useEnum && (enumLows <= 0 || (1 << 17) % enumLows != 0)) {
+            System.err.println("--enum-lows must be a power of two up to 131072, got " + enumLows);
+            return;
+        }
+        if (useEnum && (enumMinY > enumMaxY || enumMinY < 0 || enumMaxY > 125)) {
+            System.err.println("--enum-y must be a band inside 0:125, got "
+                    + enumMinY + ":" + enumMaxY);
+            return;
         }
         if (dx == 0 && dz == 0) {
             System.err.println("--dx and --dz cannot both be zero: that is one chunk, not two");
@@ -610,7 +650,10 @@ public final class CrossFind {
             long dup = CrossTable.overlap(
                     java.util.List.of(new CrossTable.Range(scanFrom, seeds)),
                     prior.header().ranges());
-            if (dup > 0) {
+            if (dup > 0 && useEnum) {
+                System.out.printf("  warning: %d of those samples have already been streamed "
+                        + "against this table, so that much of pass 2 is repeated work%n", dup);
+            } else if (dup > 0) {
                 System.out.printf("  warning: %d of those samples are already in the table, "
                         + "so that much of pass 1 is redone and its chains stored twice%n", dup);
             }
@@ -627,6 +670,17 @@ public final class CrossFind {
         // side and 2e-2 on the streamed one.
         dev.drakou111.sugarcane.gen.GpuChainFilter gpu = forceCpu ? null
                 : dev.drakou111.sugarcane.gen.GpuChainFilter.detect();
+        // Pass 1 only. It is the rarer, more expensive side by construction (storedMin is the
+        // taller of the two minimums), which is exactly where constructing states beats
+        // scanning for them -- and pass 2's minimum is low enough that the scan is already
+        // cheap and abundant there.
+        dev.drakou111.sugarcane.gen.GpuStackEnum enumerator = !useEnum ? null
+                : dev.drakou111.sugarcane.gen.GpuStackEnum.detect();
+        if (useEnum && enumerator == null) {
+            System.err.println("--enum needs the state enumerator: "
+                    + dev.drakou111.sugarcane.gen.GpuStackEnum.lastFailure());
+            return;
+        }
         final dev.drakou111.sugarcane.gen.GpuLift gpuLift = forceCpu ? null
                 : dev.drakou111.sugarcane.gen.GpuLift.detect();
         if (gpuLift != null) {
@@ -658,13 +712,64 @@ public final class CrossFind {
             System.out.printf("  --no-grow: skipping pass 1, streaming against the %d chains "
                     + "already in the table%n", prior.keys().length);
         }
-        final long[] accepted1 = (gpu == null || skipPass1) ? null
-                : gpuEpoch(gpu, storedMin, storeEndings, scanFrom, seeds);
-        final AtomicLong cursor1 = new AtomicLong();
-        if (accepted1 != null) {
+        // Where this run's k slice starts, on the same rules as the sample slice: named wins,
+        // then past whatever sweeps of this exact shape the table already holds, then 0. Only
+        // sweeps of the same shape count, because lows and the y band decide what a k covers.
+        final CrossTable.EnumSweep sweepShape =
+                new CrossTable.EnumSweep(0, 0, enumLows, enumMinY, enumMaxY);
+        final long kFrom = !useEnum ? 0
+                : enumFrom >= 0 ? enumFrom
+                : prior != null ? prior.header().nextEnumFrom(sweepShape) : 0;
+        final long kCount = !useEnum ? 0
+                : Math.max(0, Math.min(enumK >= 0 ? enumK : Long.MAX_VALUE,
+                        dev.drakou111.sugarcane.gen.GpuStackEnum.K_LIMIT - kFrom));
+        if (useEnum && kCount == 0) {
+            System.err.printf("nothing left to enumerate: k starts at %d and the limit is %d. "
+                    + "Raise --enum-lows for more coverage of the same k, or pass "
+                    + "--enum-from=0 to sweep it again.%n",
+                    kFrom, dev.drakou111.sugarcane.gen.GpuStackEnum.K_LIMIT);
+            return;
+        }
+
+        final long[] accepted1;
+        if (skipPass1) {
+            accepted1 = null;
+        } else if (enumerator != null) {
+            System.out.printf("  pass 1: enumerating states, k [%d, %d) of %d, lows %d, "
+                            + "anchor y %d..%d -- %d states%n",
+                    kFrom, kFrom + kCount, dev.drakou111.sugarcane.gen.GpuStackEnum.K_LIMIT,
+                    enumLows, enumMinY, enumMaxY,
+                    new CrossTable.EnumSweep(kFrom, kCount, enumLows, enumMinY, enumMaxY)
+                            .states());
+            // edgeOnly, and it costs no coverage here. A column both chunks can reach sits at
+            // x in [12,19] relative to A when B is at dx=+1, [-4,3] when dx=-1, and likewise on
+            // z -- every direction puts at least one coordinate outside [4,11], and the
+            // kernel's test is an OR. It trims 43% of the work and no cross-chunk candidate.
+            java.util.List<dev.drakou111.sugarcane.gen.GpuStackEnum.Hit> hits =
+                    enumerator.sweep(kFrom, kCount, enumMinY, enumMaxY, storedMin,
+                            true, enumLows);
+            // One chain can be reached from every height-4 column in it, so the same seed comes
+            // back more than once. Measured at about 2%, but collectOne would store its
+            // geometry twice over and the table would carry the duplicate into every join.
+            java.util.LinkedHashSet<Long> distinct = new java.util.LinkedHashSet<>();
+            for (dev.drakou111.sugarcane.gen.GpuStackEnum.Hit h : hits) {
+                distinct.add(h.decorationSeed());
+            }
+            accepted1 = new long[distinct.size()];
+            int at = 0;
+            for (long ds : distinct) {
+                accepted1[at++] = ds;
+            }
+            System.out.printf("  pass 1: %d confirmed chains, %d distinct seeds%n",
+                    hits.size(), accepted1.length);
+        } else if (gpu == null) {
+            accepted1 = null;
+        } else {
+            accepted1 = gpuEpoch(gpu, storedMin, storeEndings, scanFrom, seeds);
             System.out.printf("  pass 1: the kernel kept %d of %d seeds (%.4f%%)%n",
                     accepted1.length, seeds, 100.0 * accepted1.length / seeds);
         }
+        final AtomicLong cursor1 = new AtomicLong();
         Thread[] pool = new Thread[threads];
         if (skipPass1) {
             // Empty results rather than nulls. Skipping the thread creation left both this
@@ -755,15 +860,31 @@ public final class CrossFind {
                 }
             }
             java.util.List<CrossTable.Range> ranges = new java.util.ArrayList<>();
+            java.util.List<CrossTable.EnumSweep> sweeps = new java.util.ArrayList<>();
             if (prior != null) {
                 ranges.addAll(prior.header().ranges());
+                sweeps.addAll(prior.header().enumSweeps());
             }
+            // The sample range records the slice pass 2 streamed, which it does in either
+            // mode; under --enum the chains came from the sweep instead, so both are recorded
+            // and neither is added to the other. Mixing them would make covered() a number
+            // that means nothing, and covered() is what collaborators split ground by.
             ranges.add(new CrossTable.Range(scanFrom, seeds));
+            if (useEnum) {
+                sweeps.add(new CrossTable.EnumSweep(kFrom, kCount, enumLows,
+                        enumMinY, enumMaxY));
+            }
             CrossTable.Header written = new CrossTable.Header(storeEndings, storedMin,
-                    SugarCaneFeature.COUNT_DEFAULT, OCEAN_INDEX, ranges);
+                    SugarCaneFeature.COUNT_DEFAULT, OCEAN_INDEX, ranges, sweeps);
             CrossTable.save(table, written, flatKeys, flatSeeds, at2);
             System.out.printf("  wrote %d chains to %s, now %d range(s) covering %d samples%n",
                     at2, table, ranges.size(), written.covered());
+            if (!sweeps.isEmpty()) {
+                System.out.printf("  plus %d enum sweep(s) over %d states; next unclaimed k "
+                                + "for these settings is --enum-from=%d%n",
+                        sweeps.size(), written.enumStates(),
+                        written.nextEnumFrom(sweepShape));
+            }
         }
         if (total == 0) {
             System.out.println("  nothing to join against, so nothing to search");

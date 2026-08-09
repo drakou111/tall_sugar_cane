@@ -5052,3 +5052,68 @@ what pass 1 produces, so the join and lift downstream should take them unchanged
 expectation, not a measurement, and nothing here has been run end to end. A full sweep at
 `lows=8` finds **0** chains of 16 in 20 s; reaching 16 means raising `lows`, and the yield curve
 per full sweep (4,706 at 10, 136 at 12, 1 at 14, 0 at 16) is what to extrapolate from.
+
+## 6bz: the enumerator is wired into crossfind, and it is 2.2x where it counts
+
+`--enum` fills pass 1 from `stack_enum` instead of the seed scan. Pass 1 only, deliberately: it
+is the rarer and dearer side by construction (`storedMin` is the taller of the two minimums),
+and pass 2's minimum is low enough that scanning is already cheap and abundant there.
+
+Head-to-head, same command one flag apart, height 17 split 10+7, 200M streamed:
+
+```
+             pass 1 chains   pass 1 time   chains/s   joins tried   total
+  scan            2,265         21.2 s        107        3,141      50.8 s
+  --enum          1,803          7.6 s        237        3,293      35.4 s
+```
+
+**2.2x on chains stored per second**, which is the currency: joins go as table size times seeds
+streamed. The second number is the more interesting one — a **20% smaller table produced slightly
+more joins**. `edgeOnly` is why: the enumerator only keeps columns a neighbouring chunk's jitter
+can also reach, so its chains land where joins are possible rather than anywhere in the frame.
+One run each, so read the joins as "comparable", not as a measured 1.6x.
+
+### edgeOnly costs no coverage here, which is worth showing rather than asserting
+
+A column both chunks can reach sits at x in [12,19] relative to A when B is at dx=+1, [-4,3] when
+dx=-1, and the same on z. Every one of the eight directions puts at least one coordinate outside
+[4,11], and the kernel's test is an OR. So it trims 43% of the work and not one cross-chunk
+candidate. (It would be lossy for a single-chunk search, which is why it is a flag.)
+
+### The two searches do not agree, and that is the number that decided this was viable
+
+The enumerator returns decoration seeds; `collectOne` then re-derives geometry with
+`ChainPrefilter`, which is a different test. Measured before wiring anything: **84.9%** of
+enumerated seeds survive the ending filter, **94.2%** the beginning one. The loss is the base-y
+band — the enumerator's y is the *anchor* invocation's, and a chain rooted at 13 has anchors at
+13, 17, 21 — so `--enum-y` is wider than the base band and widening it further is a knob, not a
+fix. Had this been 5% rather than 85%, the whole approach would have been dead on arrival.
+
+### Coverage is bookkept separately, because it is not the same space
+
+A sample range names decoration seeds the sampler visited; a sweep names `k` values whose states
+were constructed. Adding a sweep's count into `covered()` would be a straightforwardly false
+number, and `covered()` is what collaborators split ground by. So the table (version 3) carries
+`enumSweeps` alongside `ranges`, and the next free `k` is **per sweep shape** — `lows` and the y
+band decide what one k covers, so a `lows=32` run must not inherit a `lows=8` run's cursor.
+Verified end to end: consecutive runs take k [0,400000) then [400000,800000), while a `lows=32`
+run starts its own at 0.
+
+Version 2 files still load, with no sweeps. Nothing that decides what a key means changed, and
+refusing them would have thrown away the 1.84M chains already in `h17.table` — which was loaded
+under the new code to check.
+
+### What to actually run
+
+Sweeps **nest**: the low-bit sampler multiplies by a fixed odd constant, so `lows=32` visits
+every state `lows=8` did. There is no way to extend coverage incrementally — **pick `lows` up
+front.** The full k range at `lows=8` is ~22 s and about 6,200 chains at height 10, and both
+scale linearly, so `--enum-lows=4096` over the whole of k is roughly **3 hours for ~3.2M
+chains**. That is the overnight shape. Climbing from 8 to 16 to 32 instead would redo everything
+each time.
+
+### Not measured
+
+Whether the precision advantage (every chain real, against a third of the scan's) shows up as
+finds rather than joins. Joins are cheap to count and finds are not; nothing here ran long enough
+to produce one.

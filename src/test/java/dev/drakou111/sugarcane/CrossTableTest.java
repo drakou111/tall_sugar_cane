@@ -40,6 +40,81 @@ class CrossTableTest {
         assertEquals(64 + 2048, back.header().nextFrom());
     }
 
+    /**
+     * Enum coverage is a separate list from the sample ranges, and has to stay separate.
+     *
+     * <p>The two index different things — a sample range names decoration seeds visited, a sweep
+     * names k values whose states were constructed — so adding a sweep's count into
+     * {@code covered()} would produce a number that means nothing, and {@code covered()} is what
+     * collaborators split ground by.
+     */
+    @Test
+    void enumSweepsRoundTripAndStayOutOfTheSampleCount(@TempDir Path dir) throws IOException {
+        Path file = dir.resolve("e.bin");
+        List<CrossTable.EnumSweep> sweeps = List.of(
+                new CrossTable.EnumSweep(0, 400_000, 8, 16, 36),
+                new CrossTable.EnumSweep(400_000, 400_000, 8, 16, 36),
+                new CrossTable.EnumSweep(0, 100_000, 32, 16, 36));
+        CrossTable.Header h = new CrossTable.Header(true, 10, 10, 5,
+                List.of(new CrossTable.Range(0, 2048)), sweeps);
+        CrossTable.save(file, h, new int[] {7}, new long[] {9L}, 1);
+
+        CrossTable.Loaded back = CrossTable.load(file, null);
+        assertEquals(List.copyOf(sweeps), List.copyOf(back.header().enumSweeps()));
+        assertEquals(2048, back.header().covered(),
+                "a sweep is not a sample range and must not be counted as one");
+        assertEquals(800_000L * 8 * 21 + 100_000L * 32 * 21, back.header().enumStates());
+    }
+
+    /**
+     * The next free k is per sweep shape. {@code lows} and the y band decide what one k covers,
+     * so handing a lows=32 run the cursor a lows=8 run left would send it over ground that
+     * settings has not touched — and, because sweeps nest, quietly skip states nobody has done.
+     */
+    @Test
+    void theNextEnumStartIsPerShape() {
+        CrossTable.Header h = new CrossTable.Header(true, 10, 10, 5, List.of(), List.of(
+                new CrossTable.EnumSweep(0, 400_000, 8, 16, 36),
+                new CrossTable.EnumSweep(400_000, 400_000, 8, 16, 36),
+                new CrossTable.EnumSweep(0, 100_000, 32, 16, 36)));
+        assertEquals(800_000, h.nextEnumFrom(new CrossTable.EnumSweep(0, 0, 8, 16, 36)));
+        assertEquals(100_000, h.nextEnumFrom(new CrossTable.EnumSweep(0, 0, 32, 16, 36)));
+        assertEquals(0, h.nextEnumFrom(new CrossTable.EnumSweep(0, 0, 8, 13, 40)),
+                "a different y band is different ground and starts fresh");
+    }
+
+    /**
+     * Version 2 files must still load. Version 3 only appended the sweeps; nothing that decides
+     * what a key means changed, so refusing them would throw away real work — including the
+     * 1.8M-chain table this project has already accumulated.
+     */
+    @Test
+    void aVersionTwoTableStillLoads(@TempDir Path dir) throws IOException {
+        Path file = dir.resolve("v2.bin");
+        try (java.io.DataOutputStream out = new java.io.DataOutputStream(
+                Files.newOutputStream(file))) {
+            out.writeInt(0x58434846);       // "XCHF"
+            out.writeInt(2);
+            out.writeBoolean(false);
+            out.writeInt(10);               // storedMin
+            out.writeInt(10);               // count
+            out.writeInt(5);                // featureIndex
+            out.writeInt(1);                // one range
+            out.writeLong(64);
+            out.writeLong(2048);
+            out.writeInt(2);                // two entries, and NO sweep block
+            out.writeInt(11);
+            out.writeLong(22L);
+            out.writeInt(33);
+            out.writeLong(44L);
+        }
+        CrossTable.Loaded back = CrossTable.load(file, null);
+        assertArrayEquals(new int[] {11, 33}, back.keys());
+        assertArrayEquals(new long[] {22L, 44L}, back.seeds());
+        assertTrue(back.header().enumSweeps().isEmpty());
+        assertEquals(2048, back.header().covered());
+    }
+
     /** A missing file is a first run, not an error, so nothing needs a special case. */
     @Test
     void anAbsentTableIsNull(@TempDir Path dir) throws IOException {
