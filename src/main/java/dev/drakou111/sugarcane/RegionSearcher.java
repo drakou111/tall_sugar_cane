@@ -87,6 +87,27 @@ public final class RegionSearcher {
      * a spot definition that turned out stricter than the game's.
      */
     static boolean allBiomes = false;
+    /**
+     * Restrict the tally to desert chunks that border ocean.
+     *
+     * <p>5c concluded desert targeting is worthless from a whole-biome tally, and the mechanism
+     * agrees for desert's interior: {@code maxRun} needs water beside the block under EVERY
+     * column's base, so a stack wants a tall water face, and only the ocean carvers cut one.
+     * Above sea level there is no water at all, so open sand cannot stack however much of it
+     * there is.
+     *
+     * <p>What that argument does not cover is the shoreline. Carvers are registered per biome
+     * but they walk across chunk boundaries, so an UNDERWATER_CANYON started in an ocean chunk
+     * carves into the desert beside it -- ocean geometry in a chunk that still decorates with
+     * desert's 60 invocations. Whole-biome tallies drown that case: desert chunks bordering
+     * ocean are a per-cent or so of all desert, and the 5c sample had 38 hits in total.
+     */
+    static boolean shoreDesert = false;
+
+    /** Desert, desert_hills and desert_lakes -- the count-60 family. */
+    private static boolean desertFamily(int biome) {
+        return BiomeCaneConfig.count(biome) == 60;
+    }
 
     /**
      * "--spawn": centre each seed's search box on that world's spawn chunk instead
@@ -155,6 +176,23 @@ public final class RegionSearcher {
                 || biome == 10 || biome == 50;
     }
 
+    /** Whether any chunk within {@code reach} of this one is ocean. */
+    private static boolean oceanWithin(kaptainwutax.biomeutils.source.OverworldBiomeSource biomes,
+            int cx, int cz, int reach) {
+        for (int dx = -reach; dx <= reach; dx++) {
+            for (int dz = -reach; dz <= reach; dz++) {
+                if (dx == 0 && dz == 0) {
+                    continue;
+                }
+                if (isSearchableOcean(BiomeIds.noiseGen(biomes,
+                        (cx + dx) * 4 + 2, (cz + dz) * 4 + 2))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     public static void main(String[] args) throws InterruptedException {
         long firstSeed = args.length > 0 ? Long.parseLong(args[0]) : 1L;
         // 0, negative, or absent all mean "keep going". firstSeed + 0 would otherwise
@@ -171,6 +209,10 @@ public final class RegionSearcher {
         final int probeTrials = args.length > 5 && args[5].startsWith("probe:")
                 ? Integer.parseInt(args[5].substring("probe:".length())) : 0;
         allBiomes = args.length > 5 && args[5].equals("diag-all");
+        shoreDesert = args.length > 5 && args[5].equals("diag-shore");
+        if (shoreDesert) {
+            allBiomes = true;       // the biome gate below is replaced, not added to
+        }
         // Flags rather than positions, so they can sit anywhere after the mode slot.
         long updateMs = DEFAULT_UPDATE_MS;
         for (String arg : args) {
@@ -686,8 +728,16 @@ public final class RegionSearcher {
                 for (int lz = 0; lz < region; lz++) {
                     int cx = chunkX0 + lx, cz = chunkZ0 + lz;
                     int biome = BiomeIds.noiseGen(biomes, cx * 4 + 2, cz * 4 + 2);
-                    if ((allBiomes || isSearchableOcean(biome))
-                            && BiomeCaneConfig.hasSugarCane(biome)) {
+                    boolean wanted;
+                    if (shoreDesert) {
+                        // Desert that has ocean within two chunks: far enough for a carver
+                        // that started over water to have reached here, near enough that the
+                        // chunk is genuinely shoreline rather than merely in the same region.
+                        wanted = desertFamily(biome) && oceanWithin(biomes, cx, cz, 2);
+                    } else {
+                        wanted = allBiomes || isSearchableOcean(biome);
+                    }
+                    if (wanted && BiomeCaneConfig.hasSugarCane(biome)) {
                         candidate[regionIndex(lx, lz)] = true;
                         any = true;
                     }

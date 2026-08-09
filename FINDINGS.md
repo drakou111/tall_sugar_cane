@@ -5265,3 +5265,82 @@ next run's start comes from `nextFrom()` over those ranges. **Repeated `--no-gro
 stream the identical sample slice every time.** It is consistent with the flag's contract (it must
 not claim ground it did not cover) but it means a streaming campaign has to pass `--sample-from`
 explicitly, or spend every night redoing the first one.
+
+## 6cc: desert shorelines look ~150x better than open ocean, and 5c could not have seen it
+
+A collaborator asked, again, about deserts. 5c says "desert targeting is worthless". That
+conclusion does not survive contact with two things it never separated: **which** desert chunks,
+and **how tall** a chain.
+
+### The mechanism kills desert's interior, not its coastline
+
+`maxRun` needs `hasWaterBeside` at the block under **every** column's base, not just the bottom
+one. So a stack wants a tall water face, and only `addOceanCarvers`' `UNDERWATER_CAVE` and
+`UNDERWATER_CANYON` cut one. Above sea level there is no water at all, so open sand cannot stack
+however much of it there is. 5c's mechanism argument is right, and it is why interior desert is
+hopeless.
+
+But **carvers are registered per biome and then walk across chunk boundaries.** A canyon that
+starts over ocean carves into the desert beside it — ocean geometry in a chunk that still
+decorates with desert's 60 invocations. Whole-biome tallies drown that case, and 5c's sample was
+38 hits in total.
+
+### Measured, same 60 seeds and radius 128 for both
+
+```
+                      chunks    stackable   R (chunks permitting)   mean soil y
+  ocean (searchable)  857,000      734          7.407e-4               23.9
+  desert bordering    19,274         9          3.632e-4               34.6
+    ocean (<=2 chunks)
+  desert, whole biome 61,204         1          1.6e-5                  --
+```
+
+Shoreline desert is **29x the whole-desert rate** and only **2x below ocean**. No contradiction
+with 5c: its ~25,000 land chunks held perhaps 250 shoreline ones, so it expected 0.1 hits and saw
+0.
+
+### The invocation bonus is combinatorial, and that is the whole argument
+
+5c priced desert's 60 invocations at "30x better P". That is right for a short chain and badly
+wrong for a long one, because the bonus is `C(60,C)/C(10,C)` in the column count. Measured on
+`ChainPrefilter` over 20M seeds each:
+
+```
+   height   columns   q(count=10)   q(count=60)   ratio    C(60,C)/C(10,C)
+      8        2        1.92e-3       7.27e-2      37.9x        39.3x
+     10        3        1.02e-5       3.14e-3     307.6x       285x
+     12        3        2.50e-7       7.64e-5     305.6x       285x
+```
+
+The combinatorial form is confirmed at two and three columns, so extrapolating it to four
+(**2,322x**) and five (**21,672x**) is a short step rather than a guess.
+
+### The product
+
+Per chunk searched, desert shoreline against open ocean:
+
+```
+  height 12 (3 columns)   0.49 x   306  =    150x     (both terms measured)
+  height 16 (4 columns)   0.49 x 2,322  =  1,139x     (q extrapolated)
+  height 20 (5 columns)   0.49 x 21,672 = 10,600x     (q extrapolated)
+```
+
+Shoreline chunks are 44x rarer than ocean, and finding them costs a biome pass over everything —
+`diag-shore` searched 4,576 chunks/s against ocean's 18,853, so 4.1x more wall time per chunk
+actually generated. Netting that off still leaves **~37x at height 12 and ~280x at height 16 per
+unit of wall clock**, and none of it needs cross-chunk stacking.
+
+### What is not established
+
+Nine stackable spots is a thin sample: Poisson puts R somewhere in 2.1e-4 to 8.9e-4, so the
+terrain term is 0.28x to 1.2x rather than 0.49x. It does not change the sign — q dominates by two
+to four orders of magnitude — but the multipliers above are the middle of a wide band.
+
+The q extrapolation past three columns is unmeasured, and `ChainPrefilter`'s four shift levels cap
+a chain at four columns, so height 17+ needs a fifth level and the count-60 numbers there have not
+been taken at all.
+
+**One thing to fix before running this.** Desert-shore spots sit at mean soil y **34.6** against
+ocean's 23.9, and `DEFAULT_BASE_MAX_Y` is **35** — the band was tuned on ocean and clips almost
+exactly where these spots live. Any desert run wants it raised, or it will reject most of what it
+came for.
