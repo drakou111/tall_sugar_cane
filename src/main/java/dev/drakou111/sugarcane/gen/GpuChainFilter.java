@@ -57,6 +57,16 @@ public final class GpuChainFilter {
     /** Unpacked once per JVM; null once unpacking has been tried and failed. */
     private static Path unpacked;
     private static boolean unpackTried;
+    /**
+     * Why unpacking failed, or null if it did not.
+     *
+     * <p>Kept separately because {@link #detect} used to overwrite whatever reason this
+     * produced with a flat "none bundled inside it". The jar carries the kernel, so that
+     * message sent a user looking for a missing file when what had actually happened was a
+     * write that antivirus or a lock refused — the one detail that would have explained it,
+     * discarded on the way out.
+     */
+    private static String bundleFailure;
 
     private static synchronized Path bundled() {
         if (unpackTried) {
@@ -66,6 +76,7 @@ public final class GpuChainFilter {
         try (java.io.InputStream in =
                      GpuChainFilter.class.getResourceAsStream(BUNDLED_RESOURCE)) {
             if (in == null) {
+                bundleFailure = "the jar carries no " + BUNDLED_RESOURCE;
                 return null;
             }
             boolean windows = System.getProperty("os.name", "").toLowerCase().contains("win");
@@ -94,7 +105,9 @@ public final class GpuChainFilter {
             exe.toFile().setExecutable(true);
             unpacked = exe;
         } catch (IOException e) {
-            lastFailure = "could not unpack the bundled kernel: " + e.getMessage();
+            bundleFailure = "could not unpack the bundled kernel: " + e
+                    + " (it is in the jar; this is a write that failed, so check antivirus "
+                    + "and whether an earlier run left the file locked)";
         }
         return unpacked;
     }
@@ -184,7 +197,8 @@ public final class GpuChainFilter {
             }
         }
         if (!sawBinary) {
-            lastFailure = "no CUDA binary: none beside the jar, and none bundled inside it";
+            lastFailure = bundleFailure != null ? bundleFailure
+                    : "no CUDA binary: none beside the jar, and none bundled inside it";
         }
         return null;
     }

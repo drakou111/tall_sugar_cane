@@ -440,7 +440,10 @@ int main(int argc, char **argv) {
         fprintf(stderr, "stack_enum: no usable CUDA device\n");
         return 3;
     }
-    unsigned int cap = 1u << 20;
+    /* 4M hits is 96 MB on the device and covers a lows=16384 sweep at height 12 with room to
+     * spare. The host halves its k range and retries on overflow anyway, so this only decides
+     * how often that costs an extra launch. */
+    unsigned int cap = argc > 9 ? (unsigned int) strtoul(argv[9], nullptr, 10) : (4u << 20);
     Hit *dOut = nullptr;
     unsigned int *dCount = nullptr;
     cudaMalloc(&dOut, sizeof(Hit) * (size_t) cap);
@@ -464,6 +467,10 @@ int main(int argc, char **argv) {
 
     unsigned int n = 0;
     cudaMemcpy(&n, dCount, sizeof(unsigned int), cudaMemcpyDeviceToHost);
+    /* The atomic counted every hit, including the ones there was no room to store. Report that
+     * number rather than the clamped one: the host sizes its retry from it, and "hits = the cap"
+     * tells it nothing except that the cap was reached. */
+    unsigned int wanted = n;
     bool overflowed = n > cap;
     if (overflowed) {
         n = cap;
@@ -490,7 +497,7 @@ int main(int argc, char **argv) {
         }
     }
     fprintf(stderr, "enumerated=%llu states=%llu hits=%u%s\n", kCount,
-            kCount * lows * (unsigned long long) (maxY - minY + 1), n,
+            kCount * lows * (unsigned long long) (maxY - minY + 1), wanted,
             overflowed ? " (OVERFLOWED, results dropped)" : "");
     // Overflow drops hits silently, which looks exactly like a barren sweep. Same reasoning as
     // two_chunk_lift's exit 4: a short list must not be mistaken for a complete one.

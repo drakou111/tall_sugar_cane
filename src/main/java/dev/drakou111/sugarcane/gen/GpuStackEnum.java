@@ -119,6 +119,48 @@ public final class GpuStackEnum {
         if (lows <= 0 || (1 << 17) % lows != 0) {
             throw new IllegalArgumentException("lows must be a power of two up to 131072: " + lows);
         }
+        List<Hit> all = new ArrayList<>();
+        sweepInto(all, kFrom, kCount, minY, maxY, target, edgeOnly, lows);
+        return all;
+    }
+
+    /**
+     * Runs one sweep, halving the k range and retrying if the device buffer overflowed.
+     *
+     * <p>How many hits a sweep produces depends on the target, the y band and {@code lows}, and
+     * spans several orders of magnitude across them — a height-12 sweep at {@code lows=16384}
+     * makes about 1.4M where the default 8 makes 675. A fixed buffer therefore cannot be right
+     * for every call, and the failure it produced was a hard error mid-run after minutes of
+     * work, on exactly the settings a long campaign wants.
+     *
+     * <p>Hits scale with the k range, so halving it halves them and the recursion terminates.
+     * The device cap is generous enough that this normally never fires; when it does it costs
+     * one extra launch, against losing the run.
+     */
+    private void sweepInto(List<Hit> out, long kFrom, long kCount, int minY, int maxY,
+            int target, boolean edgeOnly, int lows) throws IOException, InterruptedException {
+        try {
+            out.addAll(runSweep(kFrom, kCount, minY, maxY, target, edgeOnly, lows));
+        } catch (Overflowed e) {
+            if (kCount <= 1) {
+                throw new IOException("a single k overflowed the device buffer at target "
+                        + target + ", lows " + lows + "; nothing left to split", e);
+            }
+            long half = kCount / 2;
+            sweepInto(out, kFrom, half, minY, maxY, target, edgeOnly, lows);
+            sweepInto(out, kFrom + half, kCount - half, minY, maxY, target, edgeOnly, lows);
+        }
+    }
+
+    /** The device wrote more hits than it had room for, so this batch is short and unusable. */
+    private static final class Overflowed extends IOException {
+        Overflowed(String message) {
+            super(message);
+        }
+    }
+
+    private List<Hit> runSweep(long kFrom, long kCount, int minY, int maxY, int target,
+            boolean edgeOnly, int lows) throws IOException, InterruptedException {
         Path out = Files.createTempFile("stackenum-", ".bin");
         try {
             ProcessBuilder pb = new ProcessBuilder(binary.toString(),
@@ -131,10 +173,14 @@ public final class GpuStackEnum {
             String complaint = new String(proc.getErrorStream().readAllBytes(),
                     StandardCharsets.UTF_8).trim();
             int rc = proc.waitFor();
+            if (rc == 4) {
+                // The buffer overflowed and hits were dropped. Never silently accept the short
+                // list — it looks exactly like a barren sweep — but this one is recoverable by
+                // splitting, so it gets its own type rather than ending the run.
+                throw new Overflowed("stack_enum overflowed on k [" + kFrom + ", "
+                        + (kFrom + kCount) + "): " + complaint);
+            }
             if (rc != 0) {
-                // Exit 4 is the output buffer overflowing, which drops hits. A short list would
-                // look exactly like a barren sweep, so it has to be an error rather than a
-                // quietly truncated result.
                 throw new IOException("stack_enum exited " + rc + ": " + complaint);
             }
             ByteBuffer bb = ByteBuffer.wrap(Files.readAllBytes(out)).order(ByteOrder.LITTLE_ENDIAN);
