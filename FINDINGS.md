@@ -5508,3 +5508,44 @@ exploit it and is slow, `reverse` is fast and cannot. The thing that would resol
 stretched there. `stack_enum` could: it holds no candidate list, and its contribution table at
 60 invocations is 3 bits x 119 slots = six registers rather than 38 KB of local memory. That is
 the piece of work this points at, and it is not a small one.
+
+### 6ce addendum: the gate measured, and what --desert is actually worth
+
+A height-12 `--desert` run reported "220 of 2,890,624 were searchable ocean (0.0%)", which would
+be a 51x-worse gate coming out 80x worse again. It is a display artefact, not a desert one: the
+denominator counts `solvedHere` while the loop that increments the numerator runs over the
+already-filtered `kept`. The ratio has always been wrong; ocean runs just never made it look
+alarming.
+
+Measured directly instead, fresh biome source per seed and scattered lookups, the way the reverse
+search asks it:
+
+```
+                        searchable ocean   desert   desert bordering ocean   ratio
+  chunks near origin        26.12%         5.28%         0.5125%             51x
+  scattered +-2e6 chunks    31.29%         5.60%         0.6100%             51x
+```
+
+**51x**, stable near and far. So the earlier ~44x estimate was right and the run did not
+contradict it.
+
+### What that makes --desert worth
+
+```
+                                targets/s    gate     net vs ocean
+  ocean, on the kernel             0.66      28%        1x
+  desert, on the CPU               1.43      0.6%       0.047x   (21x worse)
+  desert, on a count-60 kernel   ~200        0.6%       6.5x
+```
+
+Desert produces targets **2.2x faster on one CPU than ocean does on the GPU** — the count-60
+bonus really is that large. It then hands all of it back, and 20x more, at a biome gate it cannot
+steer. **`reverse --desert` as it stands is about 21x worse than ocean.**
+
+It only turns positive with a count-60 chain filter on the GPU, and then only ~6.5x — not the
+1,139x, because that number belongs to `search`, which picks its chunks, and `search` is the
+vehicle `reverse` is ~95x faster than.
+
+**So: shipped, measured, and not recommended in its current form.** The flag is there because the
+measurement was worth having and because it becomes the right tool the moment a count-60 kernel
+exists. Anyone running it today should know it is a 21x handicap.
