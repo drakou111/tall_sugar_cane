@@ -59,6 +59,12 @@ class AirCarveGuardTest {
                     .water((x, y, z) -> y >= 0 && y < ArrayWorld.HEIGHT
                             && Blocks.isWaterFluid(w.noiseAt(x, y, z)));
             noise.walk(seed, cx, cz, true);
+            // The same probe restricted to one column, which is how crossfind runs it. Only
+            // spheres containing a column can carve it, so this must agree with the full-chunk
+            // answer exactly -- it is an optimisation, not a second approximation.
+            AirCarveProbe targeted = new AirCarveProbe().ravinesOnly(ravinesOnly)
+                    .water((x, y, z) -> y >= 0 && y < ArrayWorld.HEIGHT
+                            && Blocks.isWaterFluid(w.noiseAt(x, y, z)));
 
             for (int x = cx * 16; x < cx * 16 + 16; x++) {
                 for (int z = cz * 16; z < cz * 16 + 16; z++) {
@@ -67,6 +73,16 @@ class AirCarveGuardTest {
                     for (int y = 11; y < 63; y++) {
                         boolean s = stub.isCarved(x, y, z);
                         boolean n = noise.isCarved(x, y, z);
+                        if (y == 30) {          // one column-targeted spot check per column
+                            targeted.guardColumn(x, z);
+                            targeted.walk(seed, cx, cz, true);
+                            for (int ty = 11; ty < 63; ty++) {
+                                if (noise.isCarved(x, ty, z) != targeted.isCarved(x, ty, z)) {
+                                    throw new AssertionError("targeted guard disagrees with the "
+                                            + "full one at " + x + "," + ty + "," + z);
+                                }
+                            }
+                        }
                         if (world.getBlock(x, y, z) == Blocks.AIR) {
                             air++;
                             if (s) stubAir++;

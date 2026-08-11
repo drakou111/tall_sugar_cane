@@ -51,6 +51,22 @@ public abstract class Carver {
         /** True if a water fluid sits here; carving aborts near water. */
         boolean isWater(int x, int y, int z);
 
+        /**
+         * Whether this sphere's water guard is worth asking about, in chunk-local bounds.
+         *
+         * <p>For a caller that only wants to know about one column, the answer for every other
+         * sphere is irrelevant and skipping it is exact rather than approximate: a sphere carves
+         * only inside its own box, so a sphere that does not contain the column can neither
+         * carve it nor set its mask, and whether that sphere aborted is invisible there. Saying
+         * "no water" for it lets it carve blocks the caller is not asking about, which changes
+         * nothing it will read.
+         *
+         * <p>Default true, which is every caller that wants the whole chunk.
+         */
+        default boolean guardApplies(int x0, int x1, int z0, int z1) {
+            return true;
+        }
+
         boolean isAir(int x, int y, int z);
 
         void setCaveAir(int x, int y, int z);
@@ -243,7 +259,7 @@ public abstract class Carver {
      * volume test: interior columns only check the floor and ceiling.
      */
     private boolean hasWater(int x0, int x1, int y0, int y1, int z0, int z1) {
-        if (!waterGuard()) {
+        if (!waterGuard() || !target.guardApplies(x0, x1, z0, z1)) {
             return false;
         }
         for (int lx = x0; lx < x1; lx++) {

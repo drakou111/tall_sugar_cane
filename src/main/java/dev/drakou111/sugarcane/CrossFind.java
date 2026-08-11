@@ -1817,6 +1817,9 @@ public final class CrossFind {
     private static boolean exactlyCarved(RegionSearcher.Worker worker, long full,
             int px, int pz, long ca, long cb) {
         AirCarveProbe p = exactProbe(worker);
+        // Every base of both chains stands in the same column, so one targeted walk answers
+        // all of them and the guard reads the columns around one sphere instead of the chunk.
+        p.guardColumn(px, pz);
         p.walk(full, px >> 4, pz >> 4, true);
         int na = ChainPrefilter.chainColumns(ca);
         for (int c = 0; c < na; c++) {

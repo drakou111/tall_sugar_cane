@@ -70,6 +70,15 @@ public final class AirCarveProbe {
         }
 
         @Override
+        public boolean guardApplies(int x0, int x1, int z0, int z1) {
+            if (guardLocalX < 0) {
+                return true;            // asking about the whole chunk
+            }
+            return x0 <= guardLocalX && guardLocalX < x1
+                    && z0 <= guardLocalZ && guardLocalZ < z1;
+        }
+
+        @Override
         public void setWater(int x, int y, int z, boolean scheduleTick) {
             // An air carver never reaches this; a liquid one is not run here.
         }
@@ -91,6 +100,30 @@ public final class AirCarveProbe {
     }
 
     private WaterOracle water;
+    private int guardLocalX = -1;
+    private int guardLocalZ = -1;
+
+    /**
+     * Ask the guard about one column only, which is what makes it affordable.
+     *
+     * <p>The guard is the expensive half: the walk is 74 us and filling a chunk's 256 noise
+     * columns behind it is another 618. A sphere can only carve inside its own box, so for a
+     * caller that reads one column the other spheres' guards cannot change the answer — see
+     * {@link Carver.Target#guardApplies}. Restricting to them reads the columns around one
+     * sphere instead of the chunk.
+     *
+     * <p>Pass -1, -1 to go back to answering for the whole chunk.
+     */
+    public AirCarveProbe guardColumn(int x, int z) {
+        int lx = x < 0 ? -1 : (x & 15);
+        int lz = x < 0 ? -1 : (z & 15);
+        if (lx != guardLocalX || lz != guardLocalZ) {
+            guardLocalX = lx;
+            guardLocalZ = lz;
+            this.walked = false;
+        }
+        return this;
+    }
 
     /** @param oracle null to keep the terrain-free stub */
     public AirCarveProbe water(WaterOracle oracle) {

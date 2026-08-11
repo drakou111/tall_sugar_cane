@@ -5692,6 +5692,28 @@ measured over all blocks in a chunk became 2.4x over blocks that four earlier fi
 kept. Nothing was wrong with either measurement; they answer different questions, and only the
 second one predicts a run.
 
-Getting past it means evaluating the guard for the spheres that touch the block rather than
-blanketing the chunk — the stub walk finds them for 74 us, and it is the 618 us of columns behind
-it that costs. Unbuilt.
+### The per-sphere narrowing, built, and it does not rescue it
+
+Only spheres whose box contains a column can carve it or set its mask, so evaluating the guard for
+those alone is **exact rather than approximate** — every other sphere's abort is invisible there.
+`Carver.Target.guardApplies` and `AirCarveProbe.guardColumn` do that, and `AirCarveGuardTest` pins
+the targeted answer against the full-chunk one block for block.
+
+It buys almost nothing:
+
+```
+  generation 1,699 us   stub walk 53 us
+  guard, whole chunk   608 us   0.36x generation
+  guard, one column    538 us   0.32x generation
+```
+
+**12% off the guard, and nothing measurable end to end** — 13,212 generations to 5,580 again, at
+150.4 s against 157.0 s. The spheres over a single column still span most of the chunk, so most of
+the 256 columns get read anyway. The model said 1.36x per candidate; the run says 4.4% the wrong
+way, because in situ the noise cache is dropped every sister and nothing is reused.
+
+**So this direction is spent.** Three measurements — 307x at block level, 2.4x on generations, and
+break-even on the clock — all correct, and only the last one is about a run. The flag stays
+opt-in, sound and tested, for the terrain-dominated regime it was built for; no regime has yet
+been measured where it actually wins. The cost floor is the chunk's 256 noise columns at ~2.4 us
+each, and nothing that still asks the carvers a real question gets under it.
