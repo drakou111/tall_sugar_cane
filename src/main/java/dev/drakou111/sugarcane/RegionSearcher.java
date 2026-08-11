@@ -569,6 +569,7 @@ public final class RegionSearcher {
         /** Prepares this worker for a seed without searching anything yet. */
         void prepare(long seed) {
             this.seed = seed;
+            noiseChunkValid = false;
             this.biomes = new OverworldBiomeSource(MCVersion.v1_16_1, seed);
             dev.drakou111.sugarcane.gen.LayerCaches.enlarge(this.biomes);
             this.terrain = new Terrain(biomes);
@@ -641,6 +642,11 @@ public final class RegionSearcher {
          */
         void prepareBiomesOnly(long seed) {
             this.seed = seed;
+            // The noise moves with the seed, and this is the call the sister sweep makes --
+            // 4,096 times per solved pair. Leaving the cache alone here would answer every
+            // sister from the first one's terrain, which is exactly the kind of wrong that
+            // still looks like it works.
+            noiseChunkValid = false;
             this.biomes = new OverworldBiomeSource(MCVersion.v1_16_1, seed);
             // Deliberately NOT enlarged. The bigger layer caches are worth 1.07x to the box
             // scan, where one biome source serves ~1,400 neighbouring chunks and the caches
@@ -708,19 +714,41 @@ public final class RegionSearcher {
                 return Blocks.AIR;
             }
             ensureTerrain();
-            if (!noiseCached || noiseCacheX != x || noiseCacheZ != z) {
-                terrain.column(x, z, noiseProbeColumn);
-                noiseCacheX = x;
-                noiseCacheZ = z;
-                noiseCached = true;
+            // A whole chunk of columns, not one.
+            //
+            // Carver.hasWater takes chunk-local bounds -- it reads lx + chunkX*16 -- so the
+            // guard never leaves the 256 columns of the chunk being carved. Caching a single
+            // column made the sphere's shell walk recompute constantly and cost 2,285 us a
+            // chunk against a 66 us walk, which is what made the noise-backed probe slower
+            // than the generation it was meant to replace.
+            int cx = x >> 4, cz = z >> 4;
+            if (!noiseChunkValid || noiseChunkX != cx || noiseChunkZ != cz) {
+                noiseChunkX = cx;
+                noiseChunkZ = cz;
+                noiseChunkValid = true;
+                java.util.Arrays.fill(noiseColumnFilled, false);
             }
-            return noiseProbeColumn[y];
+            int slot = (x & 15) | ((z & 15) << 4);
+            if (!noiseColumnFilled[slot]) {
+                terrain.column(x, z, noiseProbeColumn);
+                System.arraycopy(noiseProbeColumn, 0, noiseChunkColumns,
+                        slot * ArrayWorld.HEIGHT, ArrayWorld.HEIGHT);
+                noiseColumnFilled[slot] = true;
+            }
+            return noiseChunkColumns[slot * ArrayWorld.HEIGHT + y];
+        }
+
+        /** Dropped when the seed changes, since the noise moves with it. */
+        void clearNoiseCache() {
+            noiseChunkValid = false;
         }
 
         private final byte[] noiseProbeColumn = new byte[ArrayWorld.HEIGHT];
-        private int noiseCacheX;
-        private int noiseCacheZ;
-        private boolean noiseCached;
+        private final byte[] noiseChunkColumns = new byte[256 * ArrayWorld.HEIGHT];
+        private final boolean[] noiseColumnFilled = new boolean[256];
+        private int noiseChunkX;
+        private int noiseChunkZ;
+        private boolean noiseChunkValid;
 
         void searchOneChunk(int chunkX, int chunkZ) {
             ensureTerrain();

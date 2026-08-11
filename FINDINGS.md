@@ -5662,10 +5662,36 @@ column cache, instead of blanketing the chunk. On the run's numbers — 41,742 c
 per-block guard can be brought under ~200 us. That is a refactor of the carve path, not a flag,
 and it is unbuilt.
 
-### What is committed
+### Shipped as --exact-carve, off by default
 
-The `WaterOracle` hook and the test. The hook is unused by any search: supplying an oracle makes
-the walk depend on terrain and therefore on the sister, and `crossfind` hoists its walk out of the
-sister loop precisely because it does not. Wiring it in needs the per-sphere refactor above — the
-same trap 6cf hit with the soil filter, and the reason this entry stops at "sound and measured"
-rather than "shipped".
+The cost problem above was one line: `noiseAt` cached a single column while `hasWater` walks a
+sphere's shell across many x,z. `Carver.hasWater` takes chunk-local bounds, so the guard never
+leaves the chunk's 256 columns — caching those instead took the walk from **2,351 us to 692 us**,
+against a 1,992 us generation. It also needed invalidating in `prepareBiomesOnly`, the call the
+sister sweep makes 4,096 times a pair; without that every sister would have been answered from
+the first one's terrain, which is the kind of wrong that still looks like it works.
+
+Wired into the sister loop — it cannot sit beside `allCarved`, which is hoisted out because it is
+sister-invariant and this is not. On the same 2e9-seed slice against the same table:
+
+```
+              terrain generations   joins   wall
+  loose            13,191           8,973   218.3 s
+  --exact-carve     5,577           8,973   228.5 s
+```
+
+**2.4x fewer generations, 4.7% more wall clock.** Both numbers are right and the second is why it
+is a flag. The 2.4x rather than 307x is expected: a candidate arriving here has already passed the
+stub probe, the biome gate and the noise check, so the only population left is the BLOCKED one —
+57.7% removed against the 58.6% those runs were losing. And the guard fills a chunk of noise
+columns per sister where a generation pays once, so it costs about what it saves. It wins only
+where terrain dominates the run.
+
+**The block-level ratio was not the run-level one, and the difference is the whole lesson.** 307x
+measured over all blocks in a chunk became 2.4x over blocks that four earlier filters had already
+kept. Nothing was wrong with either measurement; they answer different questions, and only the
+second one predicts a run.
+
+Getting past it means evaluating the guard for the spheres that touch the block rather than
+blanketing the chunk — the stub walk finds them for 74 us, and it is the 618 us of columns behind
+it that costs. Unbuilt.

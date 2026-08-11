@@ -663,6 +663,16 @@ public final class SugarcaneGui {
                 + "people are building one table: starting everyone at 0 has them rediscover "
                 + "the same chains, and duplicates inflate the table without adding a join. "
                 + "Pool the results in the crossmerge tab");
+        JCheckBox exactCarve = f.check("--exact-carve", "answer the AIR carvers' water guard "
+                + "from the noise instead of stubbing it to false. Those carvers are the only "
+                + "source of air below sea level and are exactly the ones that run the guard, so "
+                + "stubbed out a ravine carves through water the real one stops at -- which is "
+                + "why 58.6% of candidates die at chunk A's first column with the base not air. "
+                + "Measured against generated terrain over 332,800 blocks: loses no block the "
+                + "loose probe kept, cuts false positives 4,914 to 16. OFF by default because it "
+                + "costs about what it saves -- 2.4x fewer chunk generations but 4.7% more wall "
+                + "clock on the same slice. Worth it when terrain dominates the run (a large "
+                + "--table), not when streaming does");
         JCheckBox useEnum = f.check("--enum", "fill pass 1 by CONSTRUCTING the RNG states that "
                 + "yield a wanted y, instead of scanning decoration seeds hoping to find one. "
                 + "621 chains stored per second at height 10 against the scan's 94 -- and "
@@ -732,6 +742,9 @@ public final class SugarcaneGui {
             // Any of the enum knobs implies --enum on the command line, but the checkbox is
             // what the user reads as "is this on". Sending a knob without the box ticked would
             // silently switch modes, so the box has to be the thing that decides.
+            if (exactCarve.isSelected()) {
+                a.add("--exact-carve");
+            }
             if (useEnum.isSelected()) {
                 a.add("--enum");
                 addIf(a, "--enum-lows=", enumLows);

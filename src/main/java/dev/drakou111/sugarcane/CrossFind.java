@@ -1,5 +1,6 @@
 package dev.drakou111.sugarcane;
 
+import dev.drakou111.sugarcane.world.Blocks;
 import dev.drakou111.sugarcane.gen.AirCarveProbe;
 import dev.drakou111.sugarcane.gen.BiomeCaneConfig;
 import dev.drakou111.sugarcane.gen.BiomeIds;
@@ -481,6 +482,7 @@ public final class CrossFind {
         int candidateCap = DEFAULT_MAX_CANDIDATES;
         boolean water = false;
         boolean floor = false;
+        boolean exactCarveFlag = false;
         boolean useEnum = false;
         int enumLows = 8;
         // The anchor invocation's y, not the chain's base: a chain rooted at 13 has anchors at
@@ -527,6 +529,8 @@ public final class CrossFind {
                     System.err.println("--sample-from must be >= 0, got " + sampleFrom);
                     return;
                 }
+            } else if (arg.equals("--exact-carve")) {
+                exactCarveFlag = true;
             } else if (arg.equals("--enum")) {
                 useEnum = true;
             } else if (arg.startsWith("--enum-lows=")) {
@@ -579,6 +583,7 @@ public final class CrossFind {
         final boolean useFloor = floor;
         final int sisters = sisterCount;
         final int maxCandidates = candidateCap;
+        exactCarve = exactCarveFlag;
 
         System.out.printf("cross-chunk SEARCH for height %d, %d seeds, %d threads%n",
                 target, seeds, threads);
@@ -1661,6 +1666,14 @@ public final class CrossFind {
                             continue;
                         }
                         solidNoise.incrementAndGet();
+                        // The same question the sister-invariant probe answered with a stub,
+                        // asked again now that this sister's noise is known and the carvers'
+                        // water guard can actually fire. 6cg measured it as sound and 307x
+                        // more selective; it is here rather than beside allCarved because the
+                        // answer moves with the sister and that one does not.
+                        if (exactCarve && !exactlyCarved(worker, full, px, pz, ca, cb)) {
+                            continue;
+                        }
                         // NOT a find. The carve probe only says a carver's walk reached these
                         // blocks, which is a necessary condition and nothing more -- the
                         // finished world can still be solid stone there, and was for the first
@@ -1748,6 +1761,76 @@ public final class CrossFind {
         return gpu.run(minHeight, SugarCaneFeature.COUNT_DEFAULT, OCEAN_INDEX,
                 baseMinY, baseMaxY, 3, 4, Integer.MAX_VALUE,
                 ChainPrefilter.DEFAULT_SHIFT_LEVELS, -1, -1, from, count);
+    }
+
+    /**
+     * Whether the AIR carvers' water guard is answered from the noise instead of stubbed out.
+     *
+     * <p>6cg: {@code waterGuard()} is {@code !underwater}, and the AIR-step carvers are the only
+     * source of air below sea level, so the carvers that matter are exactly the ones that run it.
+     * With {@code isWater} stubbed false a ravine carves straight through water the real one
+     * stops at, which is why 58.6% of this command's candidates used to die at chunk A's first
+     * column with the base not air. Measured against generated terrain over 332,800 blocks: it
+     * loses no block the stub kept, and cuts false positives 4,914 to 16.
+     *
+     * <p><b>Off by default, because the block-level ratio is not the run-level one.</b> By the
+     * time a candidate reaches here it has already passed the stub probe, the biome gate and
+     * the noise check, so the only population left to remove is the BLOCKED one: measured
+     * 13,191 terrain generations down to 5,577, a 2.4x cut that matches the 58.6% those runs
+     * were losing at chunk A's first column. But the walk costs about what it saves -- 218.3 s
+     * against 228.5 s on the same slice, 4.7% the wrong way -- because the guard fills a
+     * chunk's 256 noise columns per sister where a generation would have paid once. It wins
+     * only where terrain dominates a run, so it is a flag and not a default.
+     *
+     * <p>Getting past that means evaluating the guard for the spheres that touch the block
+     * rather than blanketing the chunk: the stub walk already finds them for 74 us, and it is
+     * the 618 us of columns behind it that costs.
+     */
+    private static boolean exactCarve = false;
+
+    /**
+     * The probe that reads the noise, one per thread.
+     *
+     * <p>Per thread because it memoises its walk on (seed, chunk) and the sister sweep asks about
+     * one chunk at a time, and because the oracle binds to that thread's worker. Deliberately not
+     * the {@code probe} passed around beside it: that one is walked once per solved seed because
+     * it is sister-invariant, and this one cannot be — the noise moves with the upper 16 bits.
+     */
+    private static final ThreadLocal<AirCarveProbe> EXACT_PROBE = new ThreadLocal<>();
+
+    private static AirCarveProbe exactProbe(RegionSearcher.Worker worker) {
+        AirCarveProbe p = EXACT_PROBE.get();
+        if (p == null) {
+            p = new AirCarveProbe().ravinesOnly(true)
+                    .water((x, y, z) -> Blocks.isWaterFluid(worker.noiseAt(x, y, z)));
+            EXACT_PROBE.set(p);
+        }
+        return p;
+    }
+
+    /**
+     * Every column base of both chains, against the carvers as they really run for this sister.
+     *
+     * <p>Costs a walk — 692 us against the 1,992 us chunk generation it saves, and it rejects
+     * about 98% of what reaches it.
+     */
+    private static boolean exactlyCarved(RegionSearcher.Worker worker, long full,
+            int px, int pz, long ca, long cb) {
+        AirCarveProbe p = exactProbe(worker);
+        p.walk(full, px >> 4, pz >> 4, true);
+        int na = ChainPrefilter.chainColumns(ca);
+        for (int c = 0; c < na; c++) {
+            if (!p.isCarved(px, ChainPrefilter.chainBaseY(ca, c), pz)) {
+                return false;
+            }
+        }
+        int nb = ChainPrefilter.chainColumns(cb);
+        for (int c = 0; c < nb; c++) {
+            if (!p.isCarved(px, ChainPrefilter.chainBaseY(cb, c), pz)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** Every column base of both chains sits in a block the noise made solid. */
