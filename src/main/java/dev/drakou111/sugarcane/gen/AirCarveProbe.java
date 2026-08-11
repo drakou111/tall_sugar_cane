@@ -44,7 +44,17 @@ public final class AirCarveProbe {
 
         @Override
         public boolean isWater(int x, int y, int z) {
-            return false;       // never aborts a sphere on the water guard
+            // With no oracle this is the permissive stub: the guard never fires and the
+            // walk carves a superset, which is what makes the probe terrain-free.
+            //
+            // The guard is not a detail. waterGuard() is !underwater, and the AIR-step
+            // carvers are the ONLY source of air below sea level -- so the carvers that
+            // matter are exactly the ones that run it, and below sea level every non-solid
+            // block is water. Stubbed out, a ravine approaching the ocean floor carves
+            // straight through where the real one aborts sphere after sphere. Backing this
+            // with the noise is the difference between a probe that says "a walk reached
+            // here" and one that says "a carver cut here".
+            return water != null && water.isWater(x, y, z);
         }
 
         @Override
@@ -63,6 +73,30 @@ public final class AirCarveProbe {
         public void setWater(int x, int y, int z, boolean scheduleTick) {
             // An air carver never reaches this; a liquid one is not run here.
         }
+    }
+
+    /**
+     * Where the water is, so the AIR carvers' guard can fire.
+     *
+     * <p>Optional, and null for the reverse search, which has no world seed when it builds
+     * its target set and so cannot answer this at all. {@code crossfind} has one by the time
+     * it asks, which is the whole reason this hook exists.
+     *
+     * <p><b>Supplying one makes the walk depend on the terrain</b>, and therefore on the
+     * sister: the noise moves with the upper 16 bits. A caller that hoists the walk out of a
+     * sister loop must not set this.
+     */
+    public interface WaterOracle {
+        boolean isWater(int x, int y, int z);
+    }
+
+    private WaterOracle water;
+
+    /** @param oracle null to keep the terrain-free stub */
+    public AirCarveProbe water(WaterOracle oracle) {
+        this.water = oracle;
+        this.walked = false;
+        return this;
     }
 
     private final BitSet carved = new BitSet(65536);

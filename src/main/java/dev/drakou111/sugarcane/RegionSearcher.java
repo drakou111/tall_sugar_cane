@@ -695,6 +695,33 @@ public final class RegionSearcher {
 
         private final byte[] noiseColumn = new byte[ArrayWorld.HEIGHT];
 
+        /**
+         * One block of the noise column, before carvers and features.
+         *
+         * <p>What {@link AirCarveProbe}'s water guard needs: below sea level the noise leaves
+         * water wherever it did not leave stone, and that is what makes the AIR carvers abort.
+         * Cached on the last column because the guard walks a sphere's shell and asks for the
+         * same x,z at many y.
+         */
+        byte noiseAt(int x, int y, int z) {
+            if (y < 0 || y >= ArrayWorld.HEIGHT) {
+                return Blocks.AIR;
+            }
+            ensureTerrain();
+            if (!noiseCached || noiseCacheX != x || noiseCacheZ != z) {
+                terrain.column(x, z, noiseProbeColumn);
+                noiseCacheX = x;
+                noiseCacheZ = z;
+                noiseCached = true;
+            }
+            return noiseProbeColumn[y];
+        }
+
+        private final byte[] noiseProbeColumn = new byte[ArrayWorld.HEIGHT];
+        private int noiseCacheX;
+        private int noiseCacheZ;
+        private boolean noiseCached;
+
         void searchOneChunk(int chunkX, int chunkZ) {
             ensureTerrain();
             centreChunkX = chunkX;

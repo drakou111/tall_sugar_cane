@@ -5617,3 +5617,55 @@ changes how many seeds it takes to keep that pipe full. 1.12M chains produce 0.1
 where ~1.7e-4 saturates it, so that table is ~650x oversized and cost 4.2 h of pass 1 for nothing.
 Every sizing rule in 6bz and 6cb assumed joins were the currency. They are not, past the point
 where terrain saturates, and that point is around ten thousand chains.
+
+## 6cg: the BLOCKED 58.6% is the water guard, stubbed out — sound to fix, not yet cheap
+
+6cf found terrain rejecting every candidate at chunk A's first column, 58.6% of them BLOCKED —
+the carve probe saying air where the finished world has stone. The cause is one line.
+
+`Carver.waterGuard()` returns `!underwater`. Air below sea level comes **only** from the AIR-step
+carvers, so the carvers that matter are exactly the ones that run `hasWater` — and below sea level
+every non-solid block is water. `AirCarveProbe`'s stub answers `isWater` with a flat `false`, so
+the guard never fires: a ravine approaching the ocean floor carves straight through where the real
+one aborts sphere after sphere.
+
+That stub is right for the reverse search, which has no world seed when it builds a target set and
+so cannot answer the question at all. `crossfind` has one by the time it asks.
+
+### Measured against generated terrain, 332,800 blocks
+
+```
+                       air accepted      false positives      
+  every carver         3,751 -> 3,751    7,841 -> 749     10.5x tighter
+  ravines only         890 -> 890        4,914 ->  16    307x tighter
+```
+
+**Zero regressions in both modes.** The stub accepts every genuinely-air block (3,751 of 3,751,
+which is its soundness claim confirmed independently), and backing the guard with the noise costs
+none of them. In the ravines-only mode `crossfind` runs, precision goes from **15.3% to 98.2%**.
+`AirCarveGuardTest` pins the zero and the ratio against real chunks, not against the probe's own
+opinion — a tightening that loses finds looks exactly like one that works.
+
+### And it is currently 1.18x slower than what it would replace
+
+```
+  per chunk:  generation 1,988 us   stub walk 66 us   noise-backed walk 2,351 us
+```
+
+The walk is 66 us. The other 2,285 us is noise columns: the guard walks a sphere's shell across
+many x,z and `noiseAt` caches one column, so it recomputes constantly. **As a drop-in it loses.**
+
+The shape that could win is narrower: the stub walk already finds the spheres for 66 us, so
+evaluate the guard only for the spheres that touch the block being asked about, behind a real
+column cache, instead of blanketing the chunk. On the run's numbers — 41,742 candidates at
+1,988 us each — replacing generation for the 98% the guard rejects is worth roughly 8x if a
+per-block guard can be brought under ~200 us. That is a refactor of the carve path, not a flag,
+and it is unbuilt.
+
+### What is committed
+
+The `WaterOracle` hook and the test. The hook is unused by any search: supplying an oracle makes
+the walk depend on terrain and therefore on the sister, and `crossfind` hoists its walk out of the
+sister loop precisely because it does not. Wiring it in needs the per-sphere refactor above — the
+same trap 6cf hit with the soil filter, and the reason this entry stops at "sound and measured"
+rather than "shipped".
