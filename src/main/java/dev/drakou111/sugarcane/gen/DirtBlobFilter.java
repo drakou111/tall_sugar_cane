@@ -106,6 +106,94 @@ public final class DirtBlobFilter {
         return false;
     }
 
+
+    /**
+     * One past the highest motion-blocking block, as the noise leaves it.
+     *
+     * <p>An <em>upper bound</em> on what {@code OreFeature} really tests against, and that is the
+     * whole trick. {@code ArrayWorld} tracks {@code OCEAN_FLOOR_WG} as the world changes, and by
+     * UNDERGROUND_ORES the carvers have run — carving only removes blocks, so the true floor is
+     * at or below the noise's. Reading it off the noise therefore cannot say "bails" about a blob
+     * that really placed.
+     */
+    public interface FloorOracle {
+        int noiseFloorHeight(int x, int z);
+    }
+
+    /**
+     * The same question as {@link #couldSupply}, with the blobs that provably bailed removed
+     * from the enumeration.
+     *
+     * <p>{@code couldSupply} enumerates all 55 offsets a blob could sit at, because at target-set
+     * time there is no world seed and so no way to know how many earlier blobs drew their 33
+     * radii. That is measured at ~37x looser than the truth, and 6cf could not fix it exactly:
+     * the bail reads a heightmap that reflects carving, which needs terrain.
+     *
+     * <p>It can be <em>narrowed</em> soundly. {@code place} bails when its whole box sits above
+     * the floor, and the noise floor is an upper bound on the real one, so {@code minY} above it
+     * means the blob certainly drew no radii. Those blobs stop branching. The rest still branch
+     * both ways, so nothing a real blob could have done is excluded.
+     *
+     * @param floor the noise floor, in world coordinates
+     */
+    public boolean couldSupplyNarrowed(long decorationSeed, int chunkX, int chunkZ,
+            int relX, int soilY, int relZ, FloorOracle floor) {
+        random.setFeatureSeed(decorationSeed, ORE_INDEX, ORE_STEP);
+        for (int i = 0; i < draws.length; i++) {
+            draws[i] = random.nextInt();
+        }
+        return branch(0, 0, chunkX, chunkZ, relX, soilY, relZ, floor);
+    }
+
+    /** Walks blob {@code k} at stream offset {@code base}, branching only where the bail is open. */
+    private boolean branch(int k, int base, int chunkX, int chunkZ,
+            int relX, int soilY, int relZ, FloorOracle floor) {
+        if (k >= BLOBS || base + CALLS_PER_BLOB + CALLS_PER_PLACE >= draws.length) {
+            return false;
+        }
+        int x = bounded(draws[base], 16);
+        int z = bounded(draws[base + 1], 16);
+        int y = bounded(draws[base + 2], 256);
+
+        boolean canReach = Math.abs(x - relX) <= REACH && Math.abs(z - relZ) <= REACH
+                && Math.abs(y - soilY) <= REACH;
+        if (canReach) {
+            if (rejects(draws[base + 4], 3) || rejects(draws[base + 5], 3)) {
+                return true;        // the retry desynchronises the indexing; accept rather than guess
+            }
+            if (covers(base, x, y, z, relX, soilY, relZ)) {
+                return true;
+            }
+        }
+        // Does this blob certainly draw no radii? place() scans its box for any column whose
+        // floor reaches minY, so if none does under the upper bound, none does at all.
+        int spread = ceilOf((float) SIZE / 8.0f);
+        int pad = ceilOf(((float) SIZE / 16.0f * 2.0f + 1.0f) / 2.0f);
+        int minY = y - 2 - pad;
+        int worldX = chunkX * 16 + x, worldZ = chunkZ * 16 + z;
+        int span = 2 * (spread + pad);
+        boolean mayPlace = false;
+        for (int px = worldX - spread - pad; px <= worldX - spread - pad + span && !mayPlace; px++) {
+            for (int pz = worldZ - spread - pad;
+                    pz <= worldZ - spread - pad + span && !mayPlace; pz++) {
+                if (minY <= floor.noiseFloorHeight(px, pz)) {
+                    mayPlace = true;
+                }
+            }
+        }
+        if (!mayPlace) {
+            return branch(k + 1, base + CALLS_PER_BLOB, chunkX, chunkZ, relX, soilY, relZ, floor);
+        }
+        return branch(k + 1, base + CALLS_PER_BLOB, chunkX, chunkZ, relX, soilY, relZ, floor)
+                || branch(k + 1, base + CALLS_PER_BLOB + CALLS_PER_PLACE, chunkX, chunkZ,
+                        relX, soilY, relZ, floor);
+    }
+
+    private static int ceilOf(float f) {
+        int i = (int) f;
+        return f > i ? i + 1 : i;
+    }
+
     /** {@code OreBlob.doPlace}'s spheres, asked whether one contains the block. */
     private boolean covers(int base, int x, int y, int z, int tx, int ty, int tz) {
         float angle = toFloat(draws[base + 3]) * (float) Math.PI;

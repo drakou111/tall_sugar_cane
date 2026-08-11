@@ -1,5 +1,6 @@
 package dev.drakou111.sugarcane;
 
+import dev.drakou111.sugarcane.world.ArrayWorld;
 import dev.drakou111.sugarcane.world.Blocks;
 import dev.drakou111.sugarcane.gen.AirCarveProbe;
 import dev.drakou111.sugarcane.gen.BiomeCaneConfig;
@@ -1814,6 +1815,47 @@ public final class CrossFind {
      * <p>Costs a walk — 692 us against the 1,992 us chunk generation it saves, and it rejects
      * about 98% of what reaches it.
      */
+    /**
+     * The soil question again, with the blobs that provably drew no radii removed.
+     *
+     * <p><b>Not wired in: it does not share the cache after all.</b> The idea was that the carve
+     * guard has just filled this chunk's 256 noise columns, so the floor would be nearly free.
+     * It is not — the soil sweep spans every chunk whose blobs can reach the block, up to four of
+     * them, and {@code noiseAt} caches one chunk at a time, so it thrashes. Measured in place, a
+     * 2e9-seed slice went from 152 s to over 18 minutes without even finishing. Even memoised per
+     * column it needs ~484 columns across neighbouring chunks, which is a generation's worth of
+     * noise to avoid a generation. Kept, with its soundness pinned, because the narrowing itself
+     * is right and only its siting is wrong.
+     *
+     * <p>Mirrors {@code couldHaveSoil}'s sweep over every chunk whose blobs can reach the block
+     * (6bf), so it stays sound the same way: narrowed accepts a subset of loose, and loose
+     * already asks the neighbours.
+     */
+    private static boolean narrowedSoil(RegionSearcher.Worker worker, DirtBlobFilter dirt,
+            DecorationLattice lattice, int px, int soilY, int pz) {
+        DirtBlobFilter.FloorOracle floor = (x, z) -> {
+            for (int y = ArrayWorld.HEIGHT - 1; y >= 0; y--) {
+                if (Blocks.blocksMotion(worker.noiseAt(x, y, z))) {
+                    return y + 1;
+                }
+            }
+            return 0;
+        };
+        int cx0 = Math.floorDiv(px - (16 + DirtBlobFilter.REACH - 1), 16);
+        int cx1 = Math.floorDiv(px + DirtBlobFilter.REACH, 16);
+        int cz0 = Math.floorDiv(pz - (16 + DirtBlobFilter.REACH - 1), 16);
+        int cz1 = Math.floorDiv(pz + DirtBlobFilter.REACH, 16);
+        for (int qcx = cx0; qcx <= cx1; qcx++) {
+            for (int qcz = cz0; qcz <= cz1; qcz++) {
+                if (dirt.couldSupplyNarrowed(lattice.decorationSeedOf(qcx, qcz), qcx, qcz,
+                        px - qcx * 16, soilY, pz - qcz * 16, floor)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private static boolean exactlyCarved(RegionSearcher.Worker worker, long full,
             int px, int pz, long ca, long cb) {
         AirCarveProbe p = exactProbe(worker);

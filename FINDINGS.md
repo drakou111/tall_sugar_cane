@@ -5717,3 +5717,47 @@ break-even on the clock — all correct, and only the last one is about a run. T
 opt-in, sound and tested, for the terrain-dominated regime it was built for; no regime has yet
 been measured where it actually wins. The cost floor is the chunk's 256 noise columns at ~2.4 us
 each, and nothing that still asks the carvers a real question gets under it.
+
+## 6ch: the soil narrowing is sound, 3.6x tighter, and sited wrong
+
+6cf could not fix the soil filter exactly because the blob bail reads `OCEAN_FLOOR_WG`, which
+`ArrayWorld` tracks as the world changes — by UNDERGROUND_ORES it reflects carving, so it needs
+terrain. It can be **narrowed** soundly instead: carving only removes blocks, so the noise floor
+is an upper bound on the real one, and a blob whose box sits above *that* certainly drew no radii.
+Those stop branching; the rest still branch both ways, so nothing a real blob could do is excluded.
+
+Against generated terrain, 25 chunks:
+
+```
+                real dirt accepted   false positives
+  loose              1,426               7,651
+  narrowed           1,426               2,118      3.61x tighter
+```
+
+**Zero regressions**, pinned by `NarrowedSoilTest`. (Loose finding 1,426 of 1,816 real dirt blocks
+is the documented single-chunk coverage loss, not a regression.)
+
+### And it does not pay, for a reason I asserted without checking
+
+The plan was that it would ride the carve gate's noise cache for nearly nothing: the guard has just
+filled this chunk's 256 columns, and the floor comes off the same columns. **That premise is
+false.** The soil sweep spans every chunk whose blobs can reach the block — up to four — and
+`noiseAt` caches one chunk at a time, so it thrashes. Wired in, a 2e9-seed slice went from
+**152 s to over 18 minutes** without finishing; only 3,914 candidates had even been queued where
+the loose run generated 13,178 and completed.
+
+Memoising the floor per column would fix the pathology but not the economics: the check still
+needs ~484 columns across neighbouring chunks, which is a generation's worth of noise to avoid a
+generation. The carve guard escapes this only because `Carver.hasWater` takes chunk-local bounds
+and genuinely never leaves the chunk.
+
+So it is kept and tested but not wired in, and `--exact-carve` is back to what 6cg measured.
+
+### The tally, since this is the fourth of these
+
+Desert (6cd), soil exactness (6cf), carve guard (6cg), soil narrowing (6ch). Every one produced a
+correct, sound, well-measured filter improvement. None of them made a run faster. The pattern is
+the same each time: a large ratio measured on the wrong population, or a cost premise asserted
+rather than measured. What has actually held up all week is that terrain generation is 92% of a
+run at ~2,300 candidates/s, and nothing that still asks the carvers or the blobs a real question
+gets under the cost of the noise columns it takes to ask.
