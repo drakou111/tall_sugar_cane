@@ -5549,3 +5549,71 @@ vehicle `reverse` is ~95x faster than.
 **So: shipped, measured, and not recommended in its current form.** The flag is there because the
 measurement was worth having and because it becomes the right tool the moment a count-60 kernel
 exists. Anyone running it today should know it is a 21x handicap.
+
+## 6cf: the soil gate is 37x loose, and cannot be tightened where it sits
+
+A height-20 run's own diagnostic finally said where everything dies:
+
+```
+  36,288 candidates, 0 survived, tallest cane grown 0
+    A col 0: BLOCKED      21,264   (58.6%)   base not air
+    A col 0: NO_SUPPORT   14,617   (40.3%)   air, but no soil under it
+    A col 0: NO_WATER        407    (1.1%)
+  placeable and the RNG still did not: 0
+  of the 14,617 with no soil: carved away 0, was water 0, was stone the blobs missed 14,617
+```
+
+**Every candidate fails at chunk A's first column.** And the RNG side is exact — whenever terrain
+allows, the game places. 100% of the loss is terrain.
+
+### Where the run's time goes
+
+Per streamed seed, from measured rates:
+
+```
+  GPU chain scan   4.15e7 seeds/s                    24 ns      0.05%
+  GPU lift         70,400 pairs/s x 0.257 joins      3.6 us     7%
+  terrain          2,300 chunks/s x 0.11 candidates  48 us      92%
+```
+
+52 us/seed predicts 19,300 seeds/s against 17,000 observed. **A chunk generation is ~18,000x a
+seed scan**, so once a seed drags any fraction of one behind it the scan rate stops mattering.
+That is why 6ca's kernel work — real, 15x on pass 1 — could not move a run: it optimised 0.05%.
+
+### The gate is loose, measured
+
+200,000 positions in the join band: crossfind's `couldHaveSoil` accepts **8.93%** (single chunk
+7.41%; the REACH sweep adds only 1.5 points, since only 1-2 chunk columns can reach a block —
+an earlier guess that the sweep made it a no-op was wrong). Against the run's 2.7% precision that
+puts the truth near 0.24%, so the gate is **~37x looser than it needs to be**, exactly as its own
+javadoc admits: it enumerates 55 blob-stream offsets because the target-set stage has no world
+seed to pin the real one.
+
+### Why it cannot be fixed there
+
+crossfind *does* know the world seed by then, so the obvious move is to compute the true offset.
+It does not work, for two reasons found only by checking:
+
+  - **The truth is not sister-invariant.** `place` bails on `minY <= oceanFloorHeight`, which is
+    generated terrain, and the sister sweep re-rolls precisely that. The code says so by its own
+    shape: `allCarved` is hoisted out of the sister loop, `noiseHolds` is inside it. So the filter
+    is sister-invariant while the answer is not, and an exact version cannot live where the filter
+    does. The 835x fan-out leverage claimed for this axis was wrong — that argument needs a
+    genuinely sister-invariant predicate.
+  - **Inside the loop it costs more than it saves.** The bail scans each blob's 11x11 box and
+    returns on the first hit; blob y is `nextInt(256)` against an ocean floor near 40-60, so ~80%
+    of blobs bail after scanning all 121 columns. That is ~950 noise columns per chunk against the
+    256 a full generation does — to remove 35% of candidates.
+
+**So the 37x is real and the fix is not.** What remains possible is narrowing rather than exact:
+reuse the per-sister noise column `noiseHolds` already computes, predict the bails from that one
+column, and restrict the 55 offsets to a band with enough slack to stay sound. Capped at ~1.5x,
+and wrong slack loses finds silently.
+
+### The number that should have been measured first
+
+Terrain caps the pipeline at ~2,300 candidates/s **whatever the table size** — a bigger table only
+changes how many seeds it takes to keep that pipe full. 1.12M chains produce 0.11 candidates/seed
+where ~1.7e-4 saturates it, so that table is ~650x oversized and cost 4.2 h of pass 1 for nothing.
+Every sizing rule in 6bz and 6cb assumed joins were the currency. They are not, past the point
+where terrain saturates, and that point is around ten thousand chains.
